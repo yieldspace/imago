@@ -1,0 +1,15 @@
+[package]
+name = "nirvash-lower"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nirvash = { workspace = true }
+nirvash-foundation = { workspace = true }
+nirvash-ir = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

@@ -1,5 +1,7 @@
-use nirvash::{BoundedDomain, RelAtom, RelSet, Signature};
-use nirvash_macros::{nirvash_expr, nirvash_step_expr};
+use nirvash::{RelAtom, RelSet};
+use nirvash_macros::{
+    FiniteModelDomain as FormalFiniteModelDomain, nirvash_expr, nirvash_step_expr,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -7,16 +9,10 @@ enum Phase {
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Item {
     Alpha,
     Beta,
-}
-
-impl Signature for Item {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Alpha, Self::Beta])
-    }
 }
 
 impl RelAtom for Item {}

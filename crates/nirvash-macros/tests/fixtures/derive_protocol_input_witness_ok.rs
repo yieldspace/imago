@@ -1,7 +1,7 @@
-use nirvash::conformance::{ProtocolInputWitnessCodec, WitnessKind};
-use nirvash_macros::{ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, Signature as FormalSignature};
+use nirvash_conformance::{ProtocolInputWitnessCodec, WitnessKind};
+use nirvash_macros::{ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, FiniteModelDomain as FormalFiniteModelDomain};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain, FormalActionVocabulary, Default)]
 enum Action {
     #[default]
     Start,

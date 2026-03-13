@@ -2558,6 +2558,8 @@ dependencies = [
  "imagod-spec-formal",
  "nirvash",
  "nirvash-check",
+ "nirvash-conformance",
+ "nirvash-lower",
  "nirvash-macros",
  "rustls 0.23.37",
  "tokio",
@@ -2599,6 +2601,8 @@ dependencies = [
  "imagod-spec-formal",
  "nirvash",
  "nirvash-check",
+ "nirvash-conformance",
+ "nirvash-lower",
  "nirvash-macros",
  "quinn",
  "rustls 0.23.37",
@@ -2747,6 +2751,8 @@ dependencies = [
  "imagod-spec-formal",
  "nirvash",
  "nirvash-check",
+ "nirvash-conformance",
+ "nirvash-lower",
  "nirvash-macros",
  "quinn",
  "rustls 0.23.37",
@@ -2766,6 +2772,7 @@ version = "0.2.0"
 dependencies = [
  "ciborium",
  "nirvash",
+ "nirvash-lower",
  "nirvash-macros",
  "serde",
  "serde_bytes",
@@ -2780,8 +2787,11 @@ dependencies = [
  "imagod-spec",
  "nirvash",
  "nirvash-check",
+ "nirvash-conformance",
  "nirvash-docgen",
+ "nirvash-lower",
  "nirvash-macros",
+ "nirvash-proof",
 ]
 
 [[package]]
@@ -3441,6 +3451,7 @@ name = "nirvash"
 version = "0.2.0"
 dependencies = [
  "inventory",
+ "nirvash-foundation",
  "serde",
 ]
 
@@ -3449,6 +3460,7 @@ name = "nirvash-backends"
 version = "0.2.0"
 dependencies = [
  "nirvash",
+ "nirvash-lower",
  "serde",
  "serde_json",
  "z3",
@@ -3460,7 +3472,16 @@ version = "0.2.0"
 dependencies = [
  "nirvash",
  "nirvash-backends",
+ "nirvash-lower",
  "nirvash-macros",
+]
+
+[[package]]
+name = "nirvash-conformance"
+version = "0.2.0"
+dependencies = [
+ "nirvash",
+ "nirvash-lower",
 ]
 
 [[package]]
@@ -3477,17 +3498,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "nirvash-foundation"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+]
+
+[[package]]
+name = "nirvash-ir"
+version = "0.2.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "nirvash-lower"
+version = "0.2.0"
+dependencies = [
+ "nirvash",
+ "nirvash-foundation",
+ "nirvash-ir",
+ "serde",
+]
+
+[[package]]
 name = "nirvash-macros"
 version = "0.2.0"
 dependencies = [
  "nirvash",
  "nirvash-check",
+ "nirvash-conformance",
+ "nirvash-lower",
  "proc-macro2",
  "quote",
  "syn",
  "tempfile",
  "tokio",
  "trybuild",
+]
+
+[[package]]
+name = "nirvash-proof"
+version = "0.2.0"
+dependencies = [
+ "nirvash-ir",
 ]
 
 [[package]]

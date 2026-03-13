@@ -1,4 +1,4 @@
-error: #[signature(custom)] cannot be combined with bounds, filter, range, or #[signature_invariant(...)] helpers
+error: #[finite_model_domain(custom)] cannot be combined with bounds, filter, range, or #[finite_model_domain_invariant(...)] helpers
  --> tests/fixtures/derive_signature_custom_with_range.rs:5:8
   |
 5 | struct Counter(u8);

@@ -1,4 +1,5 @@
-use nirvash::{BoolExpr, TransitionProgram, TransitionSystem};
+use nirvash::{BoolExpr, TransitionProgram};
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, subsystem_spec, system_spec};
 
 mod child {
@@ -13,9 +14,13 @@ mod child {
     pub struct ChildSpec;
 
     #[subsystem_spec]
-    impl TransitionSystem for ChildSpec {
+    impl FrontendSpec for ChildSpec {
         type State = ChildState;
         type Action = ChildAction;
+
+        fn frontend_name(&self) -> &'static str {
+            std::any::type_name::<Self>()
+        }
 
         fn initial_states(&self) -> Vec<Self::State> {
             vec![ChildState]
@@ -46,9 +51,13 @@ struct RootAction;
 struct RootSpec;
 
 #[system_spec(subsystems(crate::child::ChildSpec))]
-impl TransitionSystem for RootSpec {
+impl FrontendSpec for RootSpec {
     type State = RootState;
     type Action = RootAction;
+
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![RootState]

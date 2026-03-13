@@ -1,27 +1,27 @@
 use imagod_spec::RunnerBootstrap;
-use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, TransitionSystem,
-};
+use nirvash::{BoolExpr, Fairness, Ltl, ModelBackend, ModelCheckConfig};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::RunnerAppType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum BootstrapSizeClass {
     WithinBounds,
     Oversized,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum EndpointState {
     Missing,
     Prepared,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum AuthProofState {
     Pending,
     Verified,
@@ -55,7 +55,7 @@ pub fn classify_bootstrap(bootstrap: &RunnerBootstrap) -> RunnerBootstrapContrac
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub struct RunnerBootstrapState {
     pub size: BootstrapSizeClass,
     pub decoded: bool,
@@ -66,7 +66,16 @@ pub struct RunnerBootstrapState {
     pub ready: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum RunnerBootstrapAction {
     /// Read bootstrap
     ReadWithinBounds,
@@ -161,11 +170,14 @@ impl RunnerBootstrapSpec {
     }
 }
 
-fn runner_bootstrap_model_cases() -> Vec<ModelCase<RunnerBootstrapState, RunnerBootstrapAction>> {
-    vec![ModelCase::default().with_checker_config(ModelCheckConfig {
-        backend: Some(ModelBackend::Explicit),
-        ..ModelCheckConfig::reachable_graph()
-    })]
+fn runner_bootstrap_model_cases() -> Vec<ModelInstance<RunnerBootstrapState, RunnerBootstrapAction>>
+{
+    vec![
+        ModelInstance::default().with_checker_config(ModelCheckConfig {
+            backend: Some(ModelBackend::Explicit),
+            ..ModelCheckConfig::reachable_graph()
+        }),
+    ]
 }
 
 #[allow(dead_code)]
@@ -262,11 +274,11 @@ fn ready_fairness() -> Fairness<RunnerBootstrapState, RunnerBootstrapAction> {
 }
 
 #[subsystem_spec(model_cases(runner_bootstrap_model_cases))]
-impl TransitionSystem for RunnerBootstrapSpec {
+impl FrontendSpec for RunnerBootstrapSpec {
     type State = RunnerBootstrapState;
     type Action = RunnerBootstrapAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "runner_bootstrap"
     }
 

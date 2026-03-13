@@ -1343,9 +1343,9 @@ mod tests {
     use std::any::{Any, TypeId};
 
     use crate::{
-        BoundedDomain, RegisteredActionDocLabel, RegisteredActionDocPresentation,
-        RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationField, RelationalState,
-        Signature,
+        BoundedDomain, FiniteModelDomain, RegisteredActionDocLabel,
+        RegisteredActionDocPresentation, RegisteredRelationalState, RelAtom, RelSet, Relation2,
+        RelationField, RelationalState,
     };
 
     #[test]
@@ -1377,8 +1377,8 @@ mod tests {
         Dependency,
     }
 
-    impl Signature for DemoAtom {
-        fn bounded_domain() -> BoundedDomain<Self> {
+    impl FiniteModelDomain for DemoAtom {
+        fn finite_domain() -> BoundedDomain<Self> {
             BoundedDomain::new(vec![Self::Root, Self::Dependency])
         }
     }

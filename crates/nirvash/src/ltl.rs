@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::{BoolExpr, Signature, StepExpr};
+use crate::{BoolExpr, FiniteModelDomain, StepExpr};
 
 #[derive(Debug, Clone)]
 pub enum Ltl<S, A> {
@@ -78,10 +78,10 @@ impl<S: 'static, A: 'static> Ltl<S, A> {
 
     pub fn forall<T, F>(mut build: F) -> Self
     where
-        T: Signature,
+        T: FiniteModelDomain,
         F: FnMut(T) -> Ltl<S, A>,
     {
-        T::bounded_domain()
+        T::finite_domain()
             .into_vec()
             .into_iter()
             .fold(Self::truth(), |acc, value| Self::and(acc, build(value)))
@@ -89,10 +89,10 @@ impl<S: 'static, A: 'static> Ltl<S, A> {
 
     pub fn exists<T, F>(mut build: F) -> Self
     where
-        T: Signature,
+        T: FiniteModelDomain,
         F: FnMut(T) -> Ltl<S, A>,
     {
-        let mut iter = T::bounded_domain().into_vec().into_iter();
+        let mut iter = T::finite_domain().into_vec().into_iter();
         let Some(first) = iter.next() else {
             return Self::falsity();
         };

@@ -1,7 +1,7 @@
 use nirvash::{Relation2, RelSet};
-use nirvash_macros::{RelAtom, RelationalState, Signature};
+use nirvash_macros::{FiniteModelDomain, RelAtom, RelationalState};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Signature, RelAtom)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FiniteModelDomain, RelAtom)]
 enum Atom {
     Root,
     Dependency,

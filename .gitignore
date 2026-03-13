@@ -23,6 +23,7 @@ target
 .imago/
 .imagod-data/
 examples/**/build/
+PLAN.md
 
 *.log
 *.wasm

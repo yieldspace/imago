@@ -9,7 +9,7 @@
 flowchart LR
     A["imagod-spec<br/>shared contract"] --> B["imagod-spec-formal<br/>TemporalSpec / projection"]
     B --> C["nirvash-macros<br/>derive / registry / generated tests"]
-    C --> D["nirvash / nirvash-check / nirvash-backends<br/>DSL / checker"]
+    C --> D["nirvash / nirvash-ir / nirvash-lower / nirvash-check / nirvash-backends<br/>frontend / lowering / checker"]
     C --> E["nirvash-docgen<br/>rustdoc graph generation"]
     A --> F["imagod-control<br/>OperationManager / Orchestrator / ServiceSupervisor"]
     F --> G["imagod-server<br/>wire boundary"]
@@ -19,21 +19,32 @@ flowchart LR
 
 ## nirvash のシステム
 
-`nirvash` は、Rust DSL で書かれた spec をそのまま reachable graph ベースの形式検証と実コード conformance に接続する基盤です。
+`nirvash` 系は、Rust DSL で書かれた spec を frontend / semantic core / lowering / checker / conformance / proof export に分けて接続する基盤です。
 
 ### 役割分担
 
 - `crates/nirvash`
-  - `Signature`、`TransitionSystem`、`TemporalSpec`
+  - frontend DSL、`TransitionProgram`、doc graph shared type
   - `RelAtom`、`RelSet`、`Relation2`、`RelationalState`
   - `Ltl`、predicate / transition DSL
-  - `conformance::{ActionApplier, StateObserver, ProtocolConformanceSpec, ProtocolRuntimeBinding}`
+- `crates/nirvash-ir`
+  - `SpecCore`、`StateExpr`、`ActionExpr`、`TemporalExpr`、`FairnessDecl`
+- `crates/nirvash-lower`
+  - `FrontendSpec`、`LoweredSpec`
+  - `FiniteModelDomain`、`SymbolicEncoding`
+  - checker-facing `ModelInstance` / config / trace boundary
 - `crates/nirvash-check`
   - `ModelChecker`
 - `crates/nirvash-backends`
   - explicit / symbolic backend 実装
+- `crates/nirvash-conformance`
+  - `ActionApplier`、`StateObserver`
+  - `ProtocolConformanceSpec`、`ProtocolRuntimeBinding`
+  - witness / refinement / custom harness
+- `crates/nirvash-proof`
+  - TLA module / SMT-LIB export
 - `crates/nirvash-macros`
-  - `#[derive(Signature)]`
+  - `#[derive(FiniteModelDomain)]` / `#[derive(SymbolicEncoding)]`
   - `#[derive(RelAtom)]` / `#[derive(RelationalState)]`
   - `#[subsystem_spec]` / `#[system_spec]`
   - `#[formal_tests]` / `#[code_tests]`
@@ -75,15 +86,15 @@ flowchart TD
 
 ### 重要な設計点
 
-- 通常 spec の正本は `TransitionSystem::initial_states()`、`TransitionSystem::actions()`、`TransitionSystem::transition()` です。`system` のような並行 spec も top-level action を atomic に保った interleaving を正本にし、reachable graph 上の individual edge をそのまま検証します。
-- `Signature` は helper enum/newtype や projection 型の bounded domain 付与にだけ使います。
+- authoring 側の正本は `nirvash_lower::FrontendSpec::{initial_states, actions, transition, transition_program, model_instances}` です。checker 側の canonical boundary は `nirvash_lower::FrontendSpec -> LoweredSpec -> nirvash-backends` です。
+- `FiniteModelDomain` と `SymbolicEncoding` は checker-facing な finite domain / symbolic schema 境界です。frontend authoring と backend encode の責務をここで分離します。
 - `imagod-spec-formal` では構造を持つ subsystem を relation-first で書くのを既定にし、atom を `RelAtom`、state field を `RelSet` / `Relation2` で持ちます。phase progression や terminal status のような線形 gate だけ scalar を残し、doc graph 側は relation schema と Alloy 風 notation を追加表示します。
 - system-level の doc edge は atomic action をそのまま表示し、parallel 合成専用ラベルには依存しません。
 - `nirvash-docgen` は `SpecVizBundle` を raw evidence として受け取り、rustdoc 上に `System Map / Scenario Atlas / Actor Flows / State Space / Contracts & Data` を生成します。system spec では subsystem への drill-down を先頭に置き、subsystem spec では親 system と related subsystem を先頭で示します。`Scenario Atlas` は `happy -> focus -> failure(deadlock) -> cycle` の順で代表 trace を最大 4 本まで deterministic に並べ、2 actor 以上なら Mermaid sequence、1 actor 以下なら compact step table へ落とします。`Actor Flows` は selected scenario から actor 別 flowchart を出し、旧 plain-text process view は `<details>` fallback にだけ残します。`State Space` は reduced reachable graph を基本とし、閾値超過時は focus graph、さらに大きい場合は scenario mini-diagram へ fail-closed に切り替えます。`Contracts & Data` は relation schema / action vocabulary / invariant/property/fairness/constraint 群を 1 断面に集約します。
 - `formal_tests` は spec 単体を検査します。
-- `code_tests` は `nirvash::conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で `before_probe -> summarize_state -> abstract_state`、`output_probe -> summarize_output -> abstract_output`、`after_probe -> summarize_state -> abstract_state` を比較します。runtime contract macro も同じ probe-first の流れを生成し、runtime 側には `observe_state(...) -> ProbeState` と `observe_output(...) -> ProbeOutput` だけを要求します。
+- `code_tests` は `nirvash_conformance::ProtocolConformanceSpec` と `ProtocolRuntimeBinding` を使って grouped な runtime conformance を生成し、`ActionApplier` / `StateObserver` 経由で `before_probe -> summarize_state -> abstract_state`、`output_probe -> summarize_output -> abstract_output`、`after_probe -> summarize_state -> abstract_state` を比較します。runtime contract macro も同じ probe-first の流れを生成し、runtime 側には `observe_state(...) -> ProbeState` と `observe_output(...) -> ProbeOutput` だけを要求します。
 - `code_witness_tests` は `ProtocolInputWitnessBinding` で positive / negative witness を受け取り、reachable graph から semantic case を自動検出して witness 単位の strict test を custom harness で列挙します。`Input = Action` 以外の witness は `#[derive(ProtocolInputWitness)]` で `ProtocolInputWitnessCodec<Action>` を自動実装し、`canonical_positive` / `positive_family` / `negative_family` / `witness_name(action, kind, index)` を既定生成します。runtime contract では `input_codec = ...` と `dispatch_input = ...` を組み合わせて generated family をそのまま replay できます。現行の command witness は `command_projection` が `system` から command surface を投影し、実行先は `OperationManager` に限定されます。ほかの boundary は grouped `code_tests` で `router_projection` / `session_auth_projection` / `logs_projection -> imagod-server`、`runtime_projection -> imagod-control`、`manager_runtime_projection -> imagod` に接続します。
-- shared contract は `imagod-spec`、conformance API は `nirvash`、checker front door は `nirvash-check` にあり、formal spec 本体は `imagod-spec-formal`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
+- shared contract は `imagod-spec`、checker front door は `nirvash-check`、conformance API は `nirvash-conformance`、semantic core は `nirvash-ir`、lowering 境界は `nirvash-lower` にあります。formal spec 本体は `imagod-spec-formal`、runtime binding と `code_tests` 実行は runtime crate の integration test に置きます。
 
 ## imagod-control のシステム
 
@@ -197,7 +208,9 @@ full implementation の private state をそのまま複製するのではなく
 - `nirvash-macros`: `crates/nirvash-macros/src/lib.rs`
 - `nirvash-docgen`: `crates/nirvash-docgen/src/lib.rs`
 - shared contract: `crates/imagod-spec/src/command_contract.rs`, `crates/imagod-spec/src/wire.rs`, `crates/imagod-spec/src/ipc.rs`
-- conformance API: `crates/nirvash/src/conformance.rs`
+- semantic core: `crates/nirvash-ir/src/lib.rs`
+- lowering boundary: `crates/nirvash-lower/src/lib.rs`
+- conformance API: `crates/nirvash-conformance/src/lib.rs`
 - `imagod-control`: `crates/imagod-control/src/lib.rs`, `crates/imagod-control/src/operation_state.rs`, `crates/imagod-control/src/artifact_store.rs`, `crates/imagod-control/src/orchestrator.rs`, `crates/imagod-control/src/service_supervisor.rs`
 - spec 側接続: `crates/imagod-spec-formal/src/command_projection.rs`, `crates/imagod-spec-formal/src/router_projection.rs`, `crates/imagod-spec-formal/src/session_auth_projection.rs`, `crates/imagod-spec-formal/src/logs_projection.rs`, `crates/imagod-spec-formal/src/runtime_projection.rs`, `crates/imagod-spec-formal/src/manager_runtime_projection.rs`, `crates/imagod-spec-formal/src/command_protocol.rs`, `crates/imagod-spec-formal/src/deploy.rs`, `crates/imagod-spec-formal/src/supervision.rs`, `crates/imagod-spec-formal/src/rpc.rs`, `crates/imagod-spec-formal/src/session_auth.rs`, `crates/imagod-spec-formal/src/wire_protocol.rs`, `crates/imagod-spec-formal/src/system.rs`
 - runtime 側 binding: `crates/imagod-control/tests/command_protocol_conformance.rs`, `crates/imagod-server/src/protocol_handler/router.rs`, `crates/imagod-server/src/protocol_handler/session_loop.rs`, `crates/imagod-server/src/protocol_handler/logs_forwarder.rs`, `crates/imagod-control/src/service_supervisor.rs`, `crates/imagod/src/manager_runtime.rs`

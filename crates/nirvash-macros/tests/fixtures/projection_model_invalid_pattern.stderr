@@ -1,13 +1,13 @@
 error: nirvash_projection_model output_abstract identifier patterns require `name @ Variant(...)`
-  --> tests/fixtures/projection_model_invalid_pattern.rs:86:9
+  --> tests/fixtures/projection_model_invalid_pattern.rs:90:9
    |
-86 |         effect => drop
+90 |         effect => drop
    |         ^^^^^^
 
-warning: unused import: `conformance::ProtocolConformanceSpec`
- --> tests/fixtures/projection_model_invalid_pattern.rs:1:85
+warning: unused import: `nirvash_conformance::ProtocolConformanceSpec`
+ --> tests/fixtures/projection_model_invalid_pattern.rs:3:5
   |
-1 | use nirvash::{ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem, conformance::ProtocolConformanceSpec};
-  |                                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+3 | use nirvash_conformance::ProtocolConformanceSpec;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

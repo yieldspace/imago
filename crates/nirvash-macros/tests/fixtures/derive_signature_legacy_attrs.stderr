@@ -1,4 +1,4 @@
-error: #[signature(domain_fn = ...)] is removed; use #[signature(custom)] and implement the generated companion trait instead
+error: #[finite_model_domain(domain_fn = ...)] is removed; use #[finite_model_domain(custom)] and implement the generated companion trait instead
  --> tests/fixtures/derive_signature_legacy_attrs.rs:4:13
   |
 4 | #[signature(domain_fn = "State::representatives", invariant_fn = "State::signature_invariant")]

@@ -1,19 +1,20 @@
-use nirvash::{
-    BoolExpr, Fairness, Ltl, RelAtom as _, RelSet, Signature as _, StepExpr, TransitionProgram,
-    TransitionSystem,
-};
+use nirvash::{BoolExpr, Fairness, Ltl, RelAtom as _, RelSet, StepExpr, TransitionProgram};
+use nirvash_lower::{FiniteModelDomain as _, FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, nirvash_expr,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelAtom, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum SessionAtom {
     Session0,
     Session1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum SessionOutcome {
     None,
     Accepted,
@@ -21,8 +22,10 @@ pub enum SessionOutcome {
     Joined,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Signature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct SessionTransportState {
     active_sessions: RelSet<SessionAtom>,
     pub shutdown_requested: bool,
@@ -47,7 +50,16 @@ impl SessionTransportState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum SessionTransportAction {
     /// Accept session
     AcceptSession,
@@ -76,16 +88,10 @@ impl SessionTransportSpec {
     }
 }
 
-nirvash::signature_spec!(
-    SessionTransportStateSignatureSpec for SessionTransportState,
+nirvash::finite_model_domain_spec!(
+    SessionTransportStateFiniteModelDomainSpec for SessionTransportState,
     representatives = crate::state_domain::reachable_state_domain(&SessionTransportSpec::new())
 );
-
-nirvash::symbolic_state_spec!(for SessionTransportState {
-    active_sessions: RelSet<SessionAtom>,
-    shutdown_requested: bool,
-    last_outcome: SessionOutcome,
-});
 
 impl SessionTransportState {
     pub fn from_summary(active_session: bool, shutdown_requested: bool) -> Self {
@@ -190,11 +196,11 @@ fn accepted_session_progress() -> Fairness<SessionTransportState, SessionTranspo
 }
 
 #[subsystem_spec]
-impl TransitionSystem for SessionTransportSpec {
+impl FrontendSpec for SessionTransportSpec {
     type State = SessionTransportState;
     type Action = SessionTransportAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "session_transport"
     }
 
@@ -235,6 +241,10 @@ impl TransitionSystem for SessionTransportSpec {
                 set last_outcome <= SessionOutcome::None;
             }
         })
+    }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default().with_check_deadlocks(false)]
     }
 }
 
@@ -302,8 +312,9 @@ mod tests {
     #[test]
     fn explicit_and_symbolic_backends_agree() {
         let spec = SessionTransportSpec::new();
+        let lowered = crate::lowered_spec(&spec);
         let explicit_snapshot = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -312,7 +323,7 @@ mod tests {
         .full_reachable_graph_snapshot()
         .expect("explicit session_transport snapshot");
         let symbolic_snapshot = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -331,7 +342,7 @@ mod tests {
         assert_eq!(symbolic_snapshot, explicit_snapshot);
 
         let explicit_result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -340,7 +351,7 @@ mod tests {
         .check_all()
         .expect("explicit session_transport result");
         let symbolic_result = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()

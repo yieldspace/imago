@@ -2,12 +2,12 @@ use imagod_spec::{
     CommandOutputSummary as RuntimeCommandOutputSummary,
     CommandStateSummary as RuntimeCommandStateSummary,
 };
-use nirvash::{
-    BoolExpr, DocGraphPolicy, ModelCase, TransitionSystem, conformance::ProtocolConformanceSpec,
-};
+use nirvash::{BoolExpr, DocGraphPolicy};
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    Signature as FormalSignature, invariant, nirvash_expr, nirvash_transition_program,
-    subsystem_spec,
+    FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
+    invariant, nirvash_expr, nirvash_transition_program, subsystem_spec,
 };
 
 use crate::{
@@ -66,7 +66,7 @@ pub fn classify_error_code(code: CommandErrorKind) -> ErrorCodeClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub struct CommandProtocolState {
     pub tracked: bool,
     pub lifecycle_state: Option<CommandLifecycleState>,
@@ -371,20 +371,21 @@ fn terminal_lifecycle_focus_state() -> BoolExpr<CommandProtocolState> {
     }
 }
 
-fn command_protocol_model_cases() -> Vec<ModelCase<CommandProtocolState, CommandProtocolAction>> {
+fn command_protocol_model_cases() -> Vec<ModelInstance<CommandProtocolState, CommandProtocolAction>>
+{
     vec![
-        ModelCase::default()
+        ModelInstance::default()
             .with_check_deadlocks(false)
             .with_doc_graph_policy(command_protocol_doc_graph_policy()),
     ]
 }
 
 #[subsystem_spec(model_cases(command_protocol_model_cases))]
-impl TransitionSystem for CommandProtocolSpec {
+impl FrontendSpec for CommandProtocolSpec {
     type State = CommandProtocolState;
     type Action = CommandProtocolAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "command_protocol"
     }
 
@@ -564,7 +565,7 @@ pub fn initial_state() -> CommandProtocolState {
 
 #[cfg(test)]
 mod tests {
-    use nirvash::{ModelCaseSource, reduce_doc_graph};
+    use nirvash::reduce_doc_graph;
     use nirvash_check::ModelChecker;
 
     use super::*;
@@ -603,8 +604,16 @@ mod tests {
     #[test]
     fn doc_graph_policy_keeps_cancel_and_terminal_edge_cases() {
         let spec = CommandProtocolSpec::new();
-        let model_case = spec.model_cases().into_iter().next().expect("model case");
-        let snapshot = ModelChecker::for_case(&spec, model_case.clone())
+        let mut lowering_cx = nirvash_lower::LoweringCx;
+        let lowered =
+            <CommandProtocolSpec as nirvash_lower::FrontendSpec>::lower(&spec, &mut lowering_cx)
+                .expect("spec should lower");
+        let model_case = lowered
+            .model_instances()
+            .into_iter()
+            .next()
+            .expect("model case");
+        let snapshot = ModelChecker::for_case(&lowered, model_case.clone())
             .reachable_graph_snapshot()
             .expect("reachable graph snapshot");
         let original_edge_count = snapshot.edges.iter().map(Vec::len).sum::<usize>();

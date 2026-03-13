@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 nirvash = { workspace = true }
+nirvash-lower = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 z3 = { workspace = true }

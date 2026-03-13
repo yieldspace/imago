@@ -4,8 +4,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::{
-    domain::ExprDomain,
-    normalize_symbolic_state_path,
+    ExprDomain, normalize_symbolic_state_path,
     registry::{has_registered_symbolic_effect, has_registered_symbolic_pure_helper},
     relation::{RelAtom, RelSet, Relation2},
 };
@@ -1052,6 +1051,14 @@ impl<S: 'static> StateComparison<S> {
         self.rhs
     }
 
+    pub const fn lhs_ast(&self) -> &ErasedStateExprAst<S> {
+        &self.lhs_ast
+    }
+
+    pub const fn rhs_ast(&self) -> &ErasedStateExprAst<S> {
+        &self.rhs_ast
+    }
+
     fn eval(&self, state: &S) -> bool {
         (self.eval)(state)
     }
@@ -1148,6 +1155,22 @@ impl<S: 'static> StateBinaryPredicate<S> {
 
     pub const fn op(&self) -> BuiltinPredicateOp {
         self.op
+    }
+
+    pub const fn lhs(&self) -> &'static str {
+        self.lhs
+    }
+
+    pub const fn rhs(&self) -> &'static str {
+        self.rhs
+    }
+
+    pub const fn lhs_ast(&self) -> &ErasedStateExprAst<S> {
+        &self.lhs_ast
+    }
+
+    pub const fn rhs_ast(&self) -> &ErasedStateExprAst<S> {
+        &self.rhs_ast
     }
 
     fn eval(&self, state: &S) -> bool {
@@ -3055,6 +3078,14 @@ impl<S: 'static, A: 'static> StepComparison<S, A> {
         self.rhs
     }
 
+    pub const fn lhs_ast(&self) -> &ErasedStepValueExprAst<S, A> {
+        &self.lhs_ast
+    }
+
+    pub const fn rhs_ast(&self) -> &ErasedStepValueExprAst<S, A> {
+        &self.rhs_ast
+    }
+
     fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
         (self.eval)(prev, action, next)
     }
@@ -3152,6 +3183,22 @@ impl<S: 'static, A: 'static> StepBinaryPredicate<S, A> {
 
     pub const fn op(&self) -> BuiltinPredicateOp {
         self.op
+    }
+
+    pub const fn lhs(&self) -> &'static str {
+        self.lhs
+    }
+
+    pub const fn rhs(&self) -> &'static str {
+        self.rhs
+    }
+
+    pub const fn lhs_ast(&self) -> &ErasedStepValueExprAst<S, A> {
+        &self.lhs_ast
+    }
+
+    pub const fn rhs_ast(&self) -> &ErasedStepValueExprAst<S, A> {
+        &self.rhs_ast
     }
 
     fn eval(&self, prev: &S, action: &A, next: &S) -> bool {
@@ -5116,6 +5163,14 @@ impl<S: 'static, A: 'static> GuardComparison<S, A> {
         self.rhs
     }
 
+    pub const fn lhs_ast(&self) -> &ErasedGuardValueExprAst<S, A> {
+        &self.lhs_ast
+    }
+
+    pub const fn rhs_ast(&self) -> &ErasedGuardValueExprAst<S, A> {
+        &self.rhs_ast
+    }
+
     fn eval(&self, prev: &S, action: &A) -> bool {
         (self.eval)(prev, action)
     }
@@ -5211,6 +5266,22 @@ impl<S: 'static, A: 'static> GuardBinaryPredicate<S, A> {
 
     pub const fn op(&self) -> BuiltinPredicateOp {
         self.op
+    }
+
+    pub const fn lhs(&self) -> &'static str {
+        self.lhs
+    }
+
+    pub const fn rhs(&self) -> &'static str {
+        self.rhs
+    }
+
+    pub const fn lhs_ast(&self) -> &ErasedGuardValueExprAst<S, A> {
+        &self.lhs_ast
+    }
+
+    pub const fn rhs_ast(&self) -> &ErasedGuardValueExprAst<S, A> {
+        &self.rhs_ast
     }
 
     fn eval(&self, prev: &S, action: &A) -> bool {
@@ -5424,6 +5495,10 @@ impl<S, A> GuardQuantifier<S, A> {
 
     pub const fn body(&self) -> &'static str {
         self.body
+    }
+
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        self.read_paths.to_vec()
     }
 
     pub const fn is_symbolic_supported(&self) -> bool {
@@ -6895,6 +6970,10 @@ impl<S: 'static, A: 'static> UpdateChoice<S, A> {
         self.body
     }
 
+    pub fn symbolic_state_paths(&self) -> Vec<&'static str> {
+        self.read_paths.to_vec()
+    }
+
     pub const fn write_paths(&self) -> &'static [&'static str] {
         self.write_paths
     }
@@ -7535,7 +7614,7 @@ mod tests {
         TransitionProgramError, TransitionRule, TransitionSuccessor, UpdateOp, UpdateProgram,
         UpdateValueExprAst,
     };
-    use crate::{BoundedDomain, ExprDomain, RelAtom, RelSet, Relation2, Signature};
+    use crate::{BoundedDomain, ExprDomain, FiniteModelDomain, RelAtom, RelSet, Relation2};
 
     crate::register_symbolic_pure_helpers!("predicate_tests::registered_helper");
     crate::register_symbolic_effects!("predicate_tests::registered_effect");
@@ -7573,8 +7652,8 @@ mod tests {
         Gamma,
     }
 
-    impl Signature for Item {
-        fn bounded_domain() -> BoundedDomain<Self> {
+    impl FiniteModelDomain for Item {
+        fn finite_domain() -> BoundedDomain<Self> {
             BoundedDomain::new(vec![Self::Alpha, Self::Beta, Self::Gamma])
         }
     }
@@ -8097,13 +8176,16 @@ mod tests {
         let state_set: StateExpr<Worker, RelSet<Item>> =
             StateExpr::<Worker, RelSet<Item>>::set_comprehension(
                 "selected_items",
-                ExprDomain::<Item>::of_signature("items"),
+                ExprDomain::<Item>::of_finite_model_domain("items"),
                 "state.count >= 2 && item != gamma",
                 &["state.count"],
                 |state: &Worker, item: &Item| state.count >= 2 && !matches!(item, Item::Gamma),
             );
-        let pair_domain = ExprDomain::<Item>::of_signature("left")
-            .product("item_pairs", &ExprDomain::<Item>::of_signature("right"))
+        let pair_domain = ExprDomain::<Item>::of_finite_model_domain("left")
+            .product(
+                "item_pairs",
+                &ExprDomain::<Item>::of_finite_model_domain("right"),
+            )
             .filter("distinct_pairs", |(left, right)| left != right)
             .unique();
         let relation_expr: StateExpr<Worker, Relation2<Item, Item>> =
@@ -8127,7 +8209,7 @@ mod tests {
         let step_set: StepValueExpr<SetWorker, Action, RelSet<Item>> =
             StepValueExpr::<SetWorker, Action, RelSet<Item>>::set_comprehension(
                 "mentioned_items",
-                ExprDomain::<Item>::of_signature("items"),
+                ExprDomain::<Item>::of_finite_model_domain("items"),
                 "prev.active.contains(item) || next.pending.contains(item)",
                 &["next.pending", "prev.active"],
                 |prev: &SetWorker, _action: &Action, next: &SetWorker, item: &Item| {
@@ -8137,7 +8219,7 @@ mod tests {
         let guard_set: GuardValueExpr<SetWorker, Action, RelSet<Item>> =
             GuardValueExpr::<SetWorker, Action, RelSet<Item>>::set_comprehension(
                 "guard_items",
-                ExprDomain::<Item>::of_signature("items"),
+                ExprDomain::<Item>::of_finite_model_domain("items"),
                 "prev.pending.contains(item) || item == alpha",
                 &["prev.pending"],
                 |prev: &SetWorker, _action: &Action, item: &Item| {
@@ -8147,7 +8229,7 @@ mod tests {
         let update_ast = super::UpdateAst::Sequence(vec![UpdateOp::assign_ast(
             "self.pending",
             UpdateValueExprAst::comprehension(
-                ExprDomain::<Item>::of_signature("items"),
+                ExprDomain::<Item>::of_finite_model_domain("items"),
                 "prev.active.contains(item)",
                 &["prev.active"],
             ),

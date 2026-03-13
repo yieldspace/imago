@@ -1,11 +1,11 @@
-use nirvash_macros::{Signature as FormalSignature, subsystem_spec};
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, subsystem_spec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Tick,
 }
@@ -13,7 +13,7 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec(invariants(legacy_invariant))]
-impl nirvash::TransitionSystem for Spec {
+impl nirvash_lower::FrontendSpec for Spec {
     type State = State;
     type Action = Action;
 

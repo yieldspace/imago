@@ -1,44 +1,55 @@
 use nirvash::{
-    BoundedDomain, CounterexampleKind, ExprDomain, GuardExpr, ModelBackend, ModelCase,
-    ModelCheckConfig, ModelCheckError, Signature, SymbolicSort, SymbolicSortSpec,
-    SymbolicStateSpec, TemporalSpec, TransitionProgram, TransitionRule, TransitionSystem,
-    UpdateProgram,
+    CounterexampleKind, ExprDomain, GuardExpr, ModelBackend, ModelCheckConfig, ModelCheckError,
+    SymbolicSort, TransitionProgram, TransitionRule, UpdateProgram,
 };
 use nirvash_check::ModelChecker;
+use nirvash_lower::{
+    FiniteModelDomain, FrontendSpec, LoweringCx, ModelInstance, SymbolicEncoding,
+    SymbolicStateSchema, TemporalSpec,
+};
 use nirvash_macros::{
-    Signature as FormalSignature, nirvash_expr, nirvash_step_expr, nirvash_transition_program,
+    FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+macro_rules! frontend_name {
+    () => {
+        fn frontend_name(&self) -> &'static str {
+            std::any::type_name::<Self>()
+        }
+    };
+}
+
+fn lower_spec<T>(spec: &T) -> nirvash_lower::LoweredSpec<'_, T::State, T::Action>
+where
+    T: TemporalSpec,
+    T::State: PartialEq + FiniteModelDomain,
+    T::Action: PartialEq,
+{
+    let mut lowering_cx = LoweringCx;
+    spec.lower(&mut lowering_cx).expect("spec should lower")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum State {
     Idle,
     Busy,
 }
 
-impl Signature for State {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Idle, Self::Busy])
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum Action {
     Start,
     Stop,
 }
 
-impl Signature for Action {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Start, Self::Stop])
-    }
-}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct Spec;
 
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -63,14 +74,14 @@ impl TemporalSpec for Spec {
     }
 }
 
-impl nirvash::ModelCaseSource for Spec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct DeadlockSpec;
 
-impl TransitionSystem for DeadlockSpec {
+impl FrontendSpec for DeadlockSpec {
     type State = State;
     type Action = Action;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -91,80 +102,91 @@ impl TemporalSpec for DeadlockSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for DeadlockSpec {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum Phase {
     Idle,
     Busy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum ToggleAction {
     Flip,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum ReadyFlag {
     No,
     Yes,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 struct DerivedSchemaState {
     phase: Phase,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain)]
 struct ManualSchemaState {
     phase: Phase,
 }
 
-nirvash::signature_spec!(
-    ManualSchemaStateSignatureSpec for ManualSchemaState,
-    representatives = vec![
-        ManualSchemaState { phase: Phase::Idle },
-        ManualSchemaState { phase: Phase::Busy },
-    ]
-);
+impl SymbolicEncoding for ManualSchemaState {
+    fn symbolic_sort() -> SymbolicSort {
+        SymbolicSort::composite::<Self>(vec![nirvash::SymbolicSortField::new(
+            "phase",
+            <Phase as SymbolicEncoding>::symbolic_sort(),
+        )])
+    }
 
-nirvash::symbolic_state_spec!(for ManualSchemaState {
-    phase: Phase,
-});
+    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>> {
+        Some(SymbolicStateSchema::new(
+            vec![nirvash::symbolic_leaf_field(
+                "phase",
+                |state: &Self| &state.phase,
+                |state: &mut Self, value: Phase| {
+                    state.phase = value;
+                },
+            )],
+            || ManualSchemaState {
+                phase: nirvash::symbolic_seed_value::<Phase>(),
+            },
+        ))
+    }
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+fn manual_schema_state_type_id() -> std::any::TypeId {
+    std::any::TypeId::of::<ManualSchemaState>()
+}
+
+fn build_manual_schema_state_schema() -> Box<dyn std::any::Any> {
+    Box::new(
+        <ManualSchemaState as SymbolicEncoding>::symbolic_state_schema()
+            .expect("manual schema should be registered"),
+    )
+}
+
+nirvash::inventory::submit! {
+    nirvash::registry::RegisteredSymbolicStateSchema {
+        state_type_id: manual_schema_state_type_id,
+        build: build_manual_schema_state_schema,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain)]
 struct PartialSchemaState {
     phase: Phase,
     ready: ReadyFlag,
 }
 
-nirvash::signature_spec!(
-    PartialSchemaStateSignatureSpec for PartialSchemaState,
-    representatives = vec![
-        PartialSchemaState {
-            phase: Phase::Idle,
-            ready: ReadyFlag::No,
-        },
-        PartialSchemaState {
-            phase: Phase::Idle,
-            ready: ReadyFlag::Yes,
-        },
-        PartialSchemaState {
-            phase: Phase::Busy,
-            ready: ReadyFlag::No,
-        },
-        PartialSchemaState {
-            phase: Phase::Busy,
-            ready: ReadyFlag::Yes,
-        },
-    ]
-);
+impl SymbolicEncoding for PartialSchemaState {
+    fn symbolic_sort() -> SymbolicSort {
+        SymbolicSort::composite::<Self>(vec![nirvash::SymbolicSortField::new(
+            "phase",
+            <Phase as SymbolicEncoding>::symbolic_sort(),
+        )])
+    }
 
-impl SymbolicStateSpec for PartialSchemaState {
-    fn symbolic_state_schema() -> nirvash::SymbolicStateSchema<Self> {
-        nirvash::SymbolicStateSchema::new(
+    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>> {
+        Some(SymbolicStateSchema::new(
             vec![nirvash::symbolic_leaf_field(
                 "phase",
                 |state: &Self| &state.phase,
@@ -176,7 +198,7 @@ impl SymbolicStateSpec for PartialSchemaState {
                 phase: nirvash::symbolic_seed_value::<Phase>(),
                 ready: ReadyFlag::No,
             },
-        )
+        ))
     }
 }
 
@@ -185,7 +207,10 @@ fn partial_schema_state_type_id() -> std::any::TypeId {
 }
 
 fn build_partial_schema_state_schema() -> Box<dyn std::any::Any> {
-    Box::new(<PartialSchemaState as SymbolicStateSpec>::symbolic_state_schema())
+    Box::new(
+        <PartialSchemaState as SymbolicEncoding>::symbolic_state_schema()
+            .expect("partial schema should be registered"),
+    )
 }
 
 nirvash::inventory::submit! {
@@ -195,18 +220,9 @@ nirvash::inventory::submit! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain)]
 struct MissingSchemaState {
     phase: Phase,
-}
-
-impl Signature for MissingSchemaState {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![
-            Self { phase: Phase::Idle },
-            Self { phase: Phase::Busy },
-        ])
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,15 +230,61 @@ struct PanicDomainState {
     phase: Phase,
 }
 
-impl Signature for PanicDomainState {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        panic!("symbolic backend should not call PanicDomainState::bounded_domain()");
+fn panic_domain_state_representatives() -> nirvash::BoundedDomain<PanicDomainState> {
+    panic!("symbolic backend should not call PanicDomainState::bounded_domain()");
+}
+
+impl FiniteModelDomain for PanicDomainState {
+    fn finite_domain() -> nirvash::BoundedDomain<Self> {
+        panic_domain_state_representatives()
     }
 }
 
-nirvash::symbolic_state_spec!(for PanicDomainState {
-    phase: Phase,
-});
+impl SymbolicEncoding for PanicDomainState {
+    fn symbolic_sort() -> SymbolicSort {
+        SymbolicSort::Composite {
+            type_name: std::any::type_name::<Self>(),
+            domain_size: 0,
+            fields: vec![nirvash::SymbolicSortField::new(
+                "phase",
+                <Phase as SymbolicEncoding>::symbolic_sort(),
+            )],
+        }
+    }
+
+    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>> {
+        Some(SymbolicStateSchema::new(
+            vec![nirvash::symbolic_leaf_field(
+                "phase",
+                |state: &Self| &state.phase,
+                |state: &mut Self, value: Phase| {
+                    state.phase = value;
+                },
+            )],
+            || PanicDomainState {
+                phase: nirvash::symbolic_seed_value::<Phase>(),
+            },
+        ))
+    }
+}
+
+fn panic_domain_state_type_id() -> std::any::TypeId {
+    std::any::TypeId::of::<PanicDomainState>()
+}
+
+fn build_panic_domain_state_schema() -> Box<dyn std::any::Any> {
+    Box::new(
+        <PanicDomainState as SymbolicEncoding>::symbolic_state_schema()
+            .expect("panic-domain schema should be registered"),
+    )
+}
+
+nirvash::inventory::submit! {
+    nirvash::registry::RegisteredSymbolicStateSchema {
+        state_type_id: panic_domain_state_type_id,
+        build: build_panic_domain_state_schema,
+    }
+}
 
 fn toggled_phase(phase: Phase) -> Phase {
     match phase {
@@ -252,9 +314,11 @@ nirvash::register_symbolic_effects!("flip_phase_effect");
 #[derive(Debug, Default, Clone, Copy)]
 struct ManualSchemaSpec;
 
-impl TransitionSystem for ManualSchemaSpec {
+impl FrontendSpec for ManualSchemaSpec {
     type State = ManualSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![ManualSchemaState { phase: Phase::Idle }]
@@ -278,8 +342,6 @@ impl TemporalSpec for ManualSchemaSpec {
         Vec::new()
     }
 }
-
-impl nirvash::ModelCaseSource for ManualSchemaSpec {}
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ChoiceSchemaSpec;
@@ -321,9 +383,11 @@ fn choice_busy_step() -> nirvash::StepExpr<ManualSchemaState, ToggleAction> {
     )
 }
 
-impl TransitionSystem for ChoiceSchemaSpec {
+impl FrontendSpec for ChoiceSchemaSpec {
     type State = ManualSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![ManualSchemaState { phase: Phase::Idle }]
@@ -344,14 +408,14 @@ impl TemporalSpec for ChoiceSchemaSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for ChoiceSchemaSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct ChoicePropertySpec;
 
-impl TransitionSystem for ChoicePropertySpec {
+impl FrontendSpec for ChoicePropertySpec {
     type State = ManualSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![ManualSchemaState { phase: Phase::Idle }]
@@ -378,14 +442,14 @@ impl TemporalSpec for ChoicePropertySpec {
     }
 }
 
-impl nirvash::ModelCaseSource for ChoicePropertySpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct ChoiceFairnessSpec;
 
-impl TransitionSystem for ChoiceFairnessSpec {
+impl FrontendSpec for ChoiceFairnessSpec {
     type State = ManualSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![ManualSchemaState { phase: Phase::Idle }]
@@ -417,14 +481,14 @@ impl TemporalSpec for ChoiceFairnessSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for ChoiceFairnessSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct NoProgramSchemaSpec;
 
-impl TransitionSystem for NoProgramSchemaSpec {
+impl FrontendSpec for NoProgramSchemaSpec {
     type State = ManualSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![ManualSchemaState { phase: Phase::Idle }]
@@ -441,14 +505,14 @@ impl TemporalSpec for NoProgramSchemaSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for NoProgramSchemaSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct MissingReadPathSpec;
 
-impl TransitionSystem for MissingReadPathSpec {
+impl FrontendSpec for MissingReadPathSpec {
     type State = PartialSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![PartialSchemaState {
@@ -472,6 +536,14 @@ impl TransitionSystem for MissingReadPathSpec {
             }
         })
     }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![
+            ModelInstance::default().with_state_constraint(nirvash::pred!(
+                ready_is_visible(_state) => _state.ready == ReadyFlag::Yes
+            )),
+        ]
+    }
 }
 
 impl TemporalSpec for MissingReadPathSpec {
@@ -480,20 +552,14 @@ impl TemporalSpec for MissingReadPathSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for MissingReadPathSpec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-        vec![ModelCase::default().with_state_constraint(nirvash::pred!(
-            ready_is_visible(_state) => _state.ready == ReadyFlag::Yes
-        ))]
-    }
-}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct MissingSchemaSpec;
 
-impl TransitionSystem for MissingSchemaSpec {
+impl FrontendSpec for MissingSchemaSpec {
     type State = MissingSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![MissingSchemaState { phase: Phase::Idle }]
@@ -522,14 +588,14 @@ impl TemporalSpec for MissingSchemaSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for MissingSchemaSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct PanicDomainSpec;
 
-impl TransitionSystem for PanicDomainSpec {
+impl FrontendSpec for PanicDomainSpec {
     type State = PanicDomainState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![PanicDomainState { phase: Phase::Idle }]
@@ -566,14 +632,14 @@ impl TemporalSpec for PanicDomainSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for PanicDomainSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct RegisteredEffectSpec;
 
-impl TransitionSystem for RegisteredEffectSpec {
+impl FrontendSpec for RegisteredEffectSpec {
     type State = DerivedSchemaState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![DerivedSchemaState { phase: Phase::Idle }]
@@ -615,40 +681,22 @@ impl TemporalSpec for RegisteredEffectSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for RegisteredEffectSpec {}
-
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
-#[signature(custom)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain)]
 struct MissingReadPathState {
     phase: Phase,
     ready: bool,
 }
 
-nirvash::signature_spec!(
-    MissingReadPathStateSignatureSpec for MissingReadPathState,
-    representatives = vec![
-        MissingReadPathState {
-            phase: Phase::Idle,
-            ready: false,
-        },
-        MissingReadPathState {
-            phase: Phase::Idle,
-            ready: true,
-        },
-        MissingReadPathState {
-            phase: Phase::Busy,
-            ready: false,
-        },
-        MissingReadPathState {
-            phase: Phase::Busy,
-            ready: true,
-        },
-    ]
-);
+impl SymbolicEncoding for MissingReadPathState {
+    fn symbolic_sort() -> SymbolicSort {
+        SymbolicSort::composite::<Self>(vec![nirvash::SymbolicSortField::new(
+            "phase",
+            <Phase as SymbolicEncoding>::symbolic_sort(),
+        )])
+    }
 
-impl SymbolicStateSpec for MissingReadPathState {
-    fn symbolic_state_schema() -> nirvash::SymbolicStateSchema<Self> {
-        nirvash::SymbolicStateSchema::new(
+    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>> {
+        Some(SymbolicStateSchema::new(
             vec![nirvash::symbolic_leaf_field(
                 "phase",
                 |state: &Self| &state.phase,
@@ -660,7 +708,7 @@ impl SymbolicStateSpec for MissingReadPathState {
                 phase: nirvash::symbolic_seed_value::<Phase>(),
                 ready: false,
             },
-        )
+        ))
     }
 }
 
@@ -669,7 +717,10 @@ fn missing_read_path_state_type_id() -> std::any::TypeId {
 }
 
 fn build_missing_read_path_state_schema() -> Box<dyn std::any::Any> {
-    Box::new(<MissingReadPathState as SymbolicStateSpec>::symbolic_state_schema())
+    Box::new(
+        <MissingReadPathState as SymbolicEncoding>::symbolic_state_schema()
+            .expect("missing-read-path schema should be registered"),
+    )
 }
 
 nirvash::inventory::submit! {
@@ -682,9 +733,11 @@ nirvash::inventory::submit! {
 #[derive(Debug, Default, Clone, Copy)]
 struct MissingProgramReadPathSpec;
 
-impl TransitionSystem for MissingProgramReadPathSpec {
+impl FrontendSpec for MissingProgramReadPathSpec {
     type State = MissingReadPathState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![MissingReadPathState {
@@ -712,14 +765,14 @@ impl TemporalSpec for MissingProgramReadPathSpec {
     }
 }
 
-impl nirvash::ModelCaseSource for MissingProgramReadPathSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct MissingInvariantReadPathSpec;
 
-impl TransitionSystem for MissingInvariantReadPathSpec {
+impl FrontendSpec for MissingInvariantReadPathSpec {
     type State = MissingReadPathState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![MissingReadPathState {
@@ -747,18 +800,22 @@ impl TransitionSystem for MissingInvariantReadPathSpec {
 
 impl TemporalSpec for MissingInvariantReadPathSpec {
     fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
-        vec![nirvash::pred!(ready_is_visible(state) => state.ready)]
+        vec![nirvash::BoolExpr::builtin_pure_call_with_paths(
+            "ready_is_visible",
+            &["ready"],
+            |state: &MissingReadPathState| state.ready,
+        )]
     }
 }
-
-impl nirvash::ModelCaseSource for MissingInvariantReadPathSpec {}
 
 #[derive(Debug, Default, Clone, Copy)]
 struct MissingPropertyReadPathSpec;
 
-impl TransitionSystem for MissingPropertyReadPathSpec {
+impl FrontendSpec for MissingPropertyReadPathSpec {
     type State = MissingReadPathState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![MissingReadPathState {
@@ -791,19 +848,23 @@ impl TemporalSpec for MissingPropertyReadPathSpec {
 
     fn properties(&self) -> Vec<nirvash::Ltl<Self::State, Self::Action>> {
         vec![nirvash::Ltl::always(nirvash::Ltl::pred(
-            nirvash::pred!(ready_is_visible(state) => state.ready),
+            nirvash::BoolExpr::builtin_pure_call_with_paths(
+                "ready_is_visible",
+                &["ready"],
+                |state: &MissingReadPathState| state.ready,
+            ),
         ))]
     }
 }
 
-impl nirvash::ModelCaseSource for MissingPropertyReadPathSpec {}
-
 #[derive(Debug, Default, Clone, Copy)]
 struct MissingFairnessReadPathSpec;
 
-impl TransitionSystem for MissingFairnessReadPathSpec {
+impl FrontendSpec for MissingFairnessReadPathSpec {
     type State = MissingReadPathState;
     type Action = ToggleAction;
+
+    frontend_name!();
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![MissingReadPathState {
@@ -839,18 +900,24 @@ impl TemporalSpec for MissingFairnessReadPathSpec {
     }
 
     fn fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
-        vec![nirvash::Fairness::weak(nirvash::step!(
-            ready_progress(prev, action, _next) =>
-                matches!(action, ToggleAction::Flip) && prev.ready == true
-        ))]
+        vec![nirvash::Fairness::weak(
+            nirvash::StepExpr::builtin_pure_call_with_paths(
+                "ready_progress",
+                &["prev.ready"],
+                |prev: &MissingReadPathState,
+                 action: &ToggleAction,
+                 _next: &MissingReadPathState| {
+                    matches!(action, ToggleAction::Flip) && prev.ready
+                },
+            ),
+        )]
     }
 }
 
-impl nirvash::ModelCaseSource for MissingFairnessReadPathSpec {}
-
 #[test]
 fn explicit_snapshot_exposes_states_and_edges() {
-    let snapshot = ModelChecker::new(&Spec)
+    let lowered = lower_spec(&Spec);
+    let snapshot = ModelChecker::new(&lowered)
         .reachable_graph_snapshot()
         .expect("reachable graph should build");
 
@@ -863,7 +930,8 @@ fn explicit_snapshot_exposes_states_and_edges() {
 
 #[test]
 fn deadlocks_are_reported_by_frontdoor_checker() {
-    let result = ModelChecker::new(&DeadlockSpec)
+    let lowered = lower_spec(&DeadlockSpec);
+    let result = ModelChecker::new(&lowered)
         .check_deadlocks()
         .expect("deadlock check should run");
 
@@ -873,8 +941,9 @@ fn deadlocks_are_reported_by_frontdoor_checker() {
 
 #[test]
 fn symbolic_backend_rejects_specs_without_transition_program() {
+    let lowered = lower_spec(&NoProgramSchemaSpec);
     let err = ModelChecker::with_config(
-        &NoProgramSchemaSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -887,11 +956,13 @@ fn symbolic_backend_rejects_specs_without_transition_program() {
 }
 
 #[test]
-fn symbolic_state_spec_derive_and_manual_macro_rebuild_same_indices() {
-    let derived = <DerivedSchemaState as SymbolicStateSpec>::symbolic_state_schema();
-    let manual = <ManualSchemaState as SymbolicStateSpec>::symbolic_state_schema();
-    let derived_sort = <DerivedSchemaState as SymbolicSortSpec>::symbolic_sort();
-    let manual_sort = <ManualSchemaState as SymbolicSortSpec>::symbolic_sort();
+fn symbolic_encoding_derive_and_manual_impl_rebuild_same_indices() {
+    let derived = <DerivedSchemaState as SymbolicEncoding>::symbolic_state_schema()
+        .expect("derived schema should exist");
+    let manual = <ManualSchemaState as SymbolicEncoding>::symbolic_state_schema()
+        .expect("manual schema should exist");
+    let derived_sort = <DerivedSchemaState as SymbolicEncoding>::symbolic_sort();
+    let manual_sort = <ManualSchemaState as SymbolicEncoding>::symbolic_sort();
 
     assert_eq!(
         derived
@@ -960,11 +1031,12 @@ fn step_pure_call_symbolic_state_paths_include_receiver_paths() {
 
 #[test]
 fn symbolic_backend_matches_explicit_snapshot_for_manual_whole_state_updates() {
-    let explicit = ModelChecker::new(&ManualSchemaSpec)
+    let lowered = lower_spec(&ManualSchemaSpec);
+    let explicit = ModelChecker::new(&lowered)
         .full_reachable_graph_snapshot()
         .expect("explicit snapshot should build");
     let symbolic = ModelChecker::with_config(
-        &ManualSchemaSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -978,11 +1050,12 @@ fn symbolic_backend_matches_explicit_snapshot_for_manual_whole_state_updates() {
 
 #[test]
 fn symbolic_backend_matches_explicit_snapshot_for_choice_updates() {
-    let explicit = ModelChecker::new(&ChoiceSchemaSpec)
+    let lowered = lower_spec(&ChoiceSchemaSpec);
+    let explicit = ModelChecker::new(&lowered)
         .full_reachable_graph_snapshot()
         .expect("explicit snapshot should build");
     let symbolic = ModelChecker::with_config(
-        &ChoiceSchemaSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::default()
@@ -996,12 +1069,12 @@ fn symbolic_backend_matches_explicit_snapshot_for_choice_updates() {
 
 #[test]
 fn symbolic_bounded_lasso_matches_explicit_for_choice_property_violation() {
-    let explicit =
-        ModelChecker::with_config(&ChoicePropertySpec, ModelCheckConfig::bounded_lasso(3))
-            .check_properties()
-            .expect("explicit bounded lasso should run");
+    let lowered = lower_spec(&ChoicePropertySpec);
+    let explicit = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+        .check_properties()
+        .expect("explicit bounded lasso should run");
     let symbolic = ModelChecker::with_config(
-        &ChoicePropertySpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::bounded_lasso(3)
@@ -1017,12 +1090,12 @@ fn symbolic_bounded_lasso_matches_explicit_for_choice_property_violation() {
 
 #[test]
 fn symbolic_bounded_lasso_matches_explicit_for_choice_fairness_and_enabled() {
-    let explicit =
-        ModelChecker::with_config(&ChoiceFairnessSpec, ModelCheckConfig::bounded_lasso(3))
-            .check_properties()
-            .expect("explicit bounded lasso should run");
+    let lowered = lower_spec(&ChoiceFairnessSpec);
+    let explicit = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+        .check_properties()
+        .expect("explicit bounded lasso should run");
     let symbolic = ModelChecker::with_config(
-        &ChoiceFairnessSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::bounded_lasso(3)
@@ -1036,9 +1109,10 @@ fn symbolic_bounded_lasso_matches_explicit_for_choice_fairness_and_enabled() {
 }
 
 #[test]
-fn symbolic_backend_rejects_states_without_symbolic_state_spec() {
+fn symbolic_backend_rejects_states_without_symbolic_encoding() {
+    let lowered = lower_spec(&MissingSchemaSpec);
     let err = ModelChecker::with_config(
-        &MissingSchemaSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1050,14 +1124,15 @@ fn symbolic_backend_rejects_states_without_symbolic_state_spec() {
     assert!(matches!(
         err,
         ModelCheckError::UnsupportedConfiguration(message)
-            if message.contains("SymbolicStateSpec")
+            if message.contains("SymbolicEncoding")
     ));
 }
 
 #[test]
 fn symbolic_backend_rejects_missing_read_paths_in_state_constraints() {
+    let lowered = lower_spec(&MissingReadPathSpec);
     let err = ModelChecker::with_config(
-        &MissingReadPathSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1076,8 +1151,9 @@ fn symbolic_backend_rejects_missing_read_paths_in_state_constraints() {
 
 #[test]
 fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
+    let lowered = lower_spec(&PanicDomainSpec);
     let snapshot = ModelChecker::with_config(
-        &PanicDomainSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1095,7 +1171,7 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
     );
     assert!(
         ModelChecker::with_config(
-            &PanicDomainSpec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -1107,7 +1183,7 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
     );
     assert!(
         ModelChecker::with_config(
-            &PanicDomainSpec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -1121,9 +1197,10 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
 
 #[test]
 fn symbolic_bounded_lasso_does_not_call_state_bounded_domain() {
+    let lowered = lower_spec(&PanicDomainSpec);
     assert!(
         ModelChecker::with_config(
-            &PanicDomainSpec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::bounded_lasso(3)
@@ -1137,8 +1214,9 @@ fn symbolic_bounded_lasso_does_not_call_state_bounded_domain() {
 
 #[test]
 fn symbolic_reachable_graph_rejects_registered_effect_updates() {
+    let lowered = lower_spec(&RegisteredEffectSpec);
     let err = ModelChecker::with_config(
-        &RegisteredEffectSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1156,8 +1234,9 @@ fn symbolic_reachable_graph_rejects_registered_effect_updates() {
 
 #[test]
 fn symbolic_backend_rejects_missing_program_read_path_in_state_schema() {
+    let lowered = lower_spec(&MissingProgramReadPathSpec);
     let err = ModelChecker::with_config(
-        &MissingProgramReadPathSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1176,8 +1255,9 @@ fn symbolic_backend_rejects_missing_program_read_path_in_state_schema() {
 
 #[test]
 fn symbolic_backend_rejects_missing_invariant_read_path_in_state_schema() {
+    let lowered = lower_spec(&MissingInvariantReadPathSpec);
     let err = ModelChecker::with_config(
-        &MissingInvariantReadPathSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1196,8 +1276,9 @@ fn symbolic_backend_rejects_missing_invariant_read_path_in_state_schema() {
 
 #[test]
 fn symbolic_backend_rejects_missing_property_read_path_in_state_schema() {
+    let lowered = lower_spec(&MissingPropertyReadPathSpec);
     let err = ModelChecker::with_config(
-        &MissingPropertyReadPathSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()
@@ -1216,8 +1297,9 @@ fn symbolic_backend_rejects_missing_property_read_path_in_state_schema() {
 
 #[test]
 fn symbolic_backend_rejects_missing_fairness_read_path_in_state_schema() {
+    let lowered = lower_spec(&MissingFairnessReadPathSpec);
     let err = ModelChecker::with_config(
-        &MissingFairnessReadPathSpec,
+        &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
             ..ModelCheckConfig::reachable_graph()

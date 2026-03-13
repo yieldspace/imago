@@ -1,12 +1,13 @@
-use nirvash::{ModelCase, StepExpr, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, action_constraint, subsystem_spec};
+use nirvash::StepExpr;
+use nirvash_lower::{FrontendSpec, ModelInstance};
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, action_constraint, subsystem_spec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Tick,
 }
@@ -14,9 +15,13 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec(model_cases(spec_model_cases))]
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -36,8 +41,8 @@ fn duplicate_case_labels() -> StepExpr<State, Action> {
     nirvash::StepExpr::new("duplicate_case_labels", |_, _, _| true)
 }
 
-fn spec_model_cases() -> Vec<ModelCase<State, Action>> {
-    vec![ModelCase::new("case_a")]
+fn spec_model_cases() -> Vec<ModelInstance<State, Action>> {
+    vec![ModelInstance::new("case_a")]
 }
 
 fn main() {}

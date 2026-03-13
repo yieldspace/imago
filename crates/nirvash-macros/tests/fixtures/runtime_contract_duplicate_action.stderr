@@ -1,5 +1,5 @@
 error: duplicate contract_case action
-   --> tests/fixtures/runtime_contract_duplicate_action.rs:117:5
+   --> tests/fixtures/runtime_contract_duplicate_action.rs:120:5
     |
-117 |     #[nirvash_macros::contract_case(action = Action::Start)]
+120 |     #[nirvash_macros::contract_case(action = Action::Start)]
     |     ^

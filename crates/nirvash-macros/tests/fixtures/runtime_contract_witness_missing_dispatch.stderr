@@ -1,13 +1,13 @@
 error: runtime-mode witness contracts require dispatch_input = ... when input = ... is specified
-   --> tests/fixtures/runtime_contract_witness_missing_dispatch.rs:100:1
+   --> tests/fixtures/runtime_contract_witness_missing_dispatch.rs:106:1
     |
-100 | / #[nirvash_runtime_contract(
-101 | |     spec = Spec,
-102 | |     binding = Binding,
-103 | |     context = (),
+106 | / #[nirvash_runtime_contract(
+107 | |     spec = Spec,
+108 | |     binding = Binding,
+109 | |     context = (),
 ...   |
-111 | |     tests(witness)
-112 | | )]
+117 | |     tests(witness)
+118 | | )]
     | |__^
     |
     = note: this error originates in the attribute macro `nirvash_runtime_contract` (in Nightly builds, run with -Z macro-backtrace for more info)

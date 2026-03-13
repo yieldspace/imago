@@ -1,7 +1,8 @@
-use nirvash::{BoundedDomain, RelAtom, Signature};
-use nirvash_macros::{RelAtom, Signature};
+use nirvash::{BoundedDomain, RelAtom};
+use nirvash_lower::FiniteModelDomain;
+use nirvash_macros::{FiniteModelDomain, RelAtom};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Signature, RelAtom)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FiniteModelDomain, RelAtom)]
 enum Atom {
     Root,
     Dependency,

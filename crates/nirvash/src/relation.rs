@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BoundedDomain, Signature};
+use crate::{BoundedDomain, FiniteModelDomain, SymbolicEncoding, SymbolicSort};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationError {
@@ -29,17 +29,17 @@ impl fmt::Display for RelationError {
 
 impl std::error::Error for RelationError {}
 
-pub trait RelAtom: Signature {
+pub trait RelAtom: FiniteModelDomain {
     fn rel_index(&self) -> usize {
-        Self::bounded_domain()
+        Self::finite_domain()
             .into_vec()
             .into_iter()
             .position(|candidate| candidate == self.clone())
-            .expect("RelAtom value must belong to Signature::bounded_domain()")
+            .expect("RelAtom value must belong to FiniteModelDomain::finite_domain()")
     }
 
     fn rel_from_index(index: usize) -> Option<Self> {
-        Self::bounded_domain().into_vec().into_iter().nth(index)
+        Self::finite_domain().into_vec().into_iter().nth(index)
     }
 
     fn rel_label(&self) -> String {
@@ -47,7 +47,7 @@ pub trait RelAtom: Signature {
     }
 
     fn rel_domain_len() -> usize {
-        Self::bounded_domain().len()
+        Self::finite_domain().len()
     }
 }
 
@@ -185,13 +185,13 @@ where
     }
 }
 
-impl<T> Signature for RelSet<T>
+impl<T> FiniteModelDomain for RelSet<T>
 where
     T: RelAtom,
 {
-    fn bounded_domain() -> BoundedDomain<Self> {
+    fn finite_domain() -> BoundedDomain<Self> {
         let mut values = vec![Self::empty()];
-        for item in T::bounded_domain().into_vec() {
+        for item in T::finite_domain().into_vec() {
             let mut with_item = values.clone();
             for set in &mut with_item {
                 set.insert(item.clone());
@@ -199,6 +199,20 @@ where
             values.extend(with_item);
         }
         BoundedDomain::new(values)
+    }
+}
+
+impl<T> SymbolicEncoding for RelSet<T>
+where
+    T: RelAtom + SymbolicEncoding,
+{
+    fn symbolic_sort() -> SymbolicSort {
+        let element_sort = T::symbolic_sort();
+        SymbolicSort::RelSet {
+            type_name: type_name::<Self>(),
+            domain_size: power_set_domain_size(element_sort.domain_size()),
+            element: Box::new(element_sort),
+        }
     }
 }
 
@@ -458,17 +472,17 @@ where
     }
 }
 
-impl<A, B> Signature for Relation2<A, B>
+impl<A, B> FiniteModelDomain for Relation2<A, B>
 where
     A: RelAtom,
     B: RelAtom,
 {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        let pair_domain = A::bounded_domain()
+    fn finite_domain() -> BoundedDomain<Self> {
+        let pair_domain = A::finite_domain()
             .into_vec()
             .into_iter()
             .flat_map(|left| {
-                B::bounded_domain()
+                B::finite_domain()
                     .into_vec()
                     .into_iter()
                     .map(move |right| (left.clone(), right))
@@ -484,6 +498,25 @@ where
             values.extend(with_pair);
         }
         BoundedDomain::new(values)
+    }
+}
+
+impl<A, B> SymbolicEncoding for Relation2<A, B>
+where
+    A: RelAtom + SymbolicEncoding,
+    B: RelAtom + SymbolicEncoding,
+{
+    fn symbolic_sort() -> SymbolicSort {
+        let left = A::symbolic_sort();
+        let right = B::symbolic_sort();
+        SymbolicSort::Relation2 {
+            type_name: type_name::<Self>(),
+            domain_size: power_set_domain_size(
+                left.domain_size().saturating_mul(right.domain_size()),
+            ),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
     }
 }
 
@@ -602,7 +635,7 @@ fn domain_len<T>() -> usize
 where
     T: RelAtom,
 {
-    T::bounded_domain().len()
+    T::finite_domain().len()
 }
 
 fn short_type_name<T>() -> String {
@@ -611,6 +644,14 @@ fn short_type_name<T>() -> String {
         .next()
         .unwrap_or(type_name::<T>())
         .to_owned()
+}
+
+fn power_set_domain_size(exponent: usize) -> usize {
+    if exponent >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        1usize << exponent
+    }
 }
 
 fn zero_bits(size: usize) -> Vec<u64> {
@@ -653,7 +694,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BoundedDomain, Signature};
+    use crate::{BoundedDomain, FiniteModelDomain};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Node {
@@ -662,13 +703,19 @@ mod tests {
         C,
     }
 
-    impl Signature for Node {
-        fn bounded_domain() -> BoundedDomain<Self> {
+    impl FiniteModelDomain for Node {
+        fn finite_domain() -> BoundedDomain<Self> {
             BoundedDomain::new(vec![Self::A, Self::B, Self::C])
         }
     }
 
     impl RelAtom for Node {}
+
+    impl SymbolicEncoding for Node {
+        fn symbolic_sort() -> SymbolicSort {
+            SymbolicSort::finite::<Self>()
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Color {
@@ -676,13 +723,19 @@ mod tests {
         Blue,
     }
 
-    impl Signature for Color {
-        fn bounded_domain() -> BoundedDomain<Self> {
+    impl FiniteModelDomain for Color {
+        fn finite_domain() -> BoundedDomain<Self> {
             BoundedDomain::new(vec![Self::Red, Self::Blue])
         }
     }
 
     impl RelAtom for Color {}
+
+    impl SymbolicEncoding for Color {
+        fn symbolic_sort() -> SymbolicSort {
+            SymbolicSort::finite::<Self>()
+        }
+    }
 
     #[test]
     fn rel_set_supports_basic_algebra() {
@@ -775,5 +828,14 @@ mod tests {
             (Node::A, Color::Red),
             (Node::C, Color::Blue),
         ])));
+    }
+
+    #[test]
+    fn relation_symbolic_sort_domain_sizes_are_computed_combinatorially() {
+        let set_sort = RelSet::<Node>::symbolic_sort();
+        assert_eq!(set_sort.domain_size(), 8);
+
+        let relation_sort = Relation2::<Node, Color>::symbolic_sort();
+        assert_eq!(relation_sort.domain_size(), 64);
     }
 }

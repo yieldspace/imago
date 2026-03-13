@@ -1,12 +1,14 @@
-use nirvash::{BoolExpr, Fairness, Ltl, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl};
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::{
-    ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::bounds::ArtifactChunks;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum UploadStage {
     Missing,
     Partial,
@@ -14,7 +16,7 @@ pub enum UploadStage {
     Committed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum ReleaseStage {
     None,
     Prepared,
@@ -23,7 +25,7 @@ pub enum ReleaseStage {
     RolledBack,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub struct ArtifactDeployState {
     pub upload: UploadStage,
     pub release: ReleaseStage,
@@ -32,7 +34,16 @@ pub struct ArtifactDeployState {
     pub chunks: ArtifactChunks,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum ArtifactDeployAction {
     /// Receive chunk
     ReceiveChunk,
@@ -182,11 +193,11 @@ fn rollback_finish_fairness() -> Fairness<ArtifactDeployState, ArtifactDeployAct
 }
 
 #[subsystem_spec]
-impl TransitionSystem for ArtifactDeploySpec {
+impl FrontendSpec for ArtifactDeploySpec {
     type State = ArtifactDeployState;
     type Action = ArtifactDeployAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "artifact_deploy"
     }
 
@@ -314,6 +325,7 @@ mod tests {
     use super::*;
     use nirvash::{ModelBackend, ModelCheckConfig};
     use nirvash_check::ModelChecker;
+    use nirvash_proof::{DefaultProofExporter, ProofExporter, invariant_obligations};
 
     #[test]
     fn prepared_release_can_promote() {
@@ -355,8 +367,9 @@ mod tests {
     #[test]
     fn explicit_and_symbolic_backends_agree() {
         let spec = ArtifactDeploySpec::new();
+        let lowered = crate::lowered_spec(&spec);
         let explicit_snapshot = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -365,7 +378,7 @@ mod tests {
         .full_reachable_graph_snapshot()
         .expect("explicit artifact_deploy snapshot");
         let symbolic_snapshot = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -384,7 +397,7 @@ mod tests {
         assert_eq!(symbolic_snapshot, explicit_snapshot);
 
         let explicit_result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -393,7 +406,7 @@ mod tests {
         .check_all()
         .expect("explicit artifact_deploy result");
         let symbolic_result = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -410,5 +423,33 @@ mod tests {
             Err(error) => panic!("symbolic artifact_deploy result: {error:?}"),
         };
         assert_eq!(symbolic_result, explicit_result);
+    }
+
+    #[test]
+    fn proof_export_uses_lowered_spec_core() {
+        let spec = ArtifactDeploySpec::new();
+        let lowered = crate::lowered_spec(&spec);
+        let exporter = DefaultProofExporter;
+
+        let tla_module = exporter.export_tla_module(&lowered.core);
+        assert!(tla_module.contains("MODULE artifact_deploy"));
+        assert!(tla_module.contains("prepared_release_requires_committed_upload =="));
+        assert!(tla_module.contains("rollback_requires_auto_rollback_flag =="));
+        assert!(tla_module.contains("WF_vars("));
+        assert!(tla_module.contains("THEOREM prepared_release_requires_committed_upload_init"));
+        assert!(tla_module.contains("THEOREM rollback_requires_auto_rollback_flag_step"));
+
+        let obligations = invariant_obligations(&lowered.core);
+        assert_eq!(obligations.len(), 6);
+        let step = obligations
+            .iter()
+            .find(|obligation| {
+                obligation.label == "prepared_release_requires_committed_upload_step"
+            })
+            .expect("step obligation should exist");
+        let smt = exporter.export_smt_obligations(step);
+        assert!(smt.contains("(declare-sort Val 0)"));
+        assert!(smt.contains("prepared_release_requires_committed_upload_step"));
+        assert!(smt.contains("check-sat"));
     }
 }

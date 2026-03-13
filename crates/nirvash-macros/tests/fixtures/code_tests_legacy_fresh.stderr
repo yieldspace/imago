@@ -1,5 +1,5 @@
 error: fresh = ... is no longer supported; use binding = ... and implement fresh_runtime() on ProtocolRuntimeBinding<Spec>
-   --> tests/fixtures/code_tests_legacy_fresh.rs:129:46
+   --> tests/fixtures/code_tests_legacy_fresh.rs:131:46
     |
-129 | #[code_tests(spec = Spec, binding = Binding, fresh = tests::fresh_driver)]
+131 | #[code_tests(spec = Spec, binding = Binding, fresh = tests::fresh_driver)]
     |                                              ^^^^^

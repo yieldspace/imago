@@ -85,7 +85,7 @@ macro_rules! ltl {
 macro_rules! invariant {
     ($spec:path, $name:ident ($state:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::invariant($spec)]
-        fn $name() -> $crate::BoolExpr<<$spec as $crate::TransitionSystem>::State> {
+        fn $name() -> $crate::BoolExpr<<$spec as ::nirvash_lower::FrontendSpec>::State> {
             $crate::pred!($name($state) => $expr)
         }
     };
@@ -96,7 +96,7 @@ macro_rules! invariant {
 macro_rules! state_constraint {
     ($spec:path, $name:ident ($state:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::state_constraint($spec)]
-        fn $name() -> $crate::BoolExpr<<$spec as $crate::TransitionSystem>::State> {
+        fn $name() -> $crate::BoolExpr<<$spec as ::nirvash_lower::FrontendSpec>::State> {
             $crate::__nirvash_state_constraint_pred!($name($state) => $expr)
         }
     };
@@ -108,8 +108,8 @@ macro_rules! action_constraint {
     ($spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::action_constraint($spec)]
         fn $name() -> $crate::StepExpr<
-            <$spec as $crate::TransitionSystem>::State,
-            <$spec as $crate::TransitionSystem>::Action,
+            <$spec as ::nirvash_lower::FrontendSpec>::State,
+            <$spec as ::nirvash_lower::FrontendSpec>::Action,
         > {
             $crate::__nirvash_action_constraint_pred!($name($prev, $action, $next) => $expr)
         }
@@ -122,8 +122,8 @@ macro_rules! property {
     ($spec:path, $name:ident => $($formula:tt)+) => {
         #[::nirvash_macros::property($spec)]
         fn $name() -> $crate::Ltl<
-            <$spec as $crate::TransitionSystem>::State,
-            <$spec as $crate::TransitionSystem>::Action,
+            <$spec as ::nirvash_lower::FrontendSpec>::State,
+            <$spec as ::nirvash_lower::FrontendSpec>::Action,
         > {
             $crate::ltl!($($formula)+)
         }
@@ -136,8 +136,8 @@ macro_rules! fairness {
     (weak $spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::fairness($spec)]
         fn $name() -> $crate::Fairness<
-            <$spec as $crate::TransitionSystem>::State,
-            <$spec as $crate::TransitionSystem>::Action,
+            <$spec as ::nirvash_lower::FrontendSpec>::State,
+            <$spec as ::nirvash_lower::FrontendSpec>::Action,
         > {
             $crate::Fairness::weak($crate::step!($name($prev, $action, $next) => $expr))
         }
@@ -145,8 +145,8 @@ macro_rules! fairness {
     (strong $spec:path, $name:ident ($prev:pat_param, $action:pat_param, $next:pat_param) => $expr:expr $(,)?) => {
         #[::nirvash_macros::fairness($spec)]
         fn $name() -> $crate::Fairness<
-            <$spec as $crate::TransitionSystem>::State,
-            <$spec as $crate::TransitionSystem>::Action,
+            <$spec as ::nirvash_lower::FrontendSpec>::State,
+            <$spec as ::nirvash_lower::FrontendSpec>::Action,
         > {
             $crate::Fairness::strong($crate::step!($name($prev, $action, $next) => $expr))
         }
@@ -181,12 +181,12 @@ macro_rules! register_symbolic_effects {
     };
 }
 
-/// Implement a generated companion signature trait with less boilerplate.
+/// Implement a generated finite-domain companion trait with less boilerplate.
 ///
-/// This is a manual fallback for `#[derive(Signature)] #[signature(custom)]` cases
+/// This is a manual fallback for `#[derive(FiniteModelDomain)] #[finite_model_domain(custom)]` cases
 /// where bounds/filter attributes are not expressive enough.
 #[macro_export]
-macro_rules! signature_spec {
+macro_rules! finite_model_domain_spec {
     (
         $trait:ident for $ty:ty,
         representatives = $representatives:expr
@@ -195,7 +195,7 @@ macro_rules! signature_spec {
         $(,)?
     ) => {
         impl $trait for $ty {
-            fn representatives() -> $crate::BoundedDomain<Self> {
+            fn finite_domain() -> $crate::BoundedDomain<Self> {
                 let __nirvash_domain = $crate::into_bounded_domain($representatives);
                 $(
                     let __nirvash_domain = __nirvash_domain.filter(|$filter_self| $filter);
@@ -203,7 +203,7 @@ macro_rules! signature_spec {
                 __nirvash_domain
             }
 
-            fn signature_invariant(&self) -> bool {
+            fn value_invariant(&self) -> bool {
                 true $(
                     && {
                         let $invariant_self = self;
@@ -215,7 +215,7 @@ macro_rules! signature_spec {
     };
 }
 
-/// Implement symbolic state schema metadata for `#[derive(Signature)] #[signature(custom)]` states.
+/// Implement symbolic encoding metadata for `#[derive(SymbolicEncoding)] #[symbolic_encoding(custom)]` states.
 #[macro_export]
 macro_rules! symbolic_state_spec {
     (
@@ -224,21 +224,19 @@ macro_rules! symbolic_state_spec {
         }
     ) => {
         const _: () = {
-            impl $crate::SymbolicSortSpec for $ty {
+            impl ::nirvash_lower::SymbolicEncoding for $ty {
                 fn symbolic_sort() -> $crate::SymbolicSort {
                     $crate::SymbolicSort::composite::<Self>(vec![
                         $(
                             $crate::SymbolicSortField::new(
                                 stringify!($field),
-                                <$field_ty as $crate::SymbolicSortSpec>::symbolic_sort(),
+                                <$field_ty as ::nirvash_lower::SymbolicEncoding>::symbolic_sort(),
                             ),
                         )+
                     ])
                 }
-            }
 
-            impl $crate::SymbolicStateSpec for $ty {
-                fn symbolic_state_schema() -> $crate::SymbolicStateSchema<Self> {
+                fn symbolic_state_schema() -> ::core::option::Option<$crate::SymbolicStateSchema<Self>> {
                     let mut __nirvash_fields = ::std::vec::Vec::new();
                     $(
                         __nirvash_fields.extend($crate::symbolic_state_fields::<Self, $field_ty, _, _>(
@@ -249,11 +247,11 @@ macro_rules! symbolic_state_spec {
                             },
                         ));
                     )+
-                    $crate::SymbolicStateSchema::new(__nirvash_fields, || Self {
+                    ::core::option::Option::Some($crate::SymbolicStateSchema::new(__nirvash_fields, || Self {
                         $(
                             $field: $crate::symbolic_seed_value::<$field_ty>(),
                         )+
-                    })
+                    }))
                 }
             }
 
@@ -262,7 +260,10 @@ macro_rules! symbolic_state_spec {
             }
 
             fn __nirvash_build_symbolic_state_schema() -> ::std::boxed::Box<dyn ::std::any::Any> {
-                ::std::boxed::Box::new(<$ty as $crate::SymbolicStateSpec>::symbolic_state_schema())
+                ::std::boxed::Box::new(
+                    <$ty as ::nirvash_lower::SymbolicEncoding>::symbolic_state_schema()
+                        .expect("symbolic state schema should be available")
+                )
             }
 
             $crate::inventory::submit! {

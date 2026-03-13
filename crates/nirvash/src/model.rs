@@ -244,25 +244,52 @@ impl Default for ExplicitModelCheckOptions {
     }
 }
 
-/// Current symbolic-backend successor solving strategy.
+/// Current relational symbolic bridge solving strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SymbolicSuccessorStrategy {
+pub enum RelationalBridgeStrategy {
     /// Enumerate successors by repeatedly solving the transition relation with blocking clauses.
     SolverEnumeration,
 }
 
-/// Current symbolic-backend bounded-lasso encoding strategy.
+/// Settings for the relational symbolic bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SymbolicBoundedLassoEncoding {
-    /// Unroll bounded lasso states directly into SMT with a loop selector.
-    DirectSmt,
+pub struct RelationalBridgeOptions {
+    pub strategy: RelationalBridgeStrategy,
+}
+
+impl RelationalBridgeOptions {
+    pub const fn current() -> Self {
+        Self {
+            strategy: RelationalBridgeStrategy::SolverEnumeration,
+        }
+    }
+
+    pub const fn with_strategy(mut self, strategy: RelationalBridgeStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+}
+
+impl Default for RelationalBridgeOptions {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
+/// Current symbolic-backend temporal engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SymbolicTemporalEngine {
+    /// Search temporal counterexamples by direct SMT bounded-lasso encoding.
+    BoundedLasso,
+    /// Search temporal counterexamples via a liveness-to-safety reduction.
+    LivenessToSafety,
 }
 
 /// Current symbolic-backend safety engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SymbolicSafetyEngine {
-    /// Build a reachable graph by solving the transition relation successor-by-successor.
-    ReachableGraph,
+    /// Search safety counterexamples by direct SMT bounded unrolling.
+    Bmc,
     /// Prove invariants with bounded base cases plus inductive step checks.
     KInduction,
     /// Prove invariants with property-directed blocking over symbolic predecessor queries.
@@ -320,8 +347,8 @@ impl Default for SymbolicPdrOptions {
 /// Backend-specific knobs for the symbolic model checker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SymbolicModelCheckOptions {
-    pub successors: SymbolicSuccessorStrategy,
-    pub bounded_lasso: SymbolicBoundedLassoEncoding,
+    pub bridge: RelationalBridgeOptions,
+    pub temporal: SymbolicTemporalEngine,
     pub safety: SymbolicSafetyEngine,
     pub k_induction: SymbolicKInductionOptions,
     pub pdr: SymbolicPdrOptions,
@@ -330,12 +357,22 @@ pub struct SymbolicModelCheckOptions {
 impl SymbolicModelCheckOptions {
     pub const fn current() -> Self {
         Self {
-            successors: SymbolicSuccessorStrategy::SolverEnumeration,
-            bounded_lasso: SymbolicBoundedLassoEncoding::DirectSmt,
-            safety: SymbolicSafetyEngine::ReachableGraph,
+            bridge: RelationalBridgeOptions::current(),
+            temporal: SymbolicTemporalEngine::BoundedLasso,
+            safety: SymbolicSafetyEngine::Bmc,
             k_induction: SymbolicKInductionOptions::current(),
             pdr: SymbolicPdrOptions::current(),
         }
+    }
+
+    pub const fn with_bridge(mut self, bridge: RelationalBridgeOptions) -> Self {
+        self.bridge = bridge;
+        self
+    }
+
+    pub const fn with_temporal(mut self, temporal: SymbolicTemporalEngine) -> Self {
+        self.temporal = temporal;
+        self
     }
 
     pub const fn with_safety(mut self, safety: SymbolicSafetyEngine) -> Self {
@@ -530,8 +567,8 @@ mod tests {
             simulation: ExplicitSimulationOptions::new(4, 12, 7),
         };
         let symbolic = SymbolicModelCheckOptions {
-            successors: SymbolicSuccessorStrategy::SolverEnumeration,
-            bounded_lasso: SymbolicBoundedLassoEncoding::DirectSmt,
+            bridge: RelationalBridgeOptions::current(),
+            temporal: SymbolicTemporalEngine::BoundedLasso,
             safety: SymbolicSafetyEngine::PdrIc3,
             k_induction: SymbolicKInductionOptions::current().with_max_depth(6),
             pdr: SymbolicPdrOptions::current().with_max_frames(9),

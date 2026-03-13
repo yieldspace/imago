@@ -1,13 +1,28 @@
 use std::{fmt::Debug, panic::AssertUnwindSafe, process};
 
-pub use crate::ReachableGraphSnapshot;
-pub use crate::system::{
-    ActionApplier, ModelCase, ModelCaseSource, StateObserver, TransitionSystem,
-};
-use crate::{IntoBoundedDomain, into_bounded_domain};
+use nirvash::{IntoBoundedDomain, into_bounded_domain};
+pub use nirvash::{ReachableGraphSnapshot, inventory};
+pub use nirvash_lower::{FrontendSpec, ModelInstance, Trace};
 
-/// Spec-side contract for replaying runtime behavior against a transition system.
-pub trait ProtocolConformanceSpec: TransitionSystem {
+#[allow(async_fn_in_trait)]
+pub trait ActionApplier {
+    type Action;
+    type Output;
+    type Context;
+
+    async fn execute_action(&self, context: &Self::Context, action: &Self::Action) -> Self::Output;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait StateObserver {
+    type SummaryState;
+    type Context;
+
+    async fn observe_state(&self, context: &Self::Context) -> Self::SummaryState;
+}
+
+/// Spec-side contract for replaying runtime behavior against a lowered frontend spec.
+pub trait ProtocolConformanceSpec: FrontendSpec {
     type ExpectedOutput: Clone + Debug + PartialEq + Eq;
     type ProbeState: Clone + Debug;
     type ProbeOutput: Clone + Debug;
@@ -55,7 +70,6 @@ pub struct PositiveWitness<Context, Input> {
 }
 
 impl<Context, Input> PositiveWitness<Context, Input> {
-    /// Creates a named positive witness with concrete context and input.
     pub fn new(name: impl Into<String>, context: Context, input: Input) -> Self {
         Self {
             name: name.into(),
@@ -65,28 +79,23 @@ impl<Context, Input> PositiveWitness<Context, Input> {
         }
     }
 
-    /// Marks whether this witness is the canonical replay choice for prefix execution.
     pub fn with_canonical(mut self, canonical: bool) -> Self {
         self.canonical = canonical;
         self
     }
 
-    /// Returns the stable witness label used in test names and failures.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Returns the concrete runtime context for the witness.
     pub fn context(&self) -> &Context {
         &self.context
     }
 
-    /// Returns the concrete runtime input for the witness.
     pub fn input(&self) -> &Input {
         &self.input
     }
 
-    /// Returns whether this witness is used for canonical prefix replay.
     pub fn canonical(&self) -> bool {
         self.canonical
     }
@@ -101,7 +110,6 @@ pub struct NegativeWitness<Context, Input> {
 }
 
 impl<Context, Input> NegativeWitness<Context, Input> {
-    /// Creates a named negative witness with concrete context and input.
     pub fn new(name: impl Into<String>, context: Context, input: Input) -> Self {
         Self {
             name: name.into(),
@@ -110,17 +118,14 @@ impl<Context, Input> NegativeWitness<Context, Input> {
         }
     }
 
-    /// Returns the stable witness label used in test names and failures.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Returns the concrete runtime context for the witness.
     pub fn context(&self) -> &Context {
         &self.context
     }
 
-    /// Returns the concrete runtime input for the witness.
     pub fn input(&self) -> &Input {
         &self.input
     }
@@ -135,22 +140,16 @@ pub enum WitnessKind {
 }
 
 pub trait ProtocolInputWitnessCodec<Action>: Clone + Debug {
-    /// Encodes the canonical concrete input used for an allowed abstract transition.
     fn canonical_positive(action: &Action) -> Self;
 
-    /// Returns the concrete inputs used for allowed abstract transitions.
-    ///
-    /// Implementations should place the canonical witness at index `0`.
     fn positive_family(action: &Action) -> Vec<Self> {
         vec![Self::canonical_positive(action)]
     }
 
-    /// Returns the concrete inputs used for rejected abstract transitions.
     fn negative_family(action: &Action) -> Vec<Self> {
         vec![Self::canonical_positive(action)]
     }
 
-    /// Returns the stable witness label used by generated witnesses.
     fn witness_name(_action: &Action, kind: WitnessKind, index: usize) -> String {
         match kind {
             WitnessKind::CanonicalPositive => "principal".to_owned(),
@@ -160,7 +159,6 @@ pub trait ProtocolInputWitnessCodec<Action>: Clone + Debug {
     }
 }
 
-/// Borrowed witness family used by helper validation.
 pub enum WitnessFamily<'a, Context, Input> {
     Positive(&'a [PositiveWitness<Context, Input>]),
     Negative(&'a [NegativeWitness<Context, Input>]),
@@ -175,10 +173,8 @@ where
     type Input: Clone + Debug;
     type Session;
 
-    /// Creates a fresh session that can carry probe identity or other witness-local state.
     async fn fresh_session(spec: &Spec) -> Self::Session;
 
-    /// Returns the concrete inputs that should realize a valid abstract transition.
     fn positive_witnesses(
         spec: &Spec,
         session: &Self::Session,
@@ -187,7 +183,6 @@ where
         next: &Spec::State,
     ) -> Vec<PositiveWitness<Self::Context, Self::Input>>;
 
-    /// Returns the concrete inputs that should keep the abstract transition rejected.
     fn negative_witnesses(
         spec: &Spec,
         session: &Self::Session,
@@ -195,7 +190,6 @@ where
         action: &Spec::Action,
     ) -> Vec<NegativeWitness<Self::Context, Self::Input>>;
 
-    /// Executes a concrete witness input against the runtime.
     async fn execute_input(
         runtime: &Self::Runtime,
         session: &mut Self::Session,
@@ -203,7 +197,6 @@ where
         input: &Self::Input,
     ) -> Spec::ProbeOutput;
 
-    /// Returns the probe context used to observe the authoritative runtime state.
     fn probe_context(session: &Self::Session) -> Self::Context;
 }
 
@@ -214,7 +207,6 @@ pub struct DynamicTestCase {
 }
 
 impl DynamicTestCase {
-    /// Creates a dynamically named test case.
     pub fn new<F>(name: impl Into<String>, run: F) -> Self
     where
         F: Fn() -> Result<(), String> + 'static,
@@ -225,7 +217,6 @@ impl DynamicTestCase {
         }
     }
 
-    /// Returns the externally visible test name.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -240,7 +231,7 @@ pub struct RegisteredCodeWitnessTestProvider {
     pub build: fn() -> Vec<DynamicTestCase>,
 }
 
-crate::inventory::collect!(RegisteredCodeWitnessTestProvider);
+nirvash::inventory::collect!(RegisteredCodeWitnessTestProvider);
 
 pub fn summarize_state<Spec>(spec: &Spec, probe: &Spec::ProbeState) -> Spec::SummaryState
 where
@@ -292,7 +283,7 @@ where
     Spec: ProtocolConformanceSpec,
 {
     let projected = spec.abstract_state(summary);
-    <Spec as TransitionSystem>::transition(spec, &projected, action).is_some()
+    <Spec as FrontendSpec>::transition(spec, &projected, action).is_some()
 }
 
 pub fn assert_initial_refinement<Spec>(spec: &Spec, summary: &Spec::SummaryState)
@@ -301,7 +292,7 @@ where
     Spec::State: PartialEq,
 {
     let projected = spec.abstract_state(summary);
-    let initial_states = <Spec as TransitionSystem>::initial_states(spec);
+    let initial_states = <Spec as FrontendSpec>::initial_states(spec);
     assert!(
         initial_states.contains(&projected),
         "runtime initial state {:?} must be one of the declared initial states {:?}",
@@ -321,7 +312,7 @@ where
     Spec::State: PartialEq,
 {
     let before = spec.abstract_state(before_summary);
-    let expected_next = <Spec as TransitionSystem>::transition(spec, &before, action)
+    let expected_next = <Spec as FrontendSpec>::transition(spec, &before, action)
         .expect("step refinement requires an allowed abstract transition");
     let projected_after = spec.abstract_state(after_summary);
     assert_eq!(
@@ -404,122 +395,6 @@ pub fn assert_projection_exhaustive<Input, Output, Domain, Actual, Expected>(
     }
 }
 
-pub fn assert_witness_family_completeness<Context, Input>(
-    label: &str,
-    family: WitnessFamily<'_, Context, Input>,
-) where
-    Context: Debug,
-    Input: Debug,
-{
-    match family {
-        WitnessFamily::Positive(witnesses) => {
-            assert!(
-                !witnesses.is_empty(),
-                "{label}: positive witnesses are empty"
-            );
-            let canonical = witnesses
-                .iter()
-                .filter(|witness| witness.canonical())
-                .count();
-            assert_eq!(
-                canonical,
-                1,
-                "{label}: expected canonical positive witness count = 1, found {} from {:?}",
-                canonical,
-                witnesses
-                    .iter()
-                    .map(|witness| format!("{}(canonical={})", witness.name(), witness.canonical()))
-                    .collect::<Vec<_>>(),
-            );
-        }
-        WitnessFamily::Negative(witnesses) => {
-            assert!(
-                !witnesses.is_empty(),
-                "{label}: negative witnesses are empty"
-            );
-        }
-    }
-}
-
-pub fn assert_witness_codec_exhaustive<Action, Input, Domain, Canonical, Positive, Negative, Name>(
-    label: &str,
-    domain: Domain,
-    canonical_positive: Canonical,
-    positive_family: Positive,
-    negative_family: Negative,
-    witness_name: Name,
-) where
-    Action: Debug,
-    Input: Debug + Clone,
-    Domain: IntoBoundedDomain<Action>,
-    Canonical: Fn(&Action) -> Input,
-    Positive: Fn(&Action) -> Vec<Input>,
-    Negative: Fn(&Action) -> Vec<Input>,
-    Name: Fn(&Action, WitnessKind, usize) -> String,
-{
-    for action in into_bounded_domain(domain).into_vec() {
-        let _canonical = canonical_positive(&action);
-        let positive = positive_family(&action);
-        let negative = negative_family(&action);
-        assert!(
-            !positive.is_empty(),
-            "{label}: positive witness codec family is empty for action {action:?}",
-        );
-        assert!(
-            !negative.is_empty(),
-            "{label}: negative witness codec family is empty for action {action:?}",
-        );
-        let positive_names = positive
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                witness_name(
-                    &action,
-                    if index == 0 {
-                        WitnessKind::CanonicalPositive
-                    } else {
-                        WitnessKind::Positive
-                    },
-                    index,
-                )
-            })
-            .collect::<Vec<_>>();
-        let negative_names = negative
-            .iter()
-            .enumerate()
-            .map(|(index, _)| witness_name(&action, WitnessKind::Negative, index))
-            .collect::<Vec<_>>();
-        assert!(
-            positive_names.iter().all(|name| !name.is_empty()),
-            "{label}: positive witness codec produced an empty name for action {action:?}",
-        );
-        assert!(
-            negative_names.iter().all(|name| !name.is_empty()),
-            "{label}: negative witness codec produced an empty name for action {action:?}",
-        );
-    }
-}
-
-#[derive(Debug, Default)]
-struct WitnessHarnessArgs {
-    filter: Option<String>,
-    exact: bool,
-    list: bool,
-}
-
-impl WitnessHarnessArgs {
-    fn matches(&self, name: &str) -> bool {
-        let Some(filter) = &self.filter else {
-            return true;
-        };
-        if self.exact {
-            name == filter
-        } else {
-            name.contains(filter)
-        }
-    }
-}
-
 fn parse_witness_harness_args() -> WitnessHarnessArgs {
     let mut parsed = WitnessHarnessArgs::default();
     let mut args = std::env::args().skip(1);
@@ -544,6 +419,26 @@ fn parse_witness_harness_args() -> WitnessHarnessArgs {
     parsed
 }
 
+#[derive(Debug, Default)]
+struct WitnessHarnessArgs {
+    filter: Option<String>,
+    exact: bool,
+    list: bool,
+}
+
+impl WitnessHarnessArgs {
+    fn matches(&self, name: &str) -> bool {
+        let Some(filter) = &self.filter else {
+            return true;
+        };
+        if self.exact {
+            name == filter
+        } else {
+            name.contains(filter)
+        }
+    }
+}
+
 pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&'static str>() {
         (*message).to_owned()
@@ -555,7 +450,7 @@ pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String
 }
 
 fn collect_dynamic_witness_tests() -> Vec<DynamicTestCase> {
-    let mut tests = crate::inventory::iter::<RegisteredCodeWitnessTestProvider>
+    let mut tests = nirvash::inventory::iter::<RegisteredCodeWitnessTestProvider>
         .into_iter()
         .flat_map(|provider| (provider.build)())
         .collect::<Vec<_>>();
@@ -621,152 +516,4 @@ pub fn run_registered_code_witness_tests() {
         failures.len()
     );
     process::exit(101);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ActionVocabulary;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum DummyAction {
-        Advance,
-        Reject,
-    }
-
-    impl ActionVocabulary for DummyAction {
-        fn action_vocabulary() -> Vec<Self> {
-            vec![Self::Advance, Self::Reject]
-        }
-    }
-
-    #[derive(Debug, Default, Clone, Copy)]
-    struct DummySpec;
-
-    impl TransitionSystem for DummySpec {
-        type State = bool;
-        type Action = DummyAction;
-
-        fn initial_states(&self) -> Vec<Self::State> {
-            vec![false]
-        }
-
-        fn actions(&self) -> Vec<Self::Action> {
-            DummyAction::action_vocabulary()
-        }
-
-        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
-            match (state, action) {
-                (false, DummyAction::Advance) => Some(true),
-                _ => None,
-            }
-        }
-    }
-
-    impl ProtocolConformanceSpec for DummySpec {
-        type ExpectedOutput = &'static str;
-        type ProbeState = bool;
-        type ProbeOutput = &'static str;
-        type SummaryState = bool;
-        type SummaryOutput = &'static str;
-
-        fn expected_output(
-            &self,
-            _prev: &Self::State,
-            _action: &Self::Action,
-            _next: Option<&Self::State>,
-        ) -> Self::ExpectedOutput {
-            "ok"
-        }
-
-        fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
-            *probe
-        }
-
-        fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
-            *probe
-        }
-
-        fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
-            *summary
-        }
-
-        fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
-            *summary
-        }
-    }
-
-    #[test]
-    fn refinement_helpers_accept_allowed_step_and_output() {
-        let spec = DummySpec;
-        assert_initial_refinement(&spec, &false);
-        let next = assert_step_refinement(&spec, &false, &DummyAction::Advance, &true);
-        assert!(next);
-        assert_output_refinement(&spec, &false, &DummyAction::Advance, &true, &"ok");
-    }
-
-    #[test]
-    fn step_refinement_panics_for_rejected_transition() {
-        let spec = DummySpec;
-        let panic = std::panic::catch_unwind(|| {
-            let _ = assert_step_refinement(&spec, &false, &DummyAction::Reject, &false);
-        });
-        assert!(panic.is_err(), "rejected transition should panic");
-    }
-
-    #[test]
-    fn output_refinement_panics_for_mismatched_output() {
-        let spec = DummySpec;
-        let panic = std::panic::catch_unwind(|| {
-            assert_output_refinement(&spec, &false, &DummyAction::Advance, &true, &"bad");
-        });
-        assert!(panic.is_err(), "mismatched output should panic");
-    }
-
-    #[test]
-    fn enabled_from_summary_matches_transition_reachability() {
-        let spec = DummySpec;
-
-        assert!(enabled_from_summary(&spec, &false, &DummyAction::Advance));
-        assert!(!enabled_from_summary(&spec, &false, &DummyAction::Reject));
-        assert!(!enabled_from_summary(&spec, &true, &DummyAction::Advance));
-    }
-
-    #[test]
-    fn declared_projection_helpers_accept_matching_values() {
-        assert_declared_state_projection(&true, &true, &"state", &"state");
-        assert_declared_output_projection(&vec!["ok"], &vec!["ok"]);
-    }
-
-    #[test]
-    fn witness_family_helper_accepts_positive_and_negative_cases() {
-        let positive =
-            vec![PositiveWitness::new("principal", (), DummyAction::Advance).with_canonical(true)];
-        let negative = vec![NegativeWitness::new("principal", (), DummyAction::Reject)];
-
-        assert_witness_family_completeness("positive", WitnessFamily::Positive(&positive));
-        assert_witness_family_completeness("negative", WitnessFamily::Negative(&negative));
-    }
-
-    #[test]
-    fn exhaustive_helpers_accept_matching_domains() {
-        assert_projection_exhaustive(
-            "bool identity",
-            [false, true],
-            |value| !value,
-            |value| !value,
-        );
-        assert_witness_codec_exhaustive(
-            "dummy codec",
-            [DummyAction::Advance, DummyAction::Reject],
-            |action| *action,
-            |action| vec![*action],
-            |action| vec![*action],
-            |_action, kind, index| match kind {
-                WitnessKind::CanonicalPositive => format!("canonical_{index}"),
-                WitnessKind::Positive => format!("positive_{index}"),
-                WitnessKind::Negative => format!("negative_{index}"),
-            },
-        );
-    }
 }

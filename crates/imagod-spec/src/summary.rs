@@ -15,7 +15,8 @@ use crate::{CommandProtocolObservedState, CommandProtocolOutput};
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryServiceId {
     #[default]
@@ -34,7 +35,8 @@ pub enum SummaryServiceId {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryStreamId {
     #[default]
@@ -53,7 +55,8 @@ pub enum SummaryStreamId {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummarySessionRole {
     #[default]
@@ -73,7 +76,8 @@ pub enum SummarySessionRole {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryRequestKind {
     #[default]
@@ -101,7 +105,8 @@ pub enum SummaryRequestKind {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryCommandEvent {
     #[default]
@@ -123,7 +128,8 @@ pub enum SummaryCommandEvent {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryLogChunk {
     #[default]
@@ -141,7 +147,8 @@ pub enum SummaryLogChunk {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryTaskState {
     #[default]
@@ -161,7 +168,8 @@ pub enum SummaryTaskState {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryTaskKind {
     #[default]
@@ -180,7 +188,8 @@ pub enum SummaryTaskKind {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryShutdownPhase {
     #[default]
@@ -203,7 +212,8 @@ pub enum SummaryShutdownPhase {
     Default,
     Serialize,
     Deserialize,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum SummaryManagerRuntimePhase {
     #[default]
@@ -216,7 +226,16 @@ pub enum SummaryManagerRuntimePhase {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct ShutdownStateSummary {
     pub phase: SummaryShutdownPhase,
@@ -228,7 +247,16 @@ pub struct ShutdownStateSummary {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub enum ContractEffectSummary {
     RequestObserved(SummaryStreamId, SummaryRequestKind),
@@ -303,7 +331,17 @@ pub struct ManagerRuntimeProbeOutput {
     pub output: ManagerRuntimeOutputSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 pub struct RouterProbeState {
     pub active_session: bool,
     pub role: Option<SummarySessionRole>,
@@ -342,7 +380,17 @@ impl Default for RouterProbeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 pub struct RouterStateSummary {
     pub active_session: bool,
     pub role: Option<SummarySessionRole>,
@@ -382,7 +430,16 @@ impl Default for RouterStateSummary {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct SessionAuthProbeState {
     pub active_session: bool,
@@ -394,7 +451,16 @@ pub struct SessionAuthProbeState {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct SessionAuthStateSummary {
     pub active_session: bool,
@@ -418,7 +484,17 @@ impl From<SessionAuthProbeState> for SessionAuthStateSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 pub struct LogsProbeState {
     pub service_running: bool,
     pub logs_authorized: bool,
@@ -445,7 +521,17 @@ impl Default for LogsProbeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 pub struct LogsStateSummary {
     pub service_running: bool,
     pub logs_authorized: bool,
@@ -473,7 +559,16 @@ impl Default for LogsStateSummary {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct RuntimeProbeState {
     pub service0_promoted: bool,
@@ -492,7 +587,16 @@ pub struct RuntimeProbeState {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct RuntimeStateSummary {
     pub service0_promoted: bool,
@@ -531,7 +635,16 @@ impl From<RuntimeProbeState> for RuntimeStateSummary {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct ManagerRuntimeProbeState {
     pub config_loaded: bool,
@@ -545,7 +658,16 @@ pub struct ManagerRuntimeProbeState {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, nirvash_macros::Signature,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    Serialize,
+    Deserialize,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
 )]
 pub struct ManagerRuntimeStateSummary {
     pub config_loaded: bool,

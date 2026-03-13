@@ -1,18 +1,14 @@
 use std::collections::BTreeMap;
 
-use nirvash::{BoundedDomain, RelAtom, RelSet, Signature};
-use nirvash_macros::nirvash_transition_program;
+use nirvash::{RelAtom, RelSet};
+use nirvash_macros::{
+    FiniteModelDomain as FormalFiniteModelDomain, nirvash_transition_program,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, FormalFiniteModelDomain)]
 enum Item {
     Alpha,
     Beta,
-}
-
-impl Signature for Item {
-    fn bounded_domain() -> BoundedDomain<Self> {
-        BoundedDomain::new(vec![Self::Alpha, Self::Beta])
-    }
 }
 
 impl RelAtom for Item {}

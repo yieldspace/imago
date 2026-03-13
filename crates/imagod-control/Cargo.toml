@@ -18,6 +18,8 @@ imagod-common = { workspace = true }
 imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
 nirvash = { workspace = true }
+nirvash-conformance = { workspace = true }
+nirvash-lower = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

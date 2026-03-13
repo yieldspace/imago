@@ -1,5 +1,5 @@
 error: probe = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>
-   --> tests/fixtures/code_tests_legacy_probe.rs:129:46
+   --> tests/fixtures/code_tests_legacy_probe.rs:131:46
     |
-129 | #[code_tests(spec = Spec, binding = Binding, probe = tests::Probe)]
+131 | #[code_tests(spec = Spec, binding = Binding, probe = tests::Probe)]
     |                                              ^^^^^

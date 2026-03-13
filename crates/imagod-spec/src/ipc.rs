@@ -60,7 +60,17 @@ impl Validate for ServiceBinding {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 /// Runtime application type carried from manifest into runner bootstrap.
 pub enum RunnerAppType {
     /// Runs a one-shot CLI-style component.
@@ -506,7 +516,16 @@ fn ip_in_cidr(ip: IpAddr, network: IpAddr, prefix_len: u8) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 #[serde(rename_all = "lowercase")]
 /// Plugin delivery kind used by manifest/bootstrap dependency definitions.
 pub enum PluginKind {
@@ -1098,7 +1117,7 @@ impl Validate for InvocationTokenClaims {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash::Signature;
+    use nirvash_lower::FiniteModelDomain;
 
     #[test]
     fn runner_app_type_domain_matches_expected_order() {

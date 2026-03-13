@@ -1,8 +1,8 @@
-use nirvash::Signature as _;
-use nirvash_macros::Signature;
+use nirvash_lower::FiniteModelDomain as _;
+use nirvash_macros::FiniteModelDomain;
 
-#[derive(Clone, Debug, PartialEq, Eq, Signature)]
-#[signature(custom)]
+#[derive(Clone, Debug, PartialEq, Eq, FiniteModelDomain)]
+#[finite_model_domain(custom)]
 struct State {
     ready: bool,
 }

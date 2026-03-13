@@ -1,16 +1,18 @@
 use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2,
-    Signature as _, StepExpr, TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelBackend, ModelCheckConfig, RelSet, Relation2, StepExpr,
 };
+use nirvash_lower::{FiniteModelDomain as _, FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
-    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
-    subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, action_constraint, fairness, invariant,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::atoms::{CommandEventAtom, LogChunkAtom, RequestKindAtom, StreamAtom};
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct WireProtocolState {
     requests: Relation2<StreamAtom, RequestKindAtom>,
     responses: Relation2<StreamAtom, RequestKindAtom>,
@@ -86,7 +88,9 @@ impl WireProtocolState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::Signature, ActionVocabulary)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::FiniteModelDomain, ActionVocabulary,
+)]
 pub enum WireProtocolAction {
     /// Observe one hello negotiation request/response.
     HelloNegotiate(StreamAtom),
@@ -138,23 +142,14 @@ impl WireProtocolSpec {
     }
 }
 
-nirvash::signature_spec!(
-    WireProtocolStateSignatureSpec for WireProtocolState,
+nirvash::finite_model_domain_spec!(
+    WireProtocolStateFiniteModelDomainSpec for WireProtocolState,
     representatives = crate::state_domain::reachable_state_domain(&WireProtocolSpec::new())
 );
 
-nirvash::symbolic_state_spec!(for WireProtocolState {
-    requests: Relation2<StreamAtom, RequestKindAtom>,
-    responses: Relation2<StreamAtom, RequestKindAtom>,
-    command_events: Relation2<StreamAtom, CommandEventAtom>,
-    log_follow_streams: RelSet<StreamAtom>,
-    log_chunks: Relation2<StreamAtom, LogChunkAtom>,
-    log_ended: RelSet<StreamAtom>,
-});
-
-fn wire_protocol_model_cases() -> Vec<ModelCase<WireProtocolState, WireProtocolAction>> {
+fn wire_protocol_model_cases() -> Vec<ModelInstance<WireProtocolState, WireProtocolAction>> {
     vec![
-        ModelCase::default()
+        ModelInstance::default()
             .with_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 exploration: nirvash::ExplorationMode::ReachableGraph,
@@ -293,11 +288,11 @@ fn logs_progress_fairness() -> Fairness<WireProtocolState, WireProtocolAction> {
 }
 
 #[subsystem_spec(model_cases(wire_protocol_model_cases))]
-impl TransitionSystem for WireProtocolSpec {
+impl FrontendSpec for WireProtocolSpec {
     type State = WireProtocolState;
     type Action = WireProtocolAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "wire_protocol"
     }
 

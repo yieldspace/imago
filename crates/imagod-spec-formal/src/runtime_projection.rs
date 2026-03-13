@@ -3,11 +3,12 @@ use imagod_spec::{ContractEffectSummary, SummaryServiceId};
 use imagod_spec::{
     RuntimeOutputSummary, RuntimeProbeOutput, RuntimeProbeState, RuntimeStateSummary,
 };
-use nirvash::{
-    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
+use nirvash::BoolExpr;
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
+use nirvash_macros::{
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, nirvash_projection_model,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     atoms::ServiceAtom,
@@ -25,7 +26,7 @@ use crate::{
 };
 
 /// imagod-control runtime surface projected from the unified `system` spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, ActionVocabulary)]
 pub enum RuntimeProjectionAction {
     /// Upload, commit, promote, and start service0.
     DeployService0,
@@ -217,11 +218,11 @@ fn normalize_runtime_state(spec: RuntimeProjectionSpec, state: SystemState) -> S
     <RuntimeProjectionSpec as ProtocolConformanceSpec>::abstract_state(&spec, &summary)
 }
 
-impl TransitionSystem for RuntimeProjectionSpec {
+impl FrontendSpec for RuntimeProjectionSpec {
     type State = SystemState;
     type Action = RuntimeProjectionAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "runtime_projection"
     }
 
@@ -380,6 +381,10 @@ impl TransitionSystem for RuntimeProjectionSpec {
             }
         }
     }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default().with_check_deadlocks(false)]
+    }
 }
 
 impl TemporalSpec for RuntimeProjectionSpec {
@@ -388,15 +393,9 @@ impl TemporalSpec for RuntimeProjectionSpec {
     }
 }
 
-impl ModelCaseSource for RuntimeProjectionSpec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-        vec![ModelCase::default().with_check_deadlocks(false)]
-    }
-}
-
 #[cfg(test)]
 fn runtime_probe_state_domain() -> nirvash::BoundedDomain<RuntimeProbeState> {
-    <RuntimeProbeState as nirvash::Signature>::bounded_domain()
+    <RuntimeProbeState as nirvash_lower::FiniteModelDomain>::bounded_domain()
 }
 
 #[cfg(test)]

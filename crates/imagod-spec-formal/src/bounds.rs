@@ -1,4 +1,4 @@
-use nirvash_macros::Signature as FormalSignature;
+use nirvash_macros::FiniteModelDomain as FormalFiniteModelDomain;
 
 use crate::{CommandErrorKind, CommandKind, CommandLifecycleState, PluginKind, RunnerAppType};
 
@@ -44,8 +44,8 @@ pub const SPEC_RUNNER_APP_TYPES: [RunnerAppType; 4] = [
 ];
 pub const SPEC_PLUGIN_KINDS: [PluginKind; 2] = [PluginKind::Native, PluginKind::Wasm];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FormalSignature)]
-#[signature(range = "0..=MAX")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FormalFiniteModelDomain)]
+#[finite_model_domain(range = "0..=MAX")]
 pub struct BoundedU8<const MAX: u8>(u8);
 
 impl<const MAX: u8> BoundedU8<MAX> {
@@ -78,7 +78,7 @@ impl<const MAX: u8> BoundedU8<MAX> {
     }
 }
 
-impl<const MAX: u8> nirvash::SymbolicSortSpec for BoundedU8<MAX> {
+impl<const MAX: u8> nirvash_lower::SymbolicEncoding for BoundedU8<MAX> {
     fn symbolic_sort() -> nirvash::SymbolicSort {
         nirvash::SymbolicSort::finite::<Self>()
     }
@@ -96,7 +96,7 @@ pub type TimeSteps = BoundedU8<MAX_TIME_STEPS>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash::Signature;
+    use nirvash_lower::FiniteModelDomain;
 
     #[test]
     fn bounded_u8_domain_matches_declared_max() {

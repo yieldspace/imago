@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 nirvash = { workspace = true }
+nirvash-lower = { workspace = true }
 nirvash-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }

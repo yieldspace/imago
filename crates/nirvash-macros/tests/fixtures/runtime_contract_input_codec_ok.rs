@@ -1,25 +1,24 @@
 use std::sync::Mutex;
 
-use nirvash::{
-    ActionVocabulary, TransitionSystem,
-    conformance::{ActionApplier, ProtocolConformanceSpec},
-};
+use nirvash::ActionVocabulary;
+use nirvash_lower::FrontendSpec;
+use nirvash_conformance::{ActionApplier, ProtocolConformanceSpec};
 use nirvash_macros::{
-    ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, Signature as FormalSignature,
+    ActionVocabulary as FormalActionVocabulary, ProtocolInputWitness, FiniteModelDomain as FormalFiniteModelDomain,
     code_witness_test_main, nirvash_runtime_contract,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, FormalFiniteModelDomain)]
 enum State {
     #[default]
     Idle,
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain, FormalActionVocabulary)]
 enum Action {
     Start,
     Stop,
@@ -35,9 +34,13 @@ enum Output {
 #[derive(Clone, Debug, PartialEq, Eq, ProtocolInputWitness)]
 struct Input(Action);
 
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]

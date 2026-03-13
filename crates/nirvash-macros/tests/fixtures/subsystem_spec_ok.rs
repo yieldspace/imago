@@ -1,16 +1,18 @@
-use nirvash::{BoolExpr, ModelCase, StepExpr, SymmetryReducer, TemporalSpec, TransitionSystem};
+use nirvash::{BoolExpr, StepExpr};
+use nirvash_lower::{FrontendSpec, ModelInstance};
+use nirvash_lower::SymmetrySpec;
 use nirvash_macros::{
-    Signature as FormalSignature, action_constraint, formal_tests, invariant, nirvash_expr,
+    FiniteModelDomain as FormalFiniteModelDomain, action_constraint, formal_tests, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, state_constraint, subsystem_spec,
     symmetry,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 struct State {
     busy: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Start,
     Stop,
@@ -20,9 +22,13 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec(model_cases(spec_model_cases))]
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State { busy: false }]
@@ -69,12 +75,12 @@ fn allow_declared_edges() -> StepExpr<State, Action> {
 }
 
 #[symmetry(Spec)]
-fn identity_symmetry() -> SymmetryReducer<State> {
-    SymmetryReducer::new("identity", |state| *state)
+fn identity_symmetry() -> SymmetrySpec<State> {
+    SymmetrySpec::new("identity", |state| *state)
 }
 
-fn spec_model_cases() -> Vec<ModelCase<State, Action>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+fn spec_model_cases() -> Vec<ModelInstance<State, Action>> {
+    vec![ModelInstance::default().with_check_deadlocks(false)]
 }
 
 fn spec_cases() -> Vec<Spec> {
@@ -86,6 +92,6 @@ const _: () = ();
 
 fn main() {
     let spec = Spec;
-    assert!(spec.invariants().len() == 1);
-    assert!(spec.properties().len() == 1);
+    assert!(nirvash_lower::TemporalSpec::invariants(&spec).len() == 1);
+    assert!(nirvash_lower::TemporalSpec::properties(&spec).len() == 1);
 }

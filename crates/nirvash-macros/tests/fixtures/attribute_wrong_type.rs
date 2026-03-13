@@ -1,26 +1,30 @@
 use nirvash::BoolExpr;
-use nirvash_macros::{Signature as FormalSignature, invariant, nirvash_expr};
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, invariant, nirvash_expr};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum OtherState {
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Tick,
 }
 
 struct Spec;
 
-impl nirvash::TransitionSystem for Spec {
+impl nirvash_lower::FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]

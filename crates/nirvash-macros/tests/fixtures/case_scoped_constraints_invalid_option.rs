@@ -1,12 +1,13 @@
-use nirvash::{BoolExpr, ModelCase, TransitionSystem};
-use nirvash_macros::{Signature as FormalSignature, state_constraint, subsystem_spec};
+use nirvash::BoolExpr;
+use nirvash_lower::{FrontendSpec, ModelInstance};
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, state_constraint, subsystem_spec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Tick,
 }
@@ -14,9 +15,13 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec(model_cases(spec_model_cases))]
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -36,8 +41,8 @@ fn invalid_option() -> BoolExpr<State> {
     nirvash::BoolExpr::new("invalid_option", |_| true)
 }
 
-fn spec_model_cases() -> Vec<ModelCase<State, Action>> {
-    vec![ModelCase::default()]
+fn spec_model_cases() -> Vec<ModelInstance<State, Action>> {
+    vec![ModelInstance::default()]
 }
 
 fn main() {}

@@ -1,19 +1,19 @@
 use nirvash::BoolExpr;
-use nirvash_macros::{Signature as FormalSignature, invariant};
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, invariant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Tick,
 }
 
 struct Spec;
 
-impl nirvash::TransitionSystem for Spec {
+impl nirvash_lower::FrontendSpec for Spec {
     type State = State;
     type Action = Action;
 

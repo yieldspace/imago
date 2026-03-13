@@ -32,6 +32,8 @@ web-transport-quinn = { workspace = true }
 imagod-spec-formal = { workspace = true }
 nirvash = { workspace = true }
 nirvash-check = { workspace = true }
+nirvash-conformance = { workspace = true }
+nirvash-lower = { workspace = true }
 nirvash-macros = { workspace = true }
 
 [[bench]]

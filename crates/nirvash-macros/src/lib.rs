@@ -13,10 +13,30 @@ use syn::{
     Type, UnOp, parse_macro_input,
 };
 
-#[proc_macro_derive(Signature, attributes(signature, sig, signature_invariant, viz))]
-pub fn derive_signature(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(
+    FiniteModelDomain,
+    attributes(
+        finite_model_domain,
+        finite_model,
+        finite_model_domain_invariant,
+        signature,
+        sig,
+        signature_invariant,
+        viz
+    )
+)]
+pub fn derive_finite_model_domain(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    match expand_signature_derive(input) {
+    match expand_finite_model_domain_derive(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_derive(SymbolicEncoding, attributes(symbolic_encoding))]
+pub fn derive_symbolic_encoding(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_symbolic_encoding_derive(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -178,7 +198,7 @@ pub fn code_witness_test_main(input: TokenStream) -> TokenStream {
 
         fn main() {
             let _ = __nirvash_code_witness_main_marker as fn();
-            ::nirvash::conformance::run_registered_code_witness_tests();
+            ::nirvash_conformance::run_registered_code_witness_tests();
         }
     }
     .into()
@@ -1551,17 +1571,19 @@ impl SignatureArgs {
     fn from_attrs(attrs: &[Attribute]) -> syn::Result<Self> {
         let mut args = Self::default();
         for attr in attrs {
-            if attr.path().is_ident("signature_invariant") {
+            if attr.path().is_ident("finite_model_domain_invariant")
+                || attr.path().is_ident("signature_invariant")
+            {
                 if args.helper_invariant.is_some() {
                     return Err(syn::Error::new(
                         attr.span(),
-                        "duplicate #[signature_invariant(...)] attribute",
+                        "duplicate #[finite_model_domain_invariant(...)] attribute",
                     ));
                 }
                 args.helper_invariant = Some(parse_self_expr_attribute(attr)?);
                 continue;
             }
-            if !attr.path().is_ident("signature") {
+            if !(attr.path().is_ident("finite_model_domain") || attr.path().is_ident("signature")) {
                 continue;
             }
             attr.parse_nested_meta(|meta| {
@@ -1571,17 +1593,17 @@ impl SignatureArgs {
                 }
                 if meta.path.is_ident("domain_fn") {
                     return Err(meta.error(
-                        "#[signature(domain_fn = ...)] is removed; use #[signature(custom)] and implement the generated companion trait instead",
+                        "#[finite_model_domain(domain_fn = ...)] is removed; use #[finite_model_domain(custom)] and implement the generated companion trait instead",
                     ));
                 }
                 if meta.path.is_ident("invariant_fn") {
                     return Err(meta.error(
-                        "#[signature(invariant_fn = ...)] is removed; use #[signature(custom)] and override signature_invariant() on the generated companion trait instead",
+                        "#[finite_model_domain(invariant_fn = ...)] is removed; use #[finite_model_domain(custom)] and override the generated companion trait invariant hook instead",
                     ));
                 }
                 if meta.path.is_ident("skip_invariant") {
                     return Err(meta.error(
-                        "#[signature(skip_invariant)] is removed; use #[signature(custom)] and rely on the companion trait default signature_invariant() implementation instead",
+                        "#[finite_model_domain(skip_invariant)] is removed; use #[finite_model_domain(custom)] and rely on the companion trait default invariant hook instead",
                     ));
                 }
                 if meta.path.is_ident("range") {
@@ -1591,7 +1613,7 @@ impl SignatureArgs {
                 }
                 if meta.path.is_ident("filter") {
                     if args.filter.is_some() {
-                        return Err(meta.error("duplicate signature filter"));
+                        return Err(meta.error("duplicate finite_model_domain filter"));
                     }
                     args.filter = Some(parse_self_expr_meta(&meta)?);
                     return Ok(());
@@ -1600,7 +1622,7 @@ impl SignatureArgs {
                     parse_bounds_meta(&meta, &mut args.bounds)?;
                     return Ok(());
                 }
-                Err(meta.error("unsupported #[signature(...)] argument"))
+                Err(meta.error("unsupported #[finite_model_domain(...)] argument"))
             })?;
         }
         Ok(args)
@@ -1619,7 +1641,7 @@ impl FieldSigArgs {
     fn from_field_attrs(attrs: &[Attribute]) -> syn::Result<Self> {
         let mut args = Self::default();
         for attr in attrs {
-            if !attr.path().is_ident("sig") {
+            if !(attr.path().is_ident("finite_model") || attr.path().is_ident("sig")) {
                 continue;
             }
             let parsed = attr.parse_args::<FieldSigArgs>()?;
@@ -1670,7 +1692,7 @@ impl Parse for FieldSigArgs {
                 _ => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "unsupported #[sig(...)] argument",
+                        "unsupported #[finite_model(...)] argument",
                     ));
                 }
             }
@@ -1794,7 +1816,7 @@ impl syn::parse::Parse for TestArgs {
                 "init" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "init = ... is no longer supported; TransitionSystem::initial_states() is the canonical source of initial states",
+                        "init = ... is no longer supported; FrontendSpec::initial_states() is the canonical source of initial states",
                     ));
                 }
                 "cases" => cases = Some(input.parse()?),
@@ -1834,7 +1856,7 @@ impl syn::parse::Parse for CodeTestArgs {
                 "init" => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        "init = ... is no longer supported; TransitionSystem::initial_states() is the canonical source of initial states",
+                        "init = ... is no longer supported; FrontendSpec::initial_states() is the canonical source of initial states",
                     ));
                 }
                 "action" => {
@@ -2489,22 +2511,22 @@ impl RegistrationKind {
     fn expected_type(self, spec: &Path) -> proc_macro2::TokenStream {
         match self {
             Self::Invariant => {
-                quote! { ::nirvash::BoolExpr<<#spec as ::nirvash::TransitionSystem>::State> }
+                quote! { ::nirvash::BoolExpr<<#spec as ::nirvash_lower::FrontendSpec>::State> }
             }
             Self::Property => {
-                quote! { ::nirvash::Ltl<<#spec as ::nirvash::TransitionSystem>::State, <#spec as ::nirvash::TransitionSystem>::Action> }
+                quote! { ::nirvash::Ltl<<#spec as ::nirvash_lower::FrontendSpec>::State, <#spec as ::nirvash_lower::FrontendSpec>::Action> }
             }
             Self::Fairness => {
-                quote! { ::nirvash::Fairness<<#spec as ::nirvash::TransitionSystem>::State, <#spec as ::nirvash::TransitionSystem>::Action> }
+                quote! { ::nirvash::Fairness<<#spec as ::nirvash_lower::FrontendSpec>::State, <#spec as ::nirvash_lower::FrontendSpec>::Action> }
             }
             Self::StateConstraint => {
-                quote! { ::nirvash::BoolExpr<<#spec as ::nirvash::TransitionSystem>::State> }
+                quote! { ::nirvash::BoolExpr<<#spec as ::nirvash_lower::FrontendSpec>::State> }
             }
             Self::ActionConstraint => {
-                quote! { ::nirvash::StepExpr<<#spec as ::nirvash::TransitionSystem>::State, <#spec as ::nirvash::TransitionSystem>::Action> }
+                quote! { ::nirvash::StepExpr<<#spec as ::nirvash_lower::FrontendSpec>::State, <#spec as ::nirvash_lower::FrontendSpec>::Action> }
             }
             Self::Symmetry => {
-                quote! { ::nirvash::SymmetryReducer<<#spec as ::nirvash::TransitionSystem>::State> }
+                quote! { ::nirvash_lower::SymmetrySpec<<#spec as ::nirvash_lower::FrontendSpec>::State> }
             }
         }
     }
@@ -2706,8 +2728,12 @@ fn legacy_registration_builder_error(
     }
 }
 
-fn expand_signature_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    expand_signature_tokens(input)
+fn expand_finite_model_domain_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    expand_finite_model_domain_tokens(input)
+}
+
+fn expand_symbolic_encoding_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    expand_symbolic_encoding_tokens(input)
 }
 
 fn formal_runtime_guard_attrs() -> proc_macro2::TokenStream {
@@ -2724,19 +2750,17 @@ fn guard_item(tokens: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     }
 }
 
-fn expand_signature_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_finite_model_domain_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let args = SignatureArgs::from_attrs(&input.attrs)?;
     let ident = input.ident;
     let generics = input.generics;
-    let trait_ident = companion_trait_ident(&ident);
+    let trait_ident = finite_model_domain_trait_ident(&ident);
     let trait_generics = trait_generics(&generics);
     let trait_where_clause = &generics.where_clause;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let supported_data = ensure_supported_signature_data(&ident, &input.data)?;
     let action_doc_registration =
         signature_action_doc_registration(&ident, &input.data, &generics)?;
-    let symbolic_state_registration =
-        signature_symbolic_state_registration(&ident, &input.data, &generics, args.custom)?;
 
     if args.custom
         && (args.range.is_some()
@@ -2746,15 +2770,15 @@ fn expand_signature_tokens(input: DeriveInput) -> syn::Result<proc_macro2::Token
     {
         return Err(syn::Error::new(
             ident.span(),
-            "#[signature(custom)] cannot be combined with bounds, filter, range, or #[signature_invariant(...)] helpers",
+            "#[finite_model_domain(custom)] cannot be combined with bounds, filter, range, or #[finite_model_domain_invariant(...)] helpers",
         ));
     }
 
     let companion_trait = quote! {
         pub trait #trait_ident #trait_generics: Sized #trait_where_clause {
-            fn representatives() -> ::nirvash::BoundedDomain<Self>;
+            fn finite_domain() -> ::nirvash_lower::BoundedDomain<Self>;
 
-            fn signature_invariant(&self) -> bool {
+            fn value_invariant(&self) -> bool {
                 true
             }
         }
@@ -2767,11 +2791,11 @@ fn expand_signature_tokens(input: DeriveInput) -> syn::Result<proc_macro2::Token
         let invariant_body = signature_invariant_body(&ident, &input.data, &args)?;
         quote! {
             impl #impl_generics #trait_ident #ty_generics for #ident #ty_generics #where_clause {
-                fn representatives() -> ::nirvash::BoundedDomain<Self> {
+                fn finite_domain() -> ::nirvash_lower::BoundedDomain<Self> {
                     #domain_body
                 }
 
-                fn signature_invariant(&self) -> bool {
+                fn value_invariant(&self) -> bool {
                     #invariant_body
                 }
             }
@@ -2783,19 +2807,30 @@ fn expand_signature_tokens(input: DeriveInput) -> syn::Result<proc_macro2::Token
         #companion_trait
         #auto_impl
 
-        impl #impl_generics ::nirvash::Signature for #ident #ty_generics #where_clause {
-            fn bounded_domain() -> ::nirvash::BoundedDomain<Self> {
-                <Self as #trait_ident #ty_generics>::representatives()
+        impl #impl_generics ::nirvash_lower::FiniteModelDomain for #ident #ty_generics #where_clause {
+            fn finite_domain() -> ::nirvash::BoundedDomain<Self> {
+                <Self as #trait_ident #ty_generics>::finite_domain()
             }
 
-            fn invariant(&self) -> bool {
-                <Self as #trait_ident #ty_generics>::signature_invariant(self)
+            fn value_invariant(&self) -> bool {
+                <Self as #trait_ident #ty_generics>::value_invariant(self)
             }
         }
 
         #action_doc_registration
-        #symbolic_state_registration
     })
+}
+
+fn expand_symbolic_encoding_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let custom = input.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("symbolic_encoding") {
+            return false;
+        }
+        attr.parse_args::<Ident>()
+            .map(|ident| ident == "custom")
+            .unwrap_or(false)
+    });
+    signature_symbolic_state_registration(&input.ident, &input.data, &input.generics, custom)
 }
 
 fn expand_action_vocabulary_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -2811,7 +2846,7 @@ fn expand_action_vocabulary_tokens(input: DeriveInput) -> syn::Result<proc_macro
         Data::Enum(_) => Ok(quote! {
             impl #impl_generics ::nirvash::ActionVocabulary for #ident #ty_generics #where_clause {
                 fn action_vocabulary() -> ::std::vec::Vec<Self> {
-                    <Self as ::nirvash::Signature>::bounded_domain().into_vec()
+                    <Self as ::nirvash_lower::FiniteModelDomain>::finite_domain().into_vec()
                 }
             }
         }),
@@ -2927,7 +2962,8 @@ fn signature_symbolic_state_registration(
             #[doc(hidden)]
             fn #build_fn_ident() -> ::std::boxed::Box<dyn ::std::any::Any> {
                 ::std::boxed::Box::new(
-                    <#ident as ::nirvash::SymbolicStateSpec>::symbolic_state_schema()
+                    <#ident as ::nirvash_lower::SymbolicEncoding>::symbolic_state_schema()
+                        .expect("symbolic state schema should be available")
                 )
             }
 
@@ -2943,15 +2979,13 @@ fn signature_symbolic_state_registration(
     };
 
     Ok(quote! {
-        impl #impl_generics ::nirvash::SymbolicSortSpec for #ident #ty_generics #where_clause {
-            fn symbolic_sort() -> ::nirvash::SymbolicSort {
+        impl #impl_generics ::nirvash_lower::SymbolicEncoding for #ident #ty_generics #where_clause {
+            fn symbolic_sort() -> ::nirvash_lower::SymbolicSort {
                 #sort_body
             }
-        }
 
-        impl #impl_generics ::nirvash::SymbolicStateSpec for #ident #ty_generics #where_clause {
-            fn symbolic_state_schema() -> ::nirvash::SymbolicStateSchema<Self> {
-                #schema_body
+            fn symbolic_state_schema() -> ::core::option::Option<::nirvash_lower::SymbolicStateSchema<Self>> {
+                ::core::option::Option::Some(#schema_body)
             }
         }
 
@@ -3056,7 +3090,7 @@ fn signature_symbolic_state_schema_body(
         }),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span(),
-            "Signature derive does not support unions",
+            "FiniteModelDomain derive does not support unions",
         )),
     }
 }
@@ -3072,7 +3106,7 @@ fn signature_symbolic_sort_body(
         Data::Struct(data) => signature_struct_symbolic_sort_body(ident, data),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span(),
-            "Signature derive does not support unions",
+            "FiniteModelDomain derive does not support unions",
         )),
     }
 }
@@ -3092,7 +3126,7 @@ fn signature_struct_symbolic_sort_body(
                 quote! {
                     ::nirvash::SymbolicSortField::new(
                         stringify!(#field_ident),
-                        <#field_ty as ::nirvash::SymbolicSortSpec>::symbolic_sort(),
+                        <#field_ty as ::nirvash_lower::SymbolicEncoding>::symbolic_sort(),
                     )
                 }
             });
@@ -3107,7 +3141,7 @@ fn signature_struct_symbolic_sort_body(
                 quote! {
                     ::nirvash::SymbolicSortField::new(
                         #field_index,
-                        <#field_ty as ::nirvash::SymbolicSortSpec>::symbolic_sort(),
+                        <#field_ty as ::nirvash_lower::SymbolicEncoding>::symbolic_sort(),
                     )
                 }
             });
@@ -3398,7 +3432,7 @@ fn expand_protocol_input_witness_struct(
                 .map(|field| field.ty.clone())
                 .ok_or_else(|| syn::Error::new(fields.span(), "missing newtype field"))?;
             Ok(quote! {
-                impl ::nirvash::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
+                impl ::nirvash_conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
                     fn canonical_positive(action: &#action_ty) -> Self {
                         Self(action.clone())
                     }
@@ -3436,7 +3470,7 @@ fn expand_protocol_input_witness_struct(
                 }
             };
             Ok(quote! {
-                impl ::nirvash::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
+                impl ::nirvash_conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
                     fn canonical_positive(action: &#action_ty) -> Self {
                         let mut input = <Self as ::core::default::Default>::default();
                         input.#action_field = action.clone();
@@ -3496,7 +3530,7 @@ fn expand_protocol_input_witness_enum(
         })
         .collect::<syn::Result<Vec<_>>>()?;
     Ok(quote! {
-        impl ::nirvash::conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
+        impl ::nirvash_conformance::ProtocolInputWitnessCodec<#action_ty> for #ident {
             fn canonical_positive(action: &#action_ty) -> Self {
                 match action {
                     #(#arms)*
@@ -3521,19 +3555,19 @@ fn expand_rel_atom_tokens(input: DeriveInput) -> syn::Result<proc_macro2::TokenS
 
         #[doc(hidden)]
         const _: fn() -> ::nirvash::BoundedDomain<#ident #ty_generics> =
-            <#ident #ty_generics as ::nirvash::Signature>::bounded_domain;
+            <#ident #ty_generics as ::nirvash_lower::FiniteModelDomain>::finite_domain;
 
         impl #impl_generics ::nirvash::RelAtom for #ident #ty_generics #where_clause {
             fn rel_index(&self) -> usize {
-                <Self as ::nirvash::Signature>::bounded_domain()
+                <Self as ::nirvash_lower::FiniteModelDomain>::finite_domain()
                     .into_vec()
                     .into_iter()
                     .position(|candidate| candidate == self.clone())
-                    .expect("RelAtom value must belong to Signature::bounded_domain()")
+                    .expect("RelAtom value must belong to FiniteModelDomain::finite_domain()")
             }
 
             fn rel_from_index(index: usize) -> ::std::option::Option<Self> {
-                <Self as ::nirvash::Signature>::bounded_domain()
+                <Self as ::nirvash_lower::FiniteModelDomain>::finite_domain()
                     .into_vec()
                     .into_iter()
                     .nth(index)
@@ -3686,8 +3720,8 @@ fn relation_field_kind(ty: &Type) -> Option<&'static str> {
     }
 }
 
-fn companion_trait_ident(ident: &Ident) -> Ident {
-    format_ident!("{ident}SignatureSpec")
+fn finite_model_domain_trait_ident(ident: &Ident) -> Ident {
+    format_ident!("{ident}FiniteModelDomainSpec")
 }
 
 fn trait_generics(generics: &syn::Generics) -> proc_macro2::TokenStream {
@@ -3707,7 +3741,7 @@ fn ensure_supported_signature_data(
         Data::Enum(_) | Data::Struct(_) => Ok(quote! {}),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span(),
-            format!("Signature derive does not support unions for `{ident}`"),
+            format!("FiniteModelDomain derive does not support unions for `{ident}`"),
         )),
     }
 }
@@ -3720,7 +3754,7 @@ fn signature_domain_body(
     if !args.bounds.is_empty() && !matches!(data, Data::Struct(_)) {
         return Err(syn::Error::new(
             ident.span(),
-            "#[signature(bounds(...))] is only supported on named structs",
+            "#[finite_model_domain(bounds(...))] is only supported on named structs",
         ));
     }
 
@@ -3728,13 +3762,13 @@ fn signature_domain_body(
         let Data::Struct(data) = data else {
             return Err(syn::Error::new(
                 ident.span(),
-                "#[signature(range = ...)] is only supported on structs",
+                "#[finite_model_domain(range = ...)] is only supported on structs",
             ));
         };
         if data.fields.len() != 1 {
             return Err(syn::Error::new(
                 ident.span(),
-                "#[signature(range = ...)] requires a single-field newtype",
+                "#[finite_model_domain(range = ...)] requires a single-field newtype",
             ));
         }
         let iter = range_tokens(range)?;
@@ -3748,7 +3782,7 @@ fn signature_domain_body(
             Data::Union(data) => {
                 return Err(syn::Error::new(
                     data.union_token.span(),
-                    "Signature derive does not support unions",
+                    "FiniteModelDomain derive does not support unions",
                 ));
             }
         }
@@ -3775,13 +3809,13 @@ fn signature_invariant_body(
         let Data::Struct(data) = data else {
             return Err(syn::Error::new(
                 ident.span(),
-                "#[signature(range = ...)] is only supported on structs",
+                "#[finite_model_domain(range = ...)] is only supported on structs",
             ));
         };
         if data.fields.len() != 1 {
             return Err(syn::Error::new(
                 ident.span(),
-                "#[signature(range = ...)] requires a single-field newtype",
+                "#[finite_model_domain(range = ...)] requires a single-field newtype",
             ));
         }
         quote! { (#range).contains(&self.0) }
@@ -3792,7 +3826,7 @@ fn signature_invariant_body(
             Data::Union(data) => {
                 return Err(syn::Error::new(
                     data.union_token.span(),
-                    "Signature derive does not support unions",
+                    "FiniteModelDomain derive does not support unions",
                 ));
             }
         }
@@ -3869,7 +3903,7 @@ fn struct_domain_body(
     if !type_level_bounds.is_empty() && !matches!(data.fields, Fields::Named(_)) {
         return Err(syn::Error::new(
             data.fields.span(),
-            "#[signature(bounds(...))] is only supported on named structs",
+            "#[finite_model_domain(bounds(...))] is only supported on named structs",
         ));
     }
 
@@ -3938,7 +3972,7 @@ fn field_domain_expr(
     if args.optional && option_inner_type(&field.ty).is_none() {
         return Err(syn::Error::new(
             field.ty.span(),
-            "#[sig(optional)] is only supported on Option<T> fields",
+            "#[finite_model(optional)] is only supported on Option<T> fields",
         ));
     }
 
@@ -3950,7 +3984,7 @@ fn field_domain_expr(
         let Some(element_ty) = vec_inner_type(&field.ty) else {
             return Err(syn::Error::new(
                 field.ty.span(),
-                "#[sig(len = ...)] is only supported on Vec<T> fields",
+                "#[finite_model(len = ...)] is only supported on Vec<T> fields",
             ));
         };
         let iter = range_tokens(&len)?;
@@ -3975,7 +4009,7 @@ fn field_domain_expr(
     }
 
     let ty = &field.ty;
-    Ok(quote! { <#ty as ::nirvash::Signature>::bounded_domain() })
+    Ok(quote! { <#ty as ::nirvash_lower::FiniteModelDomain>::finite_domain() })
 }
 
 fn vec_inner_type(ty: &Type) -> Option<&Type> {
@@ -4125,24 +4159,24 @@ fn field_invariant_expr(
         let Some(element_ty) = vec_inner_type(&field.ty) else {
             return Err(syn::Error::new(
                 field.ty.span(),
-                "#[sig(len = ...)] is only supported on Vec<T> fields",
+                "#[finite_model(len = ...)] is only supported on Vec<T> fields",
             ));
         };
         return Ok(quote! {
             (#len).contains(&#access.len())
-                && #access.iter().all(<#element_ty as ::nirvash::Signature>::invariant)
+                && #access.iter().all(<#element_ty as ::nirvash_lower::FiniteModelDomain>::value_invariant)
         });
     }
 
     if args.optional && option_inner_type(&field.ty).is_none() {
         return Err(syn::Error::new(
             field.ty.span(),
-            "#[sig(optional)] is only supported on Option<T> fields",
+            "#[finite_model(optional)] is only supported on Option<T> fields",
         ));
     }
 
     let ty = &field.ty;
-    Ok(quote! { <#ty as ::nirvash::Signature>::invariant(&#access) })
+    Ok(quote! { <#ty as ::nirvash_lower::FiniteModelDomain>::value_invariant(&#access) })
 }
 
 fn field_bindings(fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>) -> Vec<Ident> {
@@ -4206,7 +4240,7 @@ fn range_tokens(range: &ExprRange) -> syn::Result<proc_macro2::TokenStream> {
 
 fn expand_temporal_spec(
     args: SpecArgs,
-    item: ItemImpl,
+    mut item: ItemImpl,
     emit_composition: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let self_ty = (*item.self_ty).clone();
@@ -4252,6 +4286,15 @@ fn expand_temporal_spec(
     } else {
         quote! { ::std::option::Option::None }
     };
+    if let Some(model_cases) = &model_cases {
+        item.items.push(syn::parse_quote! {
+            fn model_instances(&self) -> Vec<::nirvash_lower::ModelInstance<Self::State, Self::Action>> {
+                let mut model_instances = #model_cases();
+                ::nirvash_lower::registry::apply_registered_model_case_metadata_for::<Self, Self::State, Self::Action>(&mut model_instances);
+                model_instances
+            }
+        });
+    }
 
     if !emit_composition && !subsystems.is_empty() {
         return Err(syn::Error::new(
@@ -4259,12 +4302,6 @@ fn expand_temporal_spec(
             "subsystems(...) is only supported on #[system_spec]",
         ));
     }
-
-    let model_cases_expr = if let Some(model_cases) = model_cases {
-        quote! { #model_cases() }
-    } else {
-        quote! { vec![::nirvash::ModelCase::default()] }
-    };
 
     let composition_impl = if emit_composition {
         let subsystem_calls = subsystems.iter().map(|path| {
@@ -4307,20 +4344,20 @@ fn expand_temporal_spec(
                     Self::REGISTERED_SUBSYSTEMS
                 }
 
-                pub fn composition(&self) -> ::nirvash::SystemComposition<#state_ty, #action_ty> {
-                    let mut composition = ::nirvash::SystemComposition::new(self.name());
+                pub fn composition(&self) -> ::nirvash_lower::SystemComposition<#state_ty, #action_ty> {
+                    let mut composition = ::nirvash_lower::SystemComposition::new(self.frontend_name());
                     #(#subsystem_calls)*
-                    for invariant in <#self_ty as ::nirvash::TemporalSpec>::invariants(self) {
+                    for invariant in <#self_ty as ::nirvash_lower::TemporalSpec>::invariants(self) {
                         composition = composition.with_invariant(invariant);
                     }
-                    for property in <#self_ty as ::nirvash::TemporalSpec>::properties(self) {
+                    for property in <#self_ty as ::nirvash_lower::TemporalSpec>::properties(self) {
                         composition = composition.with_property(property);
                     }
-                    for fairness in <#self_ty as ::nirvash::TemporalSpec>::fairness(self) {
+                    for fairness in <#self_ty as ::nirvash_lower::TemporalSpec>::fairness(self) {
                         composition = composition.with_fairness(fairness);
                     }
-                    for model_case in <#self_ty as ::nirvash::ModelCaseSource>::model_cases(self) {
-                        composition = composition.with_model_case(model_case);
+                    for model_case in <#self_ty as ::nirvash_lower::FrontendSpec>::model_instances(self) {
+                        composition = composition.with_model_instance(model_case);
                     }
                     composition
                 }
@@ -4350,38 +4387,17 @@ fn expand_temporal_spec(
         #(#doc_attrs)*
         #item
 
-        impl ::nirvash::TemporalSpec for #self_ty {
+        impl ::nirvash_lower::TemporalSpec for #self_ty {
             fn invariants(&self) -> Vec<::nirvash::BoolExpr<Self::State>> {
-                ::nirvash::registry::collect_invariants::<Self>()
+                ::nirvash_lower::registry::collect_invariants_for::<Self, Self::State>()
             }
 
             fn properties(&self) -> Vec<::nirvash::Ltl<Self::State, Self::Action>> {
-                ::nirvash::registry::collect_properties::<Self>()
+                ::nirvash_lower::registry::collect_properties_for::<Self, Self::State, Self::Action>()
             }
 
             fn fairness(&self) -> Vec<::nirvash::Fairness<Self::State, Self::Action>> {
-                ::nirvash::registry::collect_fairness::<Self>()
-            }
-        }
-
-        impl ::nirvash::ModelCaseSource for #self_ty {
-            fn model_cases(&self) -> Vec<::nirvash::ModelCase<Self::State, Self::Action>> {
-                let mut model_cases = #model_cases_expr;
-                if model_cases.is_empty() {
-                    model_cases.push(::nirvash::ModelCase::default());
-                }
-                ::nirvash::registry::apply_registered_model_case_metadata::<Self>(&mut model_cases);
-                model_cases
-            }
-
-            fn default_model_backend(&self) -> ::std::option::Option<::nirvash::ModelBackend> {
-                ::std::option::Option::Some(
-                    if #emit_composition {
-                        ::nirvash::ModelBackend::Explicit
-                    } else {
-                        ::nirvash::ModelBackend::Symbolic
-                    }
-                )
+                ::nirvash_lower::registry::collect_fairness_for::<Self, Self::State, Self::Action>()
             }
         }
 
@@ -4404,7 +4420,7 @@ fn expand_temporal_spec(
                         .iter()
                         .map(|subsystem| ::nirvash::SpecVizSubsystem::from_registered(*subsystem))
                         .collect::<::std::vec::Vec<_>>(),
-                    registrations: ::nirvash::registry::collect_spec_viz_registrations::<#self_ty>(),
+                    registrations: ::nirvash_lower::registry::collect_spec_viz_registrations_for::<#self_ty, #state_ty, #action_ty>(),
                     policy: ::nirvash::VizPolicy::default(),
                 };
                 ::nirvash::SpecVizBundle::from_doc_graph_spec(
@@ -4498,26 +4514,26 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
             fn generated_composition_matches_temporal_spec() {
                 for spec in generated_cases() {
                     let composition = spec.#composition_method();
-                    let expected_invariants = <#spec_ty as ::nirvash::TemporalSpec>::invariants(&spec)
+                    let expected_invariants = <#spec_ty as ::nirvash_lower::TemporalSpec>::invariants(&spec)
                         .into_iter()
                         .map(|predicate| predicate.name())
                         .collect::<::std::vec::Vec<_>>();
-                    let expected_properties = <#spec_ty as ::nirvash::TemporalSpec>::properties(&spec)
+                    let expected_properties = <#spec_ty as ::nirvash_lower::TemporalSpec>::properties(&spec)
                         .into_iter()
                         .map(|property| property.describe())
                         .collect::<::std::vec::Vec<_>>();
-                    let expected_fairness = <#spec_ty as ::nirvash::TemporalSpec>::fairness(&spec)
+                    let expected_fairness = <#spec_ty as ::nirvash_lower::TemporalSpec>::fairness(&spec)
                         .into_iter()
                         .map(|fairness| fairness.name())
                         .collect::<::std::vec::Vec<_>>();
-                    let expected_model_cases = <#spec_ty as ::nirvash::ModelCaseSource>::model_cases(&spec);
+                    let expected_model_instances = <#spec_ty as ::nirvash_lower::FrontendSpec>::model_instances(&spec);
 
                     assert_eq!(composition.subsystems(), <#spec_ty>::registered_subsystems());
                     assert_eq!(composition.invariants().iter().map(|predicate| predicate.name()).collect::<::std::vec::Vec<_>>(), expected_invariants);
                     assert_eq!(composition.properties().iter().map(|property| property.describe()).collect::<::std::vec::Vec<_>>(), expected_properties);
                     assert_eq!(composition.fairness().iter().map(|fairness| fairness.name()).collect::<::std::vec::Vec<_>>(), expected_fairness);
-                    assert_eq!(composition.model_cases().len(), expected_model_cases.len());
-                    for (actual, expected) in composition.model_cases().iter().zip(expected_model_cases.iter()) {
+                    assert_eq!(composition.model_instances().len(), expected_model_instances.len());
+                    for (actual, expected) in composition.model_instances().iter().zip(expected_model_instances.iter()) {
                         assert_eq!(actual.label(), expected.label());
                         assert_eq!(
                             actual.state_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>(),
@@ -4558,7 +4574,11 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                     .into_iter()
                     .enumerate()
                     .flat_map(|(index, spec)| {
-                        let model_cases = <#spec_ty as ::nirvash::ModelCaseSource>::model_cases(&spec);
+                        let mut lowering_cx = ::nirvash_lower::LoweringCx;
+                        let lowered =
+                            <#spec_ty as ::nirvash_lower::FrontendSpec>::lower(&spec, &mut lowering_cx)
+                                .expect("spec should lower for docs");
+                        let model_cases = lowered.model_instances();
                         let multiple_model_cases = model_cases.len() > 1;
                         model_cases
                             .into_iter()
@@ -4569,7 +4589,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     (true, false) => format!("case-{index}"),
                                     (true, true) => format!("case-{index}/{}", model_case.label()),
                                 };
-                                let checker = ::nirvash_check::ModelChecker::for_case(&spec, model_case.clone());
+                                let checker = ::nirvash_check::ModelChecker::for_case(&lowered, model_case.clone());
                                 let backend = checker.doc_backend();
                                 let snapshot = checker
                                     .reachable_graph_snapshot()
@@ -4651,14 +4671,14 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 let metadata = ::nirvash::SpecVizMetadata {
                     spec_id: ::core::stringify!(#spec_ty).to_owned(),
                     kind: ::std::option::Option::Some(<#spec_ty>::spec_kind()),
-                    state_ty: ::std::any::type_name::<<#spec_ty as ::nirvash::TransitionSystem>::State>().to_owned(),
-                    action_ty: ::std::any::type_name::<<#spec_ty as ::nirvash::TransitionSystem>::Action>().to_owned(),
+                    state_ty: ::std::any::type_name::<<#spec_ty as ::nirvash_lower::FrontendSpec>::State>().to_owned(),
+                    action_ty: ::std::any::type_name::<<#spec_ty as ::nirvash_lower::FrontendSpec>::Action>().to_owned(),
                     model_cases: <#spec_ty>::model_cases_name().map(|name| name.to_owned()),
                     subsystems: <#spec_ty>::registered_subsystems()
                         .iter()
                         .map(|subsystem| ::nirvash::SpecVizSubsystem::from_registered(*subsystem))
                         .collect::<::std::vec::Vec<_>>(),
-                    registrations: ::nirvash::registry::collect_spec_viz_registrations::<#spec_ty>(),
+                    registrations: ::nirvash_lower::registry::collect_spec_viz_registrations_for::<#spec_ty, <#spec_ty as ::nirvash_lower::FrontendSpec>::State, <#spec_ty as ::nirvash_lower::FrontendSpec>::Action>(),
                     policy: ::nirvash::VizPolicy::default(),
                 };
                 ::nirvash::SpecVizBundle::from_doc_graph_spec(#spec_name, metadata, doc_cases)
@@ -4699,9 +4719,9 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
         mod #module_ident {
             use super::*;
 
-            type GeneratedState = <#spec_ty as ::nirvash::TransitionSystem>::State;
-            type GeneratedAction = <#spec_ty as ::nirvash::TransitionSystem>::Action;
-            type GeneratedModelCase = ::nirvash::ModelCase<GeneratedState, GeneratedAction>;
+            type GeneratedState = <#spec_ty as ::nirvash_lower::FrontendSpec>::State;
+            type GeneratedAction = <#spec_ty as ::nirvash_lower::FrontendSpec>::Action;
+            type GeneratedModelCase = ::nirvash_lower::ModelInstance<GeneratedState, GeneratedAction>;
             const GENERATED_FORMAL_CHECK_ENV: &str = "NIRVASH_FORMAL_CHECK";
             const GENERATED_FORMAL_SPEC_INDEX_ENV: &str = "NIRVASH_FORMAL_SPEC_INDEX";
             const GENERATED_FORMAL_MODEL_CASE_INDEX_ENV: &str =
@@ -4711,8 +4731,16 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 #cases_expr
             }
 
+            fn generated_lowered(
+                spec: &#spec_ty,
+            ) -> ::nirvash_lower::LoweredSpec<'_, GeneratedState, GeneratedAction> {
+                let mut lowering_cx = ::nirvash_lower::LoweringCx;
+                <#spec_ty as ::nirvash_lower::FrontendSpec>::lower(spec, &mut lowering_cx)
+                    .expect("spec should lower")
+            }
+
             fn generated_model_cases(spec: &#spec_ty) -> ::std::vec::Vec<GeneratedModelCase> {
-                <#spec_ty as ::nirvash::ModelCaseSource>::model_cases(spec)
+                generated_lowered(spec).model_instances()
             }
 
             fn generated_explicit_fallback_model_case(
@@ -4737,23 +4765,13 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 spec: &#spec_ty,
                 model_case: GeneratedModelCase,
             ) -> ::nirvash::ReachableGraphSnapshot<GeneratedState, GeneratedAction> {
-                let checker = ::nirvash_check::ModelChecker::for_case(spec, model_case.clone());
-                match checker.full_reachable_graph_snapshot() {
-                    ::core::result::Result::Ok(snapshot) => snapshot,
-                    ::core::result::Result::Err(::nirvash::ModelCheckError::UnsupportedConfiguration(_))
-                        if checker.backend() == ::nirvash::ModelBackend::Symbolic =>
-                    {
-                        ::nirvash_check::ModelChecker::for_case(
-                            spec,
-                            generated_explicit_fallback_model_case(model_case),
-                        )
-                        .full_reachable_graph_snapshot()
-                        .expect("reachable graph snapshot should build with explicit fallback")
-                    }
-                    ::core::result::Result::Err(error) => {
-                        panic!("reachable graph snapshot should build: {error:?}");
-                    }
-                }
+                let lowered = generated_lowered(spec);
+                ::nirvash_check::ModelChecker::for_case(
+                    &lowered,
+                    generated_explicit_fallback_model_case(model_case),
+                )
+                .full_reachable_graph_snapshot()
+                .expect("reachable graph snapshot should build with explicit fallback")
             }
 
             fn selected_formal_case(
@@ -4829,12 +4847,13 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
             #[test]
             fn generated_initial_states_satisfy_invariants() {
                 for spec in generated_cases() {
-                    let invariants = <#spec_ty as ::nirvash::TemporalSpec>::invariants(&spec);
+                    let lowered = generated_lowered(&spec);
+                    let invariants = lowered.invariants();
                     for model_case in generated_model_cases(&spec) {
-                        let initial_states = <#spec_ty as ::nirvash::TransitionSystem>::initial_states(&spec);
+                        let initial_states = lowered.initial_states();
                         assert!(!initial_states.is_empty(), "spec should declare at least one initial state");
                         for state in initial_states {
-                            assert!(<#spec_ty as ::nirvash::TransitionSystem>::contains_initial(&spec, &state));
+                            assert!(lowered.contains_initial(&state));
                             assert!(
                                 invariants.iter().all(|predicate| predicate.eval(&state)),
                                 "registered invariant failed for initial state {:?}",
@@ -4865,14 +4884,16 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 else {
                     return;
                 };
-                let checker = ::nirvash_check::ModelChecker::for_case(&spec, model_case.clone());
+                let lowered = generated_lowered(&spec);
+                let checker = ::nirvash_check::ModelChecker::for_case(&lowered, model_case.clone());
                 let result = match checker.check_all() {
                     ::core::result::Result::Ok(result) => result,
                     ::core::result::Result::Err(::nirvash::ModelCheckError::UnsupportedConfiguration(_))
                         if checker.backend() == ::nirvash::ModelBackend::Symbolic =>
                     {
+                        let lowered = generated_lowered(&spec);
                         ::nirvash_check::ModelChecker::for_case(
-                            &spec,
+                            &lowered,
                             generated_explicit_fallback_model_case(model_case),
                         )
                         .check_all()
@@ -4900,7 +4921,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 else {
                     return;
                 };
-                let invariants = <#spec_ty as ::nirvash::TemporalSpec>::invariants(&spec);
+                let invariants = <#spec_ty as ::nirvash_lower::TemporalSpec>::invariants(&spec);
                 let snapshot = generated_snapshot(&spec, model_case.clone());
                 for state in snapshot.states {
                     assert!(
@@ -4977,40 +4998,49 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
         mod #module_ident {
             use super::*;
 
-            type GeneratedState = <#spec_ty as ::nirvash::conformance::TransitionSystem>::State;
-            type GeneratedAction = <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action;
-            type GeneratedModelCase = ::nirvash::conformance::ModelCase<GeneratedState, GeneratedAction>;
+            type GeneratedState = <#spec_ty as ::nirvash_lower::FrontendSpec>::State;
+            type GeneratedAction = <#spec_ty as ::nirvash_lower::FrontendSpec>::Action;
+            type GeneratedModelCase = ::nirvash_lower::ModelInstance<GeneratedState, GeneratedAction>;
             type GeneratedRuntime =
-                <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
+                <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
             type GeneratedContext =
-                <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
+                <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
             type GeneratedExpectedOutput =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ExpectedOutput;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ExpectedOutput;
             type GeneratedProbeState =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ProbeState;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ProbeState;
             type GeneratedProbeOutput =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ProbeOutput;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ProbeOutput;
             type GeneratedSummaryState =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::SummaryState;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::SummaryState;
             type GeneratedSummaryOutput =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::SummaryOutput;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::SummaryOutput;
 
             fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
                 #cases_expr
             }
 
+            fn generated_lowered(
+                spec: &#spec_ty,
+            ) -> ::nirvash_lower::LoweredSpec<'_, GeneratedState, GeneratedAction> {
+                let mut lowering_cx = ::nirvash_lower::LoweringCx;
+                <#spec_ty as ::nirvash_lower::FrontendSpec>::lower(spec, &mut lowering_cx)
+                    .expect("spec should lower")
+            }
+
             fn generated_model_cases(spec: &#spec_ty) -> ::std::vec::Vec<GeneratedModelCase> {
-                <#spec_ty as ::nirvash::conformance::ModelCaseSource>::model_cases(spec)
+                generated_lowered(spec).model_instances()
             }
 
             fn generated_paths(
                 spec: &#spec_ty,
                 model_case: GeneratedModelCase,
             ) -> (
-                ::nirvash::conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
+                ::nirvash_conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
                 ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
             ) {
-                let snapshot = ::nirvash_check::ModelChecker::for_case(spec, model_case)
+                let lowered = generated_lowered(spec);
+                let snapshot = ::nirvash_check::ModelChecker::for_case(&lowered, model_case)
                     .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
@@ -5046,67 +5076,67 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 context: &GeneratedContext,
             ) -> GeneratedRuntime {
                 let runtime =
-                    <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec).await;
-                let observed = <GeneratedRuntime as ::nirvash::conformance::StateObserver>::observe_state(
+                    <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec).await;
+                let observed = <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                     &runtime,
                     context,
                 )
                 .await;
                 let observed_summary =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &observed,
                     );
                 let mut projected =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &observed_summary,
                     );
-                ::nirvash::conformance::assert_initial_refinement(spec, &observed_summary);
+                ::nirvash_conformance::assert_initial_refinement(spec, &observed_summary);
                 for action in path {
                     let expected_next =
-                        <#spec_ty as ::nirvash::conformance::TransitionSystem>::transition(
+                        <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
                             spec,
                             &projected,
                             action,
                         );
                     let expected_output =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::expected_output(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
                             spec,
                             &projected,
                             action,
                             expected_next.as_ref(),
                         );
-                    let output = <GeneratedRuntime as ::nirvash::conformance::ActionApplier>::execute_action(
+                    let output = <GeneratedRuntime as ::nirvash_conformance::ActionApplier>::execute_action(
                         &runtime,
                         context,
                         action,
                     )
                     .await;
                     let output_summary =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_output(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_output(
                             spec,
                             &output,
                         );
                     let projected_output =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                             spec,
                             &output_summary,
                         );
                     assert_eq!(projected_output, expected_output);
                     let observed_after =
-                        <GeneratedRuntime as ::nirvash::conformance::StateObserver>::observe_state(
+                        <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                             &runtime,
                             context,
                         )
                         .await;
                     let observed_after_summary =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                             spec,
                             &observed_after,
                         );
                     let projected_after =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                             spec,
                             &observed_after_summary,
                         );
@@ -5136,64 +5166,64 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             ) {
                 let runtime = replay_prefix(spec, path, context).await;
                 let observed_before =
-                    <GeneratedRuntime as ::nirvash::conformance::StateObserver>::observe_state(
+                    <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                         &runtime,
                         context,
                     )
                 .await;
                 let observed_before_summary =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &observed_before,
                     );
                 let projected_before =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &observed_before_summary,
                     );
                 assert_eq!(projected_before, *expected_state);
                 let expected_next =
-                    <#spec_ty as ::nirvash::conformance::TransitionSystem>::transition(
+                    <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
                         spec,
                         &projected_before,
                         action,
                     );
                 let expected_output =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::expected_output(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
                         spec,
                         &projected_before,
                         action,
                         expected_next.as_ref(),
                     );
-                let output = <GeneratedRuntime as ::nirvash::conformance::ActionApplier>::execute_action(
+                let output = <GeneratedRuntime as ::nirvash_conformance::ActionApplier>::execute_action(
                     &runtime,
                     context,
                     action,
                 )
                 .await;
                 let output_summary =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_output(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_output(
                         spec,
                         &output,
                     );
                 let projected_output =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                         spec,
                         &output_summary,
                     );
                 let observed_after =
-                    <GeneratedRuntime as ::nirvash::conformance::StateObserver>::observe_state(
+                    <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                         &runtime,
                         context,
                     )
                     .await;
                 let observed_after_summary =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &observed_after,
                     );
                 let projected_after =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &observed_after_summary,
                     );
@@ -5207,8 +5237,8 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     for model_case in generated_model_cases(&spec) {
                         let (snapshot, _) = generated_paths(&spec, model_case);
                         for state in &snapshot.states {
-                            for action in <#spec_ty as ::nirvash::conformance::TransitionSystem>::actions(&spec) {
-                                let next_states = <#spec_ty as ::nirvash::conformance::TransitionSystem>::successors(
+                            for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
+                                let next_states = <#spec_ty as ::nirvash_lower::FrontendSpec>::successors(
                                     &spec,
                                     state,
                                 )
@@ -5223,7 +5253,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                     action,
                                     next_states
                                 );
-                                match <#spec_ty as ::nirvash::conformance::TransitionSystem>::transition(
+                                match <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
                                     &spec,
                                     state,
                                     &action,
@@ -5245,10 +5275,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             async fn generated_real_code_accepts_allowed_actions() {
                 for spec in generated_cases() {
                     for model_case in generated_model_cases(&spec) {
-                        let context = <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let context = <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
-                            for action in <#spec_ty as ::nirvash::conformance::TransitionSystem>::actions(&spec) {
+                            for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
                                 let (expected_next, _, _) = execute_from_state(
                                     &spec,
                                     &paths[index],
@@ -5270,10 +5300,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             async fn generated_real_code_rejects_disallowed_actions() {
                 for spec in generated_cases() {
                     for model_case in generated_model_cases(&spec) {
-                        let context = <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let context = <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
-                            for action in <#spec_ty as ::nirvash::conformance::TransitionSystem>::actions(&spec) {
+                            for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
                                 let (expected_next, _, observed_after) = execute_from_state(
                                     &spec,
                                     &paths[index],
@@ -5295,10 +5325,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             async fn generated_real_code_state_matches_spec() {
                 for spec in generated_cases() {
                     for model_case in generated_model_cases(&spec) {
-                        let context = <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let context = <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
-                            for action in <#spec_ty as ::nirvash::conformance::TransitionSystem>::actions(&spec) {
+                            for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
                                 let (expected_next, _, observed_after) = execute_from_state(
                                     &spec,
                                     &paths[index],
@@ -5325,10 +5355,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             async fn generated_real_code_output_matches_expected() {
                 for spec in generated_cases() {
                     for model_case in generated_model_cases(&spec) {
-                        let context = <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
+                        let context = <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::context(&spec);
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
-                            for action in <#spec_ty as ::nirvash::conformance::TransitionSystem>::actions(&spec) {
+                            for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
                                 let (expected_next, output, _) = execute_from_state(
                                     &spec,
                                     &paths[index],
@@ -5338,7 +5368,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                 )
                                         .await;
                                 let expected_output =
-                                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::expected_output(
+                                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
                                         &spec,
                                         state,
                                         &action,
@@ -5380,31 +5410,31 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
         mod #module_ident {
             use super::*;
 
-            type GeneratedState = <#spec_ty as ::nirvash::conformance::TransitionSystem>::State;
-            type GeneratedAction = <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action;
-            type GeneratedModelCase = ::nirvash::conformance::ModelCase<GeneratedState, GeneratedAction>;
+            type GeneratedState = <#spec_ty as ::nirvash_lower::FrontendSpec>::State;
+            type GeneratedAction = <#spec_ty as ::nirvash_lower::FrontendSpec>::Action;
+            type GeneratedModelCase = ::nirvash_lower::ModelInstance<GeneratedState, GeneratedAction>;
             type GeneratedRuntime =
-                <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
+                <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::Runtime;
             type GeneratedContext =
-                <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
+                <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::Context;
             type GeneratedInput =
-                <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::Input;
+                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::Input;
             type GeneratedSession =
-                <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::Session;
+                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::Session;
             type GeneratedExpectedOutput =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ExpectedOutput;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ExpectedOutput;
             type GeneratedProbeState =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ProbeState;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ProbeState;
             type GeneratedProbeOutput =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ProbeOutput;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ProbeOutput;
             type GeneratedSummaryState =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::SummaryState;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::SummaryState;
             type GeneratedSummaryOutput =
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::SummaryOutput;
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::SummaryOutput;
             type GeneratedPositiveWitness =
-                ::nirvash::conformance::PositiveWitness<GeneratedContext, GeneratedInput>;
+                ::nirvash_conformance::PositiveWitness<GeneratedContext, GeneratedInput>;
             type GeneratedNegativeWitness =
-                ::nirvash::conformance::NegativeWitness<GeneratedContext, GeneratedInput>;
+                ::nirvash_conformance::NegativeWitness<GeneratedContext, GeneratedInput>;
 
             #[derive(Clone)]
             struct GeneratedSemanticCase {
@@ -5427,18 +5457,27 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 #cases_expr
             }
 
+            fn generated_lowered(
+                spec: &#spec_ty,
+            ) -> ::nirvash_lower::LoweredSpec<'_, GeneratedState, GeneratedAction> {
+                let mut lowering_cx = ::nirvash_lower::LoweringCx;
+                <#spec_ty as ::nirvash_lower::FrontendSpec>::lower(spec, &mut lowering_cx)
+                    .expect("spec should lower")
+            }
+
             fn generated_model_cases(spec: &#spec_ty) -> ::std::vec::Vec<GeneratedModelCase> {
-                <#spec_ty as ::nirvash::conformance::ModelCaseSource>::model_cases(spec)
+                generated_lowered(spec).model_instances()
             }
 
             fn generated_paths(
                 spec: &#spec_ty,
                 model_case: GeneratedModelCase,
             ) -> (
-                ::nirvash::conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
+                ::nirvash_conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
                 ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
             ) {
-                let snapshot = ::nirvash_check::ModelChecker::for_case(spec, model_case)
+                let lowered = generated_lowered(spec);
+                let snapshot = ::nirvash_check::ModelChecker::for_case(&lowered, model_case)
                     .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
@@ -5585,9 +5624,9 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     let provenance_label = format!("{spec_case_label}/{}", model_case.label());
                     let (snapshot, paths) = generated_paths(spec, model_case);
                     for (index, state) in snapshot.states.iter().enumerate() {
-                        for action in <#spec_ty as ::nirvash::conformance::TransitionSystem>::actions(spec) {
+                        for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(spec) {
                             let expected_next =
-                                <#spec_ty as ::nirvash::conformance::TransitionSystem>::transition(
+                                <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
                                     spec,
                                     state,
                                     &action,
@@ -5633,18 +5672,18 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 session: &GeneratedSession,
             ) -> GeneratedState {
                 let context =
-                    <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
-                let observed = <GeneratedRuntime as ::nirvash::conformance::StateObserver>::observe_state(
+                    <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
+                let observed = <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                     runtime,
                     &context,
                 )
                 .await;
                 let observed_summary =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &observed,
                     );
-                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                     spec,
                     &observed_summary,
                 )
@@ -5686,37 +5725,37 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 session: &mut GeneratedSession,
             ) -> ::std::result::Result<(), ::std::string::String> {
                 let initial_context =
-                    <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
+                    <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
                 let initial_probe =
-                    <GeneratedRuntime as ::nirvash::conformance::StateObserver>::observe_state(
+                    <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                         runtime,
                         &initial_context,
                     )
                     .await;
                 let initial_summary =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &initial_probe,
                     );
                 let initial_projected =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                         spec,
                         &initial_summary,
                     );
                 let initial_refinement = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
-                    ::nirvash::conformance::assert_initial_refinement(spec, &initial_summary);
+                    ::nirvash_conformance::assert_initial_refinement(spec, &initial_summary);
                 }));
                 if let Err(payload) = initial_refinement {
                     return Err(format!(
                         "{}{}",
                         generated_failure_prelude(semantic_case, "<initial-state>"),
-                        ::nirvash::conformance::panic_payload_to_string(payload),
+                        ::nirvash_conformance::panic_payload_to_string(payload),
                     ));
                 }
                 let mut projected = initial_projected;
                 for action in &semantic_case.path {
                     let expected_next =
-                        <#spec_ty as ::nirvash::conformance::TransitionSystem>::transition(
+                        <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
                             spec,
                             &projected,
                             action,
@@ -5730,7 +5769,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                             )
                         })?;
                     let witnesses =
-                        <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
+                        <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
                             spec,
                             session,
                             &projected,
@@ -5754,7 +5793,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                         &witnesses,
                     )?;
                     let output =
-                        <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
+                        <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
                             runtime,
                             session,
                             witness.context(),
@@ -5762,17 +5801,17 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                         )
                         .await;
                     let output_summary =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_output(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_output(
                             spec,
                             &output,
                         );
                     let projected_output =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                             spec,
                             &output_summary,
                         );
                     let expected_output =
-                        <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::expected_output(
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
                             spec,
                             &projected,
                             action,
@@ -5810,9 +5849,9 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
             ) -> ::std::result::Result<::std::vec::Vec<GeneratedWitnessDescriptor>, ::std::string::String> {
                 generated_runtime().block_on(async {
                     let runtime =
-                        <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec).await;
+                        <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec).await;
                     let mut session =
-                        <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec).await;
+                        <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec).await;
                     generated_replay_canonical_prefix(spec, semantic_case, &runtime, &mut session).await?;
                     let observed_before = generated_observe_projected_state(spec, &runtime, &session).await;
                     if observed_before != semantic_case.state {
@@ -5825,7 +5864,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     }
                     if let ::core::option::Option::Some(next) = semantic_case.expected_next.as_ref() {
                         let witnesses =
-                            <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
+                            <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
                                 spec,
                                 &session,
                                 &semantic_case.state,
@@ -5861,7 +5900,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                             .collect())
                     } else {
                         let witnesses =
-                            <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::negative_witnesses(
+                            <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::negative_witnesses(
                                 spec,
                                 &session,
                                 &semantic_case.state,
@@ -5892,9 +5931,9 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
             ) -> ::std::result::Result<(), ::std::string::String> {
                 generated_runtime().block_on(async move {
                     let runtime =
-                        <#binding_ty as ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec.as_ref()).await;
+                        <#binding_ty as ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty>>::fresh_runtime(spec.as_ref()).await;
                     let mut session =
-                        <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec.as_ref()).await;
+                        <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec.as_ref()).await;
                     generated_replay_canonical_prefix(spec.as_ref(), &semantic_case, &runtime, &mut session).await?;
                     let observed_before =
                         generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
@@ -5909,7 +5948,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     match semantic_case.expected_next.as_ref() {
                         ::core::option::Option::Some(next) => {
                             let witnesses =
-                                <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
                                     spec.as_ref(),
                                     &session,
                                     &semantic_case.state,
@@ -5934,7 +5973,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                 )
                             })?;
                             let output =
-                                <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
                                     &runtime,
                                     &mut session,
                                     witness.context(),
@@ -5942,17 +5981,17 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                 )
                                 .await;
                             let output_summary =
-                                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_output(
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_output(
                                     spec.as_ref(),
                                     &output,
                                 );
                             let projected_output =
-                                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                                     spec.as_ref(),
                                     &output_summary,
                                 );
                             let expected_output =
-                                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::expected_output(
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
                                     spec.as_ref(),
                                     &semantic_case.state,
                                     &semantic_case.action,
@@ -5984,7 +6023,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                         }
                         ::core::option::Option::None => {
                             let witnesses =
-                                <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::negative_witnesses(
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::negative_witnesses(
                                     spec.as_ref(),
                                     &session,
                                     &semantic_case.state,
@@ -6008,7 +6047,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                 )
                             })?;
                             let output =
-                                <#binding_ty as ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::execute_input(
                                     &runtime,
                                     &mut session,
                                     witness.context(),
@@ -6016,17 +6055,17 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                 )
                                 .await;
                             let output_summary =
-                                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_output(
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_output(
                                     spec.as_ref(),
                                     &output,
                                 );
                             let projected_output =
-                                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                                     spec.as_ref(),
                                     &output_summary,
                                 );
                             let expected_output =
-                                <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::expected_output(
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
                                     spec.as_ref(),
                                     &semantic_case.state,
                                     &semantic_case.action,
@@ -6060,10 +6099,10 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 })
             }
 
-            pub(super) fn generated_dynamic_tests() -> ::std::vec::Vec<::nirvash::conformance::DynamicTestCase> {
+            pub(super) fn generated_dynamic_tests() -> ::std::vec::Vec<::nirvash_conformance::DynamicTestCase> {
                 let specs = generated_cases();
                 let total = specs.len();
-                let mut tests: ::std::vec::Vec<::nirvash::conformance::DynamicTestCase> =
+                let mut tests: ::std::vec::Vec<::nirvash_conformance::DynamicTestCase> =
                     ::std::vec::Vec::new();
                 for (index, spec) in specs.into_iter().enumerate() {
                     let spec_case_label = generated_spec_case_label(index, total);
@@ -6075,7 +6114,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                     let spec = spec.clone();
                                     let semantic_case = semantic_case.clone();
                                     let name = generated_test_name(&semantic_case, &witness);
-                                    tests.push(::nirvash::conformance::DynamicTestCase::new(
+                                    tests.push(::nirvash_conformance::DynamicTestCase::new(
                                         name,
                                         move || {
                                             generated_run_case(
@@ -6089,7 +6128,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                             }
                             Err(message) => {
                                 let name = generated_setup_failure_name(&semantic_case);
-                                tests.push(::nirvash::conformance::DynamicTestCase::new(
+                                tests.push(::nirvash_conformance::DynamicTestCase::new(
                                     name,
                                     move || Err(message.clone()),
                                 ));
@@ -6103,13 +6142,13 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
 
         #[cfg(test)]
         #[doc(hidden)]
-        fn #provider_build_ident() -> ::std::vec::Vec<::nirvash::conformance::DynamicTestCase> {
+        fn #provider_build_ident() -> ::std::vec::Vec<::nirvash_conformance::DynamicTestCase> {
             #module_ident::generated_dynamic_tests()
         }
 
         #[cfg(test)]
         ::nirvash::inventory::submit! {
-            ::nirvash::conformance::RegisteredCodeWitnessTestProvider {
+            ::nirvash_conformance::RegisteredCodeWitnessTestProvider {
                 build: #provider_build_ident,
             }
         }
@@ -6359,17 +6398,17 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
             #[allow(unused_assignments)]
             fn declared_state_projection_matches_model() {
                 let spec = <#self_ty as ::core::default::Default>::default();
-                ::nirvash::conformance::assert_projection_exhaustive(
+                ::nirvash_conformance::assert_projection_exhaustive(
                     "declared state projection",
                     (#domain)(),
                     |probe: &#probe_state_ty| {
                         let summary =
-                            <#self_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                            <#self_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                                 &spec,
                                 probe,
                             );
                         let projected =
-                            <#self_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                            <#self_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                                 &spec,
                                 &summary,
                             );
@@ -6400,7 +6439,7 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
                 let spec = <#self_ty as ::core::default::Default>::default();
                 let probe = <#probe_state_ty as ::core::default::Default>::default();
                 let summary =
-                    <#self_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#self_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         &spec,
                         &probe,
                     );
@@ -6411,7 +6450,7 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
                     }
                 };
                 let projected =
-                    <#self_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_state(
+                    <#self_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
                         &spec,
                         &summary,
                     );
@@ -6422,7 +6461,7 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
                     #(#state_abstract_assignments)*
                     state
                 };
-                ::nirvash::conformance::assert_declared_state_projection(
+                ::nirvash_conformance::assert_declared_state_projection(
                     &summary,
                     &expected_summary,
                     &projected,
@@ -6436,11 +6475,11 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
             #[test]
             fn declared_output_projection_matches_model() {
                 let spec = <#self_ty as ::core::default::Default>::default();
-                ::nirvash::conformance::assert_projection_exhaustive(
+                ::nirvash_conformance::assert_projection_exhaustive(
                     "declared output projection",
                     (#domain)(),
                     |summary: &#summary_output_ty| {
-                        <#self_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                        <#self_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                             &spec,
                             summary,
                         )
@@ -6471,11 +6510,11 @@ fn expand_projection_model(args: ProjectionModelArgs) -> syn::Result<TokenStream
                     ..<#summary_output_ty as ::core::default::Default>::default()
                 };
                 let projected =
-                    <#self_ty as ::nirvash::conformance::ProtocolConformanceSpec>::abstract_output(
+                    <#self_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_output(
                         &spec,
                         &summary,
                     );
-                ::nirvash::conformance::assert_declared_output_projection(
+                ::nirvash_conformance::assert_declared_output_projection(
                     &projected,
                     &expected_output,
                 );
@@ -6598,9 +6637,9 @@ fn expand_runtime_contract_binding_mode(
             "binding-mode nirvash_runtime_contract does not support input_codec = ...",
         ));
     }
-    let input_ty: Type = args.input_ty.unwrap_or_else(
-        || syn::parse_quote!(<#spec_ty as ::nirvash::conformance::TransitionSystem>::Action),
-    );
+    let input_ty: Type = args
+        .input_ty
+        .unwrap_or_else(|| syn::parse_quote!(<#spec_ty as ::nirvash_lower::FrontendSpec>::Action));
     let session_ty: Type = args.session_ty.unwrap_or_else(|| context_ty.clone());
     let fresh_session = args.fresh_session.unwrap_or_else(|| context_expr.clone());
     let probe_context = args
@@ -6628,7 +6667,7 @@ fn expand_runtime_contract_binding_mode(
 
     let witness_impl = if witness_tokens.is_some() {
         quote! {
-            impl ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty> for #self_ty {
+            impl ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty> for #self_ty {
                 type Input = #input_ty;
                 type Session = #session_ty;
 
@@ -6639,12 +6678,12 @@ fn expand_runtime_contract_binding_mode(
                 fn positive_witnesses(
                     _spec: &#spec_ty,
                     session: &Self::Session,
-                    _prev: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::State,
-                    action: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::Action,
-                    _next: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::State,
-                ) -> ::std::vec::Vec<::nirvash::conformance::PositiveWitness<Self::Context, Self::Input>> {
+                    _prev: &<#spec_ty as ::nirvash_lower::FrontendSpec>::State,
+                    action: &<#spec_ty as ::nirvash_lower::FrontendSpec>::Action,
+                    _next: &<#spec_ty as ::nirvash_lower::FrontendSpec>::State,
+                ) -> ::std::vec::Vec<::nirvash_conformance::PositiveWitness<Self::Context, Self::Input>> {
                     vec![
-                        ::nirvash::conformance::PositiveWitness::new(
+                        ::nirvash_conformance::PositiveWitness::new(
                             "principal",
                             session.clone(),
                             action.clone(),
@@ -6655,11 +6694,11 @@ fn expand_runtime_contract_binding_mode(
                 fn negative_witnesses(
                     _spec: &#spec_ty,
                     session: &Self::Session,
-                    _prev: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::State,
-                    action: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::Action,
-                ) -> ::std::vec::Vec<::nirvash::conformance::NegativeWitness<Self::Context, Self::Input>> {
+                    _prev: &<#spec_ty as ::nirvash_lower::FrontendSpec>::State,
+                    action: &<#spec_ty as ::nirvash_lower::FrontendSpec>::Action,
+                ) -> ::std::vec::Vec<::nirvash_conformance::NegativeWitness<Self::Context, Self::Input>> {
                     vec![
-                        ::nirvash::conformance::NegativeWitness::new(
+                        ::nirvash_conformance::NegativeWitness::new(
                             "principal",
                             session.clone(),
                             action.clone(),
@@ -6672,8 +6711,8 @@ fn expand_runtime_contract_binding_mode(
                     _session: &mut Self::Session,
                     context: &Self::Context,
                     input: &Self::Input,
-                ) -> <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ProbeOutput {
-                    <Self::Runtime as ::nirvash::conformance::ActionApplier>::execute_action(
+                ) -> <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ProbeOutput {
+                    <Self::Runtime as ::nirvash_conformance::ActionApplier>::execute_action(
                         runtime,
                         context,
                         input,
@@ -6693,7 +6732,7 @@ fn expand_runtime_contract_binding_mode(
     Ok(quote! {
         #item
 
-        impl ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty> for #self_ty {
+        impl ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty> for #self_ty {
             type Runtime = #runtime_ty;
             type Context = #context_ty;
 
@@ -6751,9 +6790,9 @@ fn expand_runtime_contract_runtime_mode(
         .unwrap_or_else(|| syn::parse_quote!(::core::default::Default::default()));
     let fresh_runtime = args.fresh_runtime;
     let input_ty_is_explicit = args.input_ty.is_some();
-    let input_ty: Type = args.input_ty.unwrap_or_else(
-        || syn::parse_quote!(<#spec_ty as ::nirvash::conformance::TransitionSystem>::Action),
-    );
+    let input_ty: Type = args
+        .input_ty
+        .unwrap_or_else(|| syn::parse_quote!(<#spec_ty as ::nirvash_lower::FrontendSpec>::Action));
     let session_ty: Type = args.session_ty.unwrap_or_else(|| context_ty.clone());
     let fresh_session = args.fresh_session.unwrap_or_else(|| context_expr.clone());
     let probe_context = args
@@ -6858,7 +6897,7 @@ fn expand_runtime_contract_runtime_mode(
     let generated_positive_witness = if !input_ty_is_explicit {
         quote! {
             vec![
-                ::nirvash::conformance::PositiveWitness::new(
+                ::nirvash_conformance::PositiveWitness::new(
                     "principal",
                     session.clone(),
                     action.clone(),
@@ -6869,21 +6908,21 @@ fn expand_runtime_contract_runtime_mode(
     } else if let Some(input_codec) = &input_codec {
         let probe_context_expr = probe_context.clone();
         quote! {
-            <#input_codec as ::nirvash::conformance::ProtocolInputWitnessCodec<
-                <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action
+            <#input_codec as ::nirvash_conformance::ProtocolInputWitnessCodec<
+                <#spec_ty as ::nirvash_lower::FrontendSpec>::Action
             >>::positive_family(action)
                 .into_iter()
                 .enumerate()
                 .map(|(index, input)| {
-                    ::nirvash::conformance::PositiveWitness::new(
-                        <#input_codec as ::nirvash::conformance::ProtocolInputWitnessCodec<
-                            <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action
+                    ::nirvash_conformance::PositiveWitness::new(
+                        <#input_codec as ::nirvash_conformance::ProtocolInputWitnessCodec<
+                            <#spec_ty as ::nirvash_lower::FrontendSpec>::Action
                         >>::witness_name(
                             action,
                             if index == 0 {
-                                ::nirvash::conformance::WitnessKind::CanonicalPositive
+                                ::nirvash_conformance::WitnessKind::CanonicalPositive
                             } else {
-                                ::nirvash::conformance::WitnessKind::Positive
+                                ::nirvash_conformance::WitnessKind::Positive
                             },
                             index,
                         ),
@@ -6900,7 +6939,7 @@ fn expand_runtime_contract_runtime_mode(
     let generated_negative_witness = if !input_ty_is_explicit {
         quote! {
             vec![
-                ::nirvash::conformance::NegativeWitness::new(
+                ::nirvash_conformance::NegativeWitness::new(
                     "principal",
                     session.clone(),
                     action.clone(),
@@ -6910,18 +6949,18 @@ fn expand_runtime_contract_runtime_mode(
     } else if let Some(input_codec) = &input_codec {
         let probe_context_expr = probe_context.clone();
         quote! {
-            <#input_codec as ::nirvash::conformance::ProtocolInputWitnessCodec<
-                <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action
+            <#input_codec as ::nirvash_conformance::ProtocolInputWitnessCodec<
+                <#spec_ty as ::nirvash_lower::FrontendSpec>::Action
             >>::negative_family(action)
                 .into_iter()
                 .enumerate()
                 .map(|(index, input)| {
-                    ::nirvash::conformance::NegativeWitness::new(
-                        <#input_codec as ::nirvash::conformance::ProtocolInputWitnessCodec<
-                            <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action
+                    ::nirvash_conformance::NegativeWitness::new(
+                        <#input_codec as ::nirvash_conformance::ProtocolInputWitnessCodec<
+                            <#spec_ty as ::nirvash_lower::FrontendSpec>::Action
                         >>::witness_name(
                             action,
-                            ::nirvash::conformance::WitnessKind::Negative,
+                            ::nirvash_conformance::WitnessKind::Negative,
                             index,
                         ),
                         #probe_context_expr,
@@ -6969,7 +7008,7 @@ fn expand_runtime_contract_runtime_mode(
         quote! { (#dispatch_input)(runtime, session, context, input).await }
     } else {
         quote! {
-            <#self_ty as ::nirvash::conformance::ActionApplier>::execute_action(
+            <#self_ty as ::nirvash_conformance::ActionApplier>::execute_action(
                 runtime,
                 context,
                 input,
@@ -6989,7 +7028,7 @@ fn expand_runtime_contract_runtime_mode(
 
     let witness_impl = if witness_tokens.is_some() {
         quote! {
-            impl ::nirvash::conformance::ProtocolInputWitnessBinding<#spec_ty> for #binding_ty {
+            impl ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty> for #binding_ty {
                 type Input = #input_ty;
                 type Session = #session_ty;
 
@@ -7000,10 +7039,10 @@ fn expand_runtime_contract_runtime_mode(
                 fn positive_witnesses(
                     spec: &#spec_ty,
                     session: &Self::Session,
-                    prev: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::State,
-                    action: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::Action,
-                    next: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::State,
-                ) -> ::std::vec::Vec<::nirvash::conformance::PositiveWitness<Self::Context, Self::Input>> {
+                    prev: &<#spec_ty as ::nirvash_lower::FrontendSpec>::State,
+                    action: &<#spec_ty as ::nirvash_lower::FrontendSpec>::Action,
+                    next: &<#spec_ty as ::nirvash_lower::FrontendSpec>::State,
+                ) -> ::std::vec::Vec<::nirvash_conformance::PositiveWitness<Self::Context, Self::Input>> {
                     #(#positive_witness_branches)*
                     ::std::vec::Vec::new()
                 }
@@ -7011,9 +7050,9 @@ fn expand_runtime_contract_runtime_mode(
                 fn negative_witnesses(
                     spec: &#spec_ty,
                     session: &Self::Session,
-                    prev: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::State,
-                    action: &<#spec_ty as ::nirvash::conformance::TransitionSystem>::Action,
-                ) -> ::std::vec::Vec<::nirvash::conformance::NegativeWitness<Self::Context, Self::Input>> {
+                    prev: &<#spec_ty as ::nirvash_lower::FrontendSpec>::State,
+                    action: &<#spec_ty as ::nirvash_lower::FrontendSpec>::Action,
+                ) -> ::std::vec::Vec<::nirvash_conformance::NegativeWitness<Self::Context, Self::Input>> {
                     #(#negative_witness_branches)*
                     ::std::vec::Vec::new()
                 }
@@ -7023,7 +7062,7 @@ fn expand_runtime_contract_runtime_mode(
                     session: &mut Self::Session,
                     context: &Self::Context,
                     input: &Self::Input,
-                ) -> <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::ProbeOutput {
+                ) -> <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::ProbeOutput {
                     #execute_input_expr
                 }
 
@@ -7041,7 +7080,7 @@ fn expand_runtime_contract_runtime_mode(
 
         #binding_struct
 
-        impl ::nirvash::conformance::ProtocolRuntimeBinding<#spec_ty> for #binding_ty {
+        impl ::nirvash_conformance::ProtocolRuntimeBinding<#spec_ty> for #binding_ty {
             type Runtime = #self_ty;
             type Context = #context_ty;
 
@@ -7054,8 +7093,8 @@ fn expand_runtime_contract_runtime_mode(
             }
         }
 
-        impl ::nirvash::conformance::ActionApplier for #self_ty {
-            type Action = <#spec_ty as ::nirvash::conformance::TransitionSystem>::Action;
+        impl ::nirvash_conformance::ActionApplier for #self_ty {
+            type Action = <#spec_ty as ::nirvash_lower::FrontendSpec>::Action;
             type Output = #probe_output_ty;
             type Context = #context_ty;
 
@@ -7067,11 +7106,11 @@ fn expand_runtime_contract_runtime_mode(
                 let spec = <#spec_ty as ::core::default::Default>::default();
                 let observed_before = (#observe_state)(self, _context).await;
                 let summary_before =
-                    <#spec_ty as ::nirvash::conformance::ProtocolConformanceSpec>::summarize_state(
+                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         &spec,
                         &observed_before,
                     );
-                if !::nirvash::conformance::enabled_from_summary(&spec, &summary_before, action)
+                if !::nirvash_conformance::enabled_from_summary(&spec, &summary_before, action)
                 {
                     return <#probe_output_ty as ::core::default::Default>::default();
                 }
@@ -7080,7 +7119,7 @@ fn expand_runtime_contract_runtime_mode(
             }
         }
 
-        impl ::nirvash::conformance::StateObserver for #self_ty {
+        impl ::nirvash_conformance::StateObserver for #self_ty {
             type SummaryState = #probe_state_ty;
             type Context = #context_ty;
 

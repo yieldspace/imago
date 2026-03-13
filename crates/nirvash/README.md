@@ -1,18 +1,26 @@
 # nirvash
 
-`nirvash` は `imago` workspace の formal DSL / spec surface です。  
-bounded domain、relation kernel、transition DSL、LTL/fairness、conformance trait、doc graph metadata を backend 非依存で提供します。
+`nirvash` は `imago` workspace の formal frontend DSL です。  
+authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgram` を中心に保ちつつ、checker-facing な semantic core / lowering / conformance / proof export は sibling crate へ分離されました。
 
 ## Crate split
 
 - `nirvash`
-  - DSL / spec trait / conformance trait / doc graph shared type
+  - DSL / transition frontend / doc graph shared type
+- `nirvash-ir`
+  - backend 非依存の `SpecCore`, `StateExpr`, `ActionExpr`, `TemporalExpr`, `FairnessDecl`
+- `nirvash-lower`
+  - `FrontendSpec`, `LoweredSpec`, `FiniteModelDomain`, `SymbolicEncoding`, checker-facing config/model boundary
 - `nirvash-check`
   - `ModelChecker` front door と checker-facing API
 - `nirvash-backends`
-  - explicit / symbolic backend 実装
+  - explicit / symbolic backend 実装（`LoweredSpec` を受ける）
+- `nirvash-conformance`
+  - witness / runtime binding / refinement assert / code-witness harness
+- `nirvash-proof`
+  - SMT-LIB / TLA module export
 
-通常の runtime crate は `nirvash` だけを通常依存に取り、formal / doc / test 側だけが `nirvash-check` を使います。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
+通常の runtime crate は引き続き `nirvash` を起点に authoring できますが、checker / conformance / proof 側は `nirvash-lower` / `nirvash-conformance` / `nirvash-proof` を明示的に参照します。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
 現状の backend semantics は次のとおりです。
 
@@ -21,9 +29,9 @@ bounded domain、relation kernel、transition DSL、LTL/fairness、conformance t
 - `ModelBackend::Explicit + ExplorationMode::BoundedLasso`
   - `ExplicitModelCheckOptions::current()` に対応する explicit bounded prefix / lasso enumeration
 - `ModelBackend::Symbolic + ExplorationMode::ReachableGraph`
-  - `TransitionProgram` と `SymbolicStateSpec` / `SymbolicSortSpec` を使い、transition relation を solver で解く successor enumeration safety path
+  - `TransitionProgram` / `SpecCore` / `SymbolicEncoding` を使う direct SMT safety path。`safety = Bmc | KInduction | PdrIc3` を正本にし、reachable-graph snapshot は relational bridge に限定
 - `ModelBackend::Symbolic + ExplorationMode::BoundedLasso`
-  - `SymbolicModelCheckOptions::current()` に対応する direct SMT bounded-lasso unrolling + loop selector
+  - `temporal = BoundedLasso | LivenessToSafety` に対応する direct SMT temporal path
 
 symbolic backend は AST-native DSL を要求し、legacy closure path や未登録 helper / effect は fail-closed します。schema validation は direct field read だけでなく pure call の receiver / argument read path、property、fairness にも掛かり、state schema には sort metadata も保持されます。
 explicit backend は exact state equality ベースの symmetry canonicalization を使い、temporal property / fairness と併用できます。
@@ -38,38 +46,44 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
   - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定
   - `parallel = ExplicitParallelOptions { workers }` と `distributed = ExplicitDistributedOptions { shards }` で explicit reachable-graph frontier の local/distributed wave を設定
   - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ModelChecker::simulate()` の deterministic random walk を設定
-  - `ModelCase::with_view(ViewProjector)` と `ModelCase::with_partial_order(PartialOrderReducer)` で explicit reachable-graph dedup / branch pruning reducer を付ける
+- `ModelInstance::with_state_abstraction(StateAbstraction)` と `ModelInstance::with_por(PorHints)` を通じて explicit reachable-graph dedup / branch pruning を付ける
 - `symbolic: SymbolicModelCheckOptions`
-  - 現時点では `successors = SolverEnumeration`、`bounded_lasso = DirectSmt`、`safety = ReachableGraph | KInduction | PdrIc3`
+  - 現時点では `bridge = RelationalBridgeOptions { strategy = SolverEnumeration }`、`temporal = BoundedLasso | LivenessToSafety`、`safety = Bmc | KInduction | PdrIc3`
   - `k_induction = SymbolicKInductionOptions { max_depth }` と `pdr = SymbolicPdrOptions { max_frames }` で invariant proof engine の bound を設定
 
-これらは current implementation を present tense で表す public contract です。symbolic backend は explicit-only reducer (`with_view` / `with_partial_order`) を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression を同じ config surface で切り替えます。
+これらは current implementation を present tense で表す public contract です。symbolic backend は explicit-only reducer (`with_state_abstraction` / `with_por`) を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression を同じ config surface で切り替えます。
 
 ## What It Provides
 
-- `Signature`: bounded helper 型に有限 domain と値 invariant を与える trait
+- `FiniteModelDomain`: bounded helper 型へ finite domain と値 invariant を与える checker-facing trait
+- `SymbolicEncoding`: symbolic sort / state schema を与える checker-facing trait
 - `RelAtom` / `RelSet<T>` / `Relation2<A, B>`: relational kernel
-- `TransitionSystem` / `TemporalSpec`: transition DSL と時相仕様の記述
+- `TransitionProgram`: frontend DSL の遷移記述 surface
+- `FrontendSpec` / `LoweredSpec`: backend へ渡る lowering boundary
+- `TemporalSpec`: property / fairness provider
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
-- `ActionApplier` / `StateObserver`: runtime conformance capability
+- `ActionApplier` / `StateObserver`: runtime conformance capability (`nirvash-conformance`)
 - `pred!` / `step!` / `ltl!` と registry macro
 
 ## Minimal Example
 
 ```rust
-use nirvash::{TransitionProgram, TransitionSystem};
+use nirvash::TransitionProgram;
 use nirvash_check::ModelChecker;
+use nirvash_lower::{FrontendSpec, TemporalSpec};
 use nirvash_macros::{
-    Signature as FormalSignature, formal_tests, nirvash_transition_program, subsystem_spec,
+    FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding,
+    nirvash_expr, nirvash_transition_program,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum State {
     Idle,
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum Action {
     Start,
     Finish,
@@ -78,13 +92,20 @@ enum Action {
 #[derive(Default)]
 struct Spec;
 
-#[subsystem_spec]
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
 
+    fn frontend_name(&self) -> &'static str {
+        "Spec"
+    }
+
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![Action::Start, Action::Finish]
     }
 
     fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
@@ -100,15 +121,15 @@ impl TransitionSystem for Spec {
     }
 }
 
-nirvash::invariant!(Spec, declared_states_are_valid(state) => {
-    let _ = state;
-    true
-});
-
-#[formal_tests(spec = Spec)]
-const _: () = ();
+impl TemporalSpec for Spec {
+    fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
+        vec![nirvash_expr!(declared_states_are_valid(state) => matches!(state, State::Idle | State::Busy))]
+    }
+}
 
 let spec = Spec::default();
-let result = ModelChecker::new(&spec).check_all().expect("checker runs");
+let mut lowering_cx = nirvash_lower::LoweringCx;
+let lowered = spec.lower(&mut lowering_cx).expect("spec lowers");
+let result = ModelChecker::new(&lowered).check_all().expect("checker runs");
 assert!(result.is_ok());
 ```

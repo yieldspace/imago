@@ -1,7 +1,7 @@
 error[E0425]: cannot find value `__nirvash_code_witness_main_marker` in the crate root
-   --> tests/fixtures/code_witness_tests_missing_main.rs:103:1
+   --> tests/fixtures/code_witness_tests_missing_main.rs:105:1
     |
-103 | #[code_witness_tests(spec = Spec, binding = Binding)]
+105 | #[code_witness_tests(spec = Spec, binding = Binding)]
     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in the crate root
     |
     = note: this error originates in the attribute macro `code_witness_tests` (in Nightly builds, run with -Z macro-backtrace for more info)

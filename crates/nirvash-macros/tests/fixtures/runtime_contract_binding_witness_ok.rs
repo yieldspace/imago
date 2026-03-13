@@ -1,11 +1,10 @@
 use std::sync::Mutex;
 
-use nirvash::{
-    ActionVocabulary, TransitionSystem,
-    conformance::{ActionApplier, ProtocolConformanceSpec, StateObserver},
-};
+use nirvash::ActionVocabulary;
+use nirvash_lower::FrontendSpec;
+use nirvash_conformance::{ActionApplier, ProtocolConformanceSpec, StateObserver};
 use nirvash_macros::{
-    ActionVocabulary as FormalActionVocabulary, Signature as FormalSignature,
+    ActionVocabulary as FormalActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
     code_witness_test_main, nirvash_runtime_contract,
 };
 
@@ -15,13 +14,13 @@ struct Spec;
 #[derive(Clone, Copy, Debug, Default)]
 struct Context;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature, FormalActionVocabulary)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain, FormalActionVocabulary)]
 enum Action {
     Start,
     Stop,
@@ -41,9 +40,13 @@ struct Driver {
     state: Mutex<State>,
 }
 
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]

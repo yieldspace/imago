@@ -3,10 +3,9 @@ use imagod_spec::{
     CommandProbeOutput as RuntimeCommandProbeOutput, CommandProbeState as RuntimeCommandProbeState,
     CommandStateSummary as RuntimeCommandStateSummary,
 };
-use nirvash::{
-    ActionVocabulary, BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
-};
+use nirvash::{ActionVocabulary, BoolExpr};
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
 use nirvash_macros::nirvash_projection_contract;
 
 use crate::{
@@ -69,11 +68,11 @@ fn abstract_command_output(
     )
 }
 
-impl TransitionSystem for CommandProjectionSpec {
+impl FrontendSpec for CommandProjectionSpec {
     type State = SystemState;
     type Action = CommandProtocolAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "command_projection"
     }
 
@@ -89,17 +88,15 @@ impl TransitionSystem for CommandProjectionSpec {
         self.system()
             .transition(state, &SystemAtomicAction::Command(action.clone()))
     }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default().with_check_deadlocks(false)]
+    }
 }
 
 impl TemporalSpec for CommandProjectionSpec {
     fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         self.system().invariants()
-    }
-}
-
-impl ModelCaseSource for CommandProjectionSpec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-        vec![ModelCase::default().with_check_deadlocks(false)]
     }
 }
 

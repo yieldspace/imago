@@ -1,14 +1,13 @@
 use std::sync::Mutex;
 
-use nirvash::{
-    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
-    conformance::{
-        ActionApplier, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
-        ProtocolInputWitnessBinding, ProtocolRuntimeBinding, RegisteredCodeWitnessTestProvider,
-        StateObserver,
-    },
+use nirvash::{BoolExpr, inventory};
+use nirvash_conformance::{
+    ActionApplier, NegativeWitness, PositiveWitness, ProtocolConformanceSpec,
+    ProtocolInputWitnessBinding, ProtocolRuntimeBinding, RegisteredCodeWitnessTestProvider,
+    StateObserver, run_registered_code_witness_tests,
 };
-use nirvash_macros::Signature as FormalSignature;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
+use nirvash_macros::FiniteModelDomain as FormalFiniteModelDomain;
 use nirvash_macros::{code_witness_tests, nirvash_step_expr};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -17,14 +16,14 @@ struct Spec;
 #[derive(Clone, Copy, Debug, Default)]
 struct Binding;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
     Starting,
     Busy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     StartFast,
     StartSlow,
@@ -51,9 +50,13 @@ struct Driver {
     state: Mutex<State>,
 }
 
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -77,16 +80,14 @@ impl TransitionSystem for Spec {
             _ => None,
         }
     }
-}
 
-impl ModelCaseSource for Spec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
         vec![
-            ModelCase::new("fast_path").with_action_constraint(nirvash_step_expr! {
+            ModelInstance::new("fast_path").with_action_constraint(nirvash_step_expr! {
                 fast_path_only(_prev, action, _next) =>
                     !matches!(action, Action::StartSlow | Action::FinishSlow)
             }),
-            ModelCase::new("slow_path").with_action_constraint(nirvash_step_expr! {
+            ModelInstance::new("slow_path").with_action_constraint(nirvash_step_expr! {
                 slow_path_only(_prev, action, _next) => !matches!(action, Action::StartFast)
             }),
         ]
@@ -259,7 +260,7 @@ impl StateObserver for Driver {
 }
 
 fn generated_test_names() -> Vec<String> {
-    let mut names = nirvash::inventory::iter::<RegisteredCodeWitnessTestProvider>
+    let mut names = inventory::iter::<RegisteredCodeWitnessTestProvider>
         .into_iter()
         .flat_map(|provider| (provider.build)())
         .map(|test| test.name().to_owned())
@@ -302,5 +303,5 @@ pub fn __nirvash_code_witness_main_marker() {}
 
 fn main() {
     assert_history_sensitive_names_registered();
-    nirvash::conformance::run_registered_code_witness_tests();
+    run_registered_code_witness_tests();
 }

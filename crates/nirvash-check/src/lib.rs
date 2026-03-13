@@ -1,26 +1,24 @@
-pub use nirvash::{
-    Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCase, ModelCaseSource,
-    ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphSnapshot, TemporalSpec,
-    Trace, TransitionSystem,
+pub use nirvash_lower::{
+    CheckerSpec, Counterexample, CounterexampleKind, ExplorationMode, FiniteModelDomain,
+    LoweredSpec, ModelBackend, ModelCheckConfig, ModelCheckError, ModelCheckResult, ModelInstance,
+    ReachableGraphSnapshot, Trace,
 };
 
-type TraceVec<T> = Vec<Trace<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
+type TraceVec<T> = Vec<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 
-pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource>(
-    nirvash_backends::BackendModelChecker<'a, T>,
-);
+pub struct ModelChecker<'a, T: CheckerSpec>(nirvash_backends::BackendModelChecker<'a, T>);
 
 impl<'a, T> ModelChecker<'a, T>
 where
-    T: TemporalSpec + ModelCaseSource + Sync,
-    T::State: PartialEq + nirvash::Signature + Send + Sync,
+    T: CheckerSpec,
+    T::State: PartialEq + FiniteModelDomain + Send + Sync,
     T::Action: PartialEq + Send + Sync,
 {
     pub fn new(spec: &'a T) -> Self {
         Self(nirvash_backends::BackendModelChecker::new(spec))
     }
 
-    pub fn for_case(spec: &'a T, model_case: ModelCase<T::State, T::Action>) -> Self {
+    pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
         Self(nirvash_backends::BackendModelChecker::for_case(
             spec, model_case,
         ))
@@ -88,103 +86,68 @@ mod tests {
     };
 
     use super::ModelChecker;
+    use crate::CounterexampleKind;
     use nirvash::{
         BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
         ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
         ExplicitSimulationOptions, ExplicitStateCompression, ExplicitStateStorage, ExplorationMode,
-        ExprDomain, GuardExpr, Ltl, ModelBackend, ModelCase, ModelCheckConfig, PartialOrderReducer,
-        Signature, StepExpr, SymbolicKInductionOptions, SymbolicModelCheckOptions,
-        SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicSort, SymbolicSortSpec,
-        SymbolicStateSchema, SymbolicStateSpec, TemporalSpec, TraceStep, TransitionProgram,
-        TransitionRule, TransitionSystem, UpdateOp, UpdateProgram, UpdateValueExprAst,
-        ViewProjector, inventory, registry::RegisteredSymbolicStateSchema, symbolic_leaf_field,
+        ExprDomain, GuardExpr, Ltl, StepExpr, SymbolicKInductionOptions, SymbolicModelCheckOptions,
+        SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicTemporalEngine, TraceStep,
+        TransitionProgram, TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst,
+    };
+    use nirvash_lower::{
+        FrontendSpec, LoweringCx, ModelBackend, ModelCheckConfig, ModelInstance, PorHints,
+        StateAbstraction, TemporalSpec,
+    };
+    use nirvash_macros::{
+        FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
     };
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    macro_rules! frontend_name {
+        () => {
+            fn frontend_name(&self) -> &'static str {
+                std::any::type_name::<Self>()
+            }
+        };
+    }
+
+    fn lower_spec<T>(spec: &T) -> nirvash_lower::LoweredSpec<'_, T::State, T::Action>
+    where
+        T: TemporalSpec,
+        T::State: PartialEq + nirvash_lower::FiniteModelDomain,
+        T::Action: PartialEq,
+    {
+        let mut lowering_cx = LoweringCx;
+        spec.lower(&mut lowering_cx).expect("spec should lower")
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        FormalFiniteModelDomain,
+        FormalSymbolicEncoding,
+    )]
     enum Slot {
         Zero,
         One,
         Two,
     }
 
-    impl Signature for Slot {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            nirvash::BoundedDomain::new(vec![Self::Zero, Self::One, Self::Two])
-        }
-    }
-
-    impl SymbolicSortSpec for Slot {
-        fn symbolic_sort() -> SymbolicSort {
-            SymbolicSort::finite::<Self>()
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
     enum QuantAction {
         Advance,
         Reset,
     }
 
-    impl Signature for QuantAction {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            nirvash::BoundedDomain::new(vec![Self::Advance, Self::Reset])
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
     struct QuantState {
         ready: bool,
         slot: Slot,
-    }
-
-    impl Signature for QuantState {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            let mut values = Vec::new();
-            for ready in [false, true] {
-                for slot in Slot::bounded_domain().into_vec() {
-                    values.push(Self { ready, slot });
-                }
-            }
-            nirvash::BoundedDomain::new(values)
-        }
-    }
-
-    impl SymbolicStateSpec for QuantState {
-        fn symbolic_state_schema() -> SymbolicStateSchema<Self> {
-            SymbolicStateSchema::new(
-                vec![
-                    symbolic_leaf_field(
-                        "ready",
-                        |state: &Self| &state.ready,
-                        |state: &mut Self, value: bool| state.ready = value,
-                    ),
-                    symbolic_leaf_field(
-                        "slot",
-                        |state: &Self| &state.slot,
-                        |state: &mut Self, value: Slot| state.slot = value,
-                    ),
-                ],
-                || QuantState {
-                    ready: false,
-                    slot: Slot::Zero,
-                },
-            )
-        }
-    }
-
-    fn quantified_state_type_id() -> std::any::TypeId {
-        std::any::TypeId::of::<QuantState>()
-    }
-
-    fn quantified_state_schema() -> Box<dyn std::any::Any> {
-        Box::new(<QuantState as SymbolicStateSpec>::symbolic_state_schema())
-    }
-
-    inventory::submit! {
-        RegisteredSymbolicStateSchema {
-            state_type_id: quantified_state_type_id,
-            build: quantified_state_schema,
-        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -199,9 +162,11 @@ mod tests {
         }
     }
 
-    impl TransitionSystem for StructuralQuantifierSpec {
+    impl FrontendSpec for StructuralQuantifierSpec {
         type State = QuantState;
         type Action = QuantAction;
+
+        frontend_name!();
 
         fn initial_states(&self) -> Vec<Self::State> {
             vec![QuantState {
@@ -271,29 +236,13 @@ mod tests {
                 ],
             ))
         }
-    }
 
-    impl TemporalSpec for StructuralQuantifierSpec {
-        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
-            vec![BoolExpr::forall_in(
-                "slot_tautology",
-                ExprDomain::of_signature("slots"),
-                "matches!(candidate, Slot::Zero | Slot::One | Slot::Two)",
-                &["state.slot"],
-                |_state: &QuantState, candidate: &Slot| {
-                    matches!(candidate, Slot::Zero | Slot::One | Slot::Two)
-                },
-            )]
-        }
-    }
-
-    impl nirvash::ModelCaseSource for StructuralQuantifierSpec {
-        fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
+        fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
             vec![
-                ModelCase::new("structural_quantifiers").with_action_constraint(
+                ModelInstance::new("structural_quantifiers").with_action_constraint(
                     StepExpr::exists_in(
                         "known_next_slot",
-                        ExprDomain::of_signature("slots"),
+                        ExprDomain::of_finite_model_domain("slots"),
                         "candidate == next.slot",
                         &["next.slot"],
                         |_prev: &QuantState,
@@ -310,12 +259,28 @@ mod tests {
         }
     }
 
+    impl TemporalSpec for StructuralQuantifierSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            vec![BoolExpr::forall_in(
+                "slot_tautology",
+                ExprDomain::of_finite_model_domain("slots"),
+                "matches!(candidate, Slot::Zero | Slot::One | Slot::Two)",
+                &["state.slot"],
+                |_state: &QuantState, candidate: &Slot| {
+                    matches!(candidate, Slot::Zero | Slot::One | Slot::Two)
+                },
+            )]
+        }
+    }
+
     #[derive(Debug, Clone, Copy, Default)]
     struct UnsafeInvariantSpec;
 
-    impl TransitionSystem for UnsafeInvariantSpec {
+    impl FrontendSpec for UnsafeInvariantSpec {
         type State = QuantState;
         type Action = QuantAction;
+
+        frontend_name!();
 
         fn initial_states(&self) -> Vec<Self::State> {
             vec![QuantState {
@@ -352,6 +317,10 @@ mod tests {
                 )],
             ))
         }
+
+        fn default_model_backend(&self) -> Option<ModelBackend> {
+            Some(ModelBackend::Symbolic)
+        }
     }
 
     impl TemporalSpec for UnsafeInvariantSpec {
@@ -364,17 +333,12 @@ mod tests {
         }
     }
 
-    impl nirvash::ModelCaseSource for UnsafeInvariantSpec {
-        fn default_model_backend(&self) -> Option<ModelBackend> {
-            Some(ModelBackend::Symbolic)
-        }
-    }
-
     #[test]
     fn symbolic_backend_accepts_structural_quantifiers() {
         let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
         let checker = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 exploration: ExplorationMode::ReachableGraph,
@@ -398,8 +362,9 @@ mod tests {
     #[test]
     fn symbolic_k_induction_proves_invariant_without_graph_exploration() {
         let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
         let result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 exploration: ExplorationMode::ReachableGraph,
@@ -419,8 +384,9 @@ mod tests {
     #[test]
     fn symbolic_pdr_proves_invariant_without_graph_exploration() {
         let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
         let result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 exploration: ExplorationMode::ReachableGraph,
@@ -440,8 +406,9 @@ mod tests {
     #[test]
     fn symbolic_k_induction_finds_invariant_counterexample() {
         let spec = UnsafeInvariantSpec;
+        let lowered = lower_spec(&spec);
         let result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 exploration: ExplorationMode::ReachableGraph,
@@ -466,8 +433,9 @@ mod tests {
     #[test]
     fn symbolic_pdr_finds_invariant_counterexample() {
         let spec = UnsafeInvariantSpec;
+        let lowered = lower_spec(&spec);
         let result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 exploration: ExplorationMode::ReachableGraph,
@@ -489,25 +457,79 @@ mod tests {
         assert!(!violation.trace.states()[1].ready);
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[test]
+    fn symbolic_bmc_finds_deadlock_without_bridge_graph() {
+        let spec = SimulationSpec;
+        let lowered = lower_spec(&spec);
+        let result = ModelChecker::with_config(
+            &lowered,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_deadlocks()
+        .expect("symbolic BMC deadlock check should succeed");
+
+        let violation = &result.violations()[0];
+        assert_eq!(violation.kind, CounterexampleKind::Deadlock);
+        assert_eq!(
+            violation.trace.states().last(),
+            Some(&SimulationState::Done)
+        );
+    }
+
+    #[test]
+    fn symbolic_liveness_to_safety_matches_bounded_lasso() {
+        let spec = SymbolicTemporalSpec;
+        let lowered = lower_spec(&spec);
+        let bounded_lasso = ModelChecker::with_config(
+            &lowered,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                bounded_depth: Some(3),
+                symbolic: SymbolicModelCheckOptions::current()
+                    .with_temporal(SymbolicTemporalEngine::BoundedLasso),
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_properties()
+        .expect("bounded lasso should check symbolic temporal properties");
+        let liveness_to_safety = ModelChecker::with_config(
+            &lowered,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                bounded_depth: Some(3),
+                symbolic: SymbolicModelCheckOptions::current()
+                    .with_temporal(SymbolicTemporalEngine::LivenessToSafety),
+                ..ModelCheckConfig::default()
+            },
+        )
+        .check_properties()
+        .expect("liveness-to-safety should check the same symbolic temporal subset");
+
+        assert_eq!(bounded_lasso, liveness_to_safety);
+        assert!(!bounded_lasso.is_ok());
+    }
+
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding,
+    )]
     enum SimulationState {
         Left,
         Right,
         Done,
     }
 
-    impl Signature for SimulationState {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            nirvash::BoundedDomain::new(vec![Self::Left, Self::Right, Self::Done])
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
     enum SimulationAction {
         Finish,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
     enum CounterexampleAction {
         TakeLong,
         TakeShort,
@@ -515,18 +537,7 @@ mod tests {
         Finish,
     }
 
-    impl Signature for CounterexampleAction {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            nirvash::BoundedDomain::new(vec![
-                Self::TakeLong,
-                Self::TakeShort,
-                Self::Advance,
-                Self::Finish,
-            ])
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
     enum CounterexampleState {
         Start,
         Long1,
@@ -534,18 +545,14 @@ mod tests {
         Done,
     }
 
-    impl Signature for CounterexampleState {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            nirvash::BoundedDomain::new(vec![Self::Start, Self::Long1, Self::Long2, Self::Done])
-        }
-    }
-
     #[derive(Debug, Clone, Copy, Default)]
     struct CounterexampleSpec;
 
-    impl TransitionSystem for CounterexampleSpec {
+    impl FrontendSpec for CounterexampleSpec {
         type State = CounterexampleState;
         type Action = CounterexampleAction;
+
+        frontend_name!();
 
         fn initial_states(&self) -> Vec<Self::State> {
             vec![CounterexampleState::Start]
@@ -585,27 +592,68 @@ mod tests {
         }
 
         fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
-            vec![Ltl::Always(Box::new(Ltl::Pred(BoolExpr::pure_call(
-                "not_done",
-                |state: &CounterexampleState| !matches!(state, CounterexampleState::Done),
-            ))))]
+            vec![Ltl::Always(Box::new(Ltl::Pred(
+                BoolExpr::builtin_pure_call("not_done", |state: &CounterexampleState| {
+                    !matches!(state, CounterexampleState::Done)
+                }),
+            )))]
         }
     }
 
-    impl nirvash::ModelCaseSource for CounterexampleSpec {}
+    #[derive(Debug, Clone, Copy, Default)]
+    struct SymbolicTemporalSpec;
 
-    impl Signature for SimulationAction {
-        fn bounded_domain() -> nirvash::BoundedDomain<Self> {
-            nirvash::BoundedDomain::new(vec![Self::Finish])
+    impl FrontendSpec for SymbolicTemporalSpec {
+        type State = QuantState;
+        type Action = QuantAction;
+
+        frontend_name!();
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            StructuralQuantifierSpec.initial_states()
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            StructuralQuantifierSpec.actions()
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            StructuralQuantifierSpec.transition_program()
+        }
+
+        fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+            StructuralQuantifierSpec.model_instances()
+        }
+
+        fn default_model_backend(&self) -> Option<ModelBackend> {
+            Some(ModelBackend::Symbolic)
+        }
+    }
+
+    impl TemporalSpec for SymbolicTemporalSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+
+        fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>> {
+            vec![Ltl::Always(Box::new(Ltl::Pred(
+                BoolExpr::builtin_pure_call_with_paths(
+                    "slot_is_not_two",
+                    &["slot"],
+                    |state: &QuantState| !matches!(state.slot, Slot::Two),
+                ),
+            )))]
         }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
     struct SimulationSpec;
 
-    impl TransitionSystem for SimulationSpec {
+    impl FrontendSpec for SimulationSpec {
         type State = SimulationState;
         type Action = SimulationAction;
+
+        frontend_name!();
 
         fn initial_states(&self) -> Vec<Self::State> {
             vec![SimulationState::Left, SimulationState::Right]
@@ -615,16 +663,68 @@ mod tests {
             vec![SimulationAction::Finish]
         }
 
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(TransitionProgram::named(
+                "simulation",
+                vec![
+                    TransitionRule::ast(
+                        "finish_left",
+                        GuardExpr::builtin_pure_call(
+                            "is_finish_left",
+                            |prev: &SimulationState, action: &SimulationAction| {
+                                matches!(
+                                    (prev, action),
+                                    (SimulationState::Left, SimulationAction::Finish)
+                                )
+                            },
+                        ),
+                        UpdateProgram::ast(
+                            "finish_left",
+                            vec![UpdateOp::assign_ast(
+                                "self",
+                                UpdateValueExprAst::literal("SimulationState::Done"),
+                                |_prev: &SimulationState,
+                                 state: &mut SimulationState,
+                                 _action: &SimulationAction| {
+                                    *state = SimulationState::Done;
+                                },
+                            )],
+                        ),
+                    ),
+                    TransitionRule::ast(
+                        "finish_right",
+                        GuardExpr::builtin_pure_call(
+                            "is_finish_right",
+                            |prev: &SimulationState, action: &SimulationAction| {
+                                matches!(
+                                    (prev, action),
+                                    (SimulationState::Right, SimulationAction::Finish)
+                                )
+                            },
+                        ),
+                        UpdateProgram::ast(
+                            "finish_right",
+                            vec![UpdateOp::assign_ast(
+                                "self",
+                                UpdateValueExprAst::literal("SimulationState::Done"),
+                                |_prev: &SimulationState,
+                                 state: &mut SimulationState,
+                                 _action: &SimulationAction| {
+                                    *state = SimulationState::Done;
+                                },
+                            )],
+                        ),
+                    ),
+                ],
+            ))
+        }
+
         fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
             match (state, action) {
                 (SimulationState::Left, SimulationAction::Finish)
                 | (SimulationState::Right, SimulationAction::Finish) => Some(SimulationState::Done),
                 (SimulationState::Done, SimulationAction::Finish) => None,
             }
-        }
-
-        fn allow_stutter(&self) -> bool {
-            false
         }
     }
 
@@ -633,8 +733,6 @@ mod tests {
             Vec::new()
         }
     }
-
-    impl nirvash::ModelCaseSource for SimulationSpec {}
 
     fn checkpoint_path(label: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -650,18 +748,19 @@ mod tests {
     #[test]
     fn explicit_simulation_is_seed_reproducible() {
         let spec = SimulationSpec;
+        let lowered = lower_spec(&spec);
         let explicit = nirvash::ExplicitModelCheckOptions::current()
             .with_simulation(ExplicitSimulationOptions::new(2, 4, 1));
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let left_run = ModelChecker::with_config(&spec, config.clone())
+        let left_run = ModelChecker::with_config(&lowered, config.clone())
             .simulate()
             .expect("explicit simulation should run");
-        let left_run_again = ModelChecker::with_config(&spec, config)
+        let left_run_again = ModelChecker::with_config(&lowered, config)
             .simulate()
             .expect("explicit simulation should be reproducible");
         let right_run = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
                     .with_simulation(ExplicitSimulationOptions::new(2, 4, 2)),
@@ -683,11 +782,12 @@ mod tests {
     #[test]
     fn explicit_reachable_graph_matches_fingerprinted_storage() {
         let spec = SimulationSpec;
-        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+        let lowered = lower_spec(&spec);
+        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
         let fingerprinted = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
                     .with_state_storage(ExplicitStateStorage::InMemoryFingerprinted),
@@ -702,11 +802,12 @@ mod tests {
     #[test]
     fn explicit_reachable_graph_matches_domain_index_compression() {
         let spec = SimulationSpec;
-        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+        let lowered = lower_spec(&spec);
+        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
         let compressed = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
                     .with_compression(ExplicitStateCompression::DomainIndex),
@@ -721,16 +822,17 @@ mod tests {
     #[test]
     fn explicit_reachable_graph_roundtrips_checkpoint_file() {
         let spec = SimulationSpec;
+        let lowered = lower_spec(&spec);
         let path = checkpoint_path("reachable-graph");
         let explicit = nirvash::ExplicitModelCheckOptions::current().with_checkpoint(
             ExplicitCheckpointOptions::at_path(path.display().to_string()),
         );
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let first = ModelChecker::with_config(&spec, config.clone())
+        let first = ModelChecker::with_config(&lowered, config.clone())
             .full_reachable_graph_snapshot()
             .expect("checkpointed snapshot");
-        let second = ModelChecker::with_config(&spec, config)
+        let second = ModelChecker::with_config(&lowered, config)
             .full_reachable_graph_snapshot()
             .expect("resumed checkpointed snapshot");
 
@@ -742,6 +844,7 @@ mod tests {
     #[test]
     fn explicit_reachable_graph_roundtrips_checkpoint_file_with_domain_index_compression() {
         let spec = SimulationSpec;
+        let lowered = lower_spec(&spec);
         let path = checkpoint_path("reachable-graph-compressed");
         let explicit = nirvash::ExplicitModelCheckOptions::current()
             .with_compression(ExplicitStateCompression::DomainIndex)
@@ -750,10 +853,10 @@ mod tests {
             ));
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let first = ModelChecker::with_config(&spec, config.clone())
+        let first = ModelChecker::with_config(&lowered, config.clone())
             .full_reachable_graph_snapshot()
             .expect("checkpointed compressed snapshot");
-        let second = ModelChecker::with_config(&spec, config)
+        let second = ModelChecker::with_config(&lowered, config)
             .full_reachable_graph_snapshot()
             .expect("resumed checkpointed compressed snapshot");
 
@@ -765,11 +868,12 @@ mod tests {
     #[test]
     fn explicit_reachable_graph_matches_parallel_frontier_strategy() {
         let spec = SimulationSpec;
-        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+        let lowered = lower_spec(&spec);
+        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
         let parallel = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
                     .with_reachability(ExplicitReachabilityStrategy::ParallelFrontier)
@@ -785,11 +889,12 @@ mod tests {
     #[test]
     fn explicit_reachable_graph_matches_distributed_frontier_strategy() {
         let spec = SimulationSpec;
-        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+        let lowered = lower_spec(&spec);
+        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
         let distributed = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
                     .with_reachability(ExplicitReachabilityStrategy::DistributedFrontier)
@@ -805,12 +910,13 @@ mod tests {
     #[test]
     fn explicit_view_abstraction_collapses_equivalent_states() {
         let spec = SimulationSpec;
-        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+        let lowered = lower_spec(&spec);
+        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
         let reduced = ModelChecker::for_case(
-            &spec,
-            ModelCase::new("collapse_pending").with_view(ViewProjector::new(
+            &lowered,
+            ModelInstance::new("collapse_pending").with_state_abstraction(StateAbstraction::new(
                 "collapse_pending",
                 |state: &SimulationState| match state {
                     SimulationState::Left | SimulationState::Right => "pending".to_owned(),
@@ -833,12 +939,13 @@ mod tests {
     #[test]
     fn explicit_partial_order_reduction_prunes_action_branches() {
         let spec = CounterexampleSpec;
-        let exact = ModelChecker::with_config(&spec, ModelCheckConfig::reachable_graph())
+        let lowered = lower_spec(&spec);
+        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
         let reduced = ModelChecker::for_case(
-            &spec,
-            ModelCase::new("prefer_short_path").with_partial_order(PartialOrderReducer::new(
+            &lowered,
+            ModelInstance::new("prefer_short_path").with_por(PorHints::new(
                 "prefer_short_path",
                 |state: &CounterexampleState, action: &CounterexampleAction| match state {
                     CounterexampleState::Start => {
@@ -871,7 +978,8 @@ mod tests {
     #[test]
     fn parallel_frontier_rejects_model_case_constraints() {
         let spec = SimulationSpec;
-        let model_case = ModelCase::new("parallel_constraints")
+        let lowered = lower_spec(&spec);
+        let model_case = ModelInstance::new("parallel_constraints")
             .with_checker_config(
                 ModelCheckConfig::reachable_graph().with_explicit_options(
                     nirvash::ExplicitModelCheckOptions::current()
@@ -884,7 +992,7 @@ mod tests {
                 |_state: &SimulationState| true,
             ));
 
-        let err = ModelChecker::for_case(&spec, model_case)
+        let err = ModelChecker::for_case(&lowered, model_case)
             .full_reachable_graph_snapshot()
             .unwrap_err();
 
@@ -898,17 +1006,19 @@ mod tests {
     #[test]
     fn symbolic_backend_rejects_view_abstraction() {
         let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
         let err = ModelChecker::for_case(
-            &spec,
-            ModelCase::new("symbolic_view")
+            &lowered,
+            ModelInstance::new("symbolic_view")
                 .with_checker_config(ModelCheckConfig {
                     backend: Some(ModelBackend::Symbolic),
                     exploration: ExplorationMode::ReachableGraph,
                     ..ModelCheckConfig::default()
                 })
-                .with_view(ViewProjector::new("ready_only", |state: &QuantState| {
-                    format!("ready={}", state.ready)
-                })),
+                .with_state_abstraction(StateAbstraction::new(
+                    "ready_only",
+                    |state: &QuantState| format!("ready={}", state.ready),
+                )),
         )
         .full_reachable_graph_snapshot()
         .unwrap_err();
@@ -923,15 +1033,16 @@ mod tests {
     #[test]
     fn symbolic_backend_rejects_partial_order_reduction() {
         let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
         let err = ModelChecker::for_case(
-            &spec,
-            ModelCase::new("symbolic_por")
+            &lowered,
+            ModelInstance::new("symbolic_por")
                 .with_checker_config(ModelCheckConfig {
                     backend: Some(ModelBackend::Symbolic),
                     exploration: ExplorationMode::ReachableGraph,
                     ..ModelCheckConfig::default()
                 })
-                .with_partial_order(PartialOrderReducer::new(
+                .with_por(PorHints::new(
                     "advance_only",
                     |_state: &QuantState, action: &QuantAction| {
                         matches!(action, QuantAction::Advance)
@@ -951,15 +1062,16 @@ mod tests {
     #[test]
     fn counterexample_minimization_prefers_shorter_property_trace() {
         let spec = CounterexampleSpec;
+        let lowered = lower_spec(&spec);
         let without = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph()
                 .with_counterexample_minimization(CounterexampleMinimization::None),
         )
         .check_properties()
         .expect("property check should run");
         let with = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig::reachable_graph()
                 .with_counterexample_minimization(CounterexampleMinimization::ShortestTrace),
         )
@@ -983,8 +1095,9 @@ mod tests {
     #[test]
     fn symbolic_backend_rejects_simulation_mode() {
         let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
         let err = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()

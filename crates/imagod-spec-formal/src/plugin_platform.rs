@@ -1,47 +1,63 @@
-use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, RelSet, Relation2};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
-    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelAtom, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::PluginKind;
 #[cfg(test)]
 use crate::bounds::SPEC_PLUGIN_KINDS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum PluginAtom {
     Root,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum PluginKindAtom {
     Native,
     Wasm,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum ProviderAtom {
     SelfProvider,
     DependencyProvider,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum InterfaceAtom {
     CapabilityApi,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum WasiCapabilityAtom {
     HttpOutgoing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum HttpTargetAtom {
     Host,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct PluginPlatformState {
     registered_plugins: RelSet<PluginAtom>,
     plugin_kinds: Relation2<PluginAtom, PluginKindAtom>,
@@ -108,7 +124,9 @@ impl PluginPlatformState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, ActionVocabulary)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, ActionVocabulary,
+)]
 pub enum PluginPlatformAction {
     /// Register plugin
     RegisterPlugin(PluginKind),
@@ -281,28 +299,14 @@ impl PluginPlatformSpec {
     }
 }
 
-nirvash::signature_spec!(
-    PluginPlatformStateSignatureSpec for PluginPlatformState,
+nirvash::finite_model_domain_spec!(
+    PluginPlatformStateFiniteModelDomainSpec for PluginPlatformState,
     representatives = crate::state_domain::reachable_state_domain(&PluginPlatformSpec::new())
 );
 
-nirvash::symbolic_state_spec!(for PluginPlatformState {
-    registered_plugins: RelSet<PluginAtom>,
-    plugin_kinds: Relation2<PluginAtom, PluginKindAtom>,
-    requires: Relation2<PluginAtom, ProviderAtom>,
-    provides: Relation2<ProviderAtom, InterfaceAtom>,
-    imports: Relation2<PluginAtom, InterfaceAtom>,
-    resolved_provider: Relation2<PluginAtom, ProviderAtom>,
-    missing_dependencies: Relation2<PluginAtom, ProviderAtom>,
-    cycle_edges: Relation2<ProviderAtom, ProviderAtom>,
-    allowed_dep_calls: Relation2<PluginAtom, ProviderAtom>,
-    allowed_wasi_calls: Relation2<PluginAtom, WasiCapabilityAtom>,
-    privileged_plugins: RelSet<PluginAtom>,
-    http_outbound: Relation2<PluginAtom, HttpTargetAtom>,
-});
-
-fn plugin_capability_model_cases() -> Vec<ModelCase<PluginPlatformState, PluginPlatformAction>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+fn plugin_capability_model_cases() -> Vec<ModelInstance<PluginPlatformState, PluginPlatformAction>>
+{
+    vec![ModelInstance::default().with_check_deadlocks(false)]
 }
 
 fn plugin_kind_atom(kind: PluginKind) -> PluginKindAtom {
@@ -400,11 +404,11 @@ fn capability_decision_fairness() -> Fairness<PluginPlatformState, PluginPlatfor
 }
 
 #[subsystem_spec(model_cases(plugin_capability_model_cases))]
-impl TransitionSystem for PluginPlatformSpec {
+impl FrontendSpec for PluginPlatformSpec {
     type State = PluginPlatformState;
     type Action = PluginPlatformAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "plugin_platform"
     }
 
@@ -779,7 +783,11 @@ mod tests {
     #[test]
     fn reachable_graph_contains_dependency_provider_path() {
         let spec = PluginPlatformSpec::new();
-        let snapshot = ModelChecker::new(&spec)
+        let mut lowering_cx = nirvash_lower::LoweringCx;
+        let lowered =
+            <PluginPlatformSpec as nirvash_lower::FrontendSpec>::lower(&spec, &mut lowering_cx)
+                .expect("spec should lower");
+        let snapshot = ModelChecker::new(&lowered)
             .reachable_graph_snapshot()
             .expect("reachable graph snapshot");
 
@@ -794,7 +802,12 @@ mod tests {
     #[test]
     fn relation_model_preserves_legacy_reachability_intents() {
         let legacy_states = legacy_reachable_states();
-        let relational_states = ModelChecker::new(&PluginPlatformSpec::new())
+        let spec = PluginPlatformSpec::new();
+        let mut lowering_cx = nirvash_lower::LoweringCx;
+        let lowered =
+            <PluginPlatformSpec as nirvash_lower::FrontendSpec>::lower(&spec, &mut lowering_cx)
+                .expect("spec should lower");
+        let relational_states = ModelChecker::new(&lowered)
             .reachable_graph_snapshot()
             .expect("reachable graph snapshot")
             .states;

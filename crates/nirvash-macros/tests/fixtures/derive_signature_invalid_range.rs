@@ -1,7 +1,7 @@
-use nirvash_macros::Signature;
+use nirvash_macros::FiniteModelDomain;
 
-#[derive(Clone, Debug, PartialEq, Eq, Signature)]
-#[signature(range = "0..=3")]
+#[derive(Clone, Debug, PartialEq, Eq, FiniteModelDomain)]
+#[finite_model_domain(range = "0..=3")]
 struct InvalidRange {
     lhs: u8,
     rhs: u8,

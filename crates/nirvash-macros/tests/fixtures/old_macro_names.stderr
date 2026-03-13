@@ -1,12 +1,15 @@
-error[E0432]: unresolved imports `nirvash_macros::imago_formal_tests`, `nirvash_macros::imago_invariant`, `nirvash_macros::imago_subsystem_spec`
- --> tests/fixtures/old_macro_names.rs:2:35
+error[E0432]: unresolved imports `nirvash_macros::Signature`, `nirvash_macros::imago_formal_tests`, `nirvash_macros::imago_invariant`, `nirvash_macros::imago_subsystem_spec`
+ --> tests/fixtures/old_macro_names.rs:2:5
   |
 2 |     Signature as FormalSignature, imago_formal_tests, imago_invariant, imago_subsystem_spec,
-  |                                   ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `imago_subsystem_spec` in the root
-  |                                   |                   |
-  |                                   |                   no `imago_invariant` in the root
-  |                                   no `imago_formal_tests` in the root
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `imago_subsystem_spec` in the root
+  |     |                             |                   |
+  |     |                             |                   no `imago_invariant` in the root
+  |     |                             no `imago_formal_tests` in the root
+  |     no `Signature` in the root
   |
+  = help: consider importing this struct instead:
+          syn::Signature
 help: a similar name exists in the module
   |
 2 -     Signature as FormalSignature, imago_formal_tests, imago_invariant, imago_subsystem_spec,
@@ -18,13 +21,8 @@ help: a similar name exists in the module
 2 +     Signature as FormalSignature, imago_formal_tests, imago_invariant, subsystem_spec,
   |
 
-error[E0624]: associated function `new` is private
-  --> tests/fixtures/old_macro_names.rs:37:24
+error[E0433]: failed to resolve: could not find `__private` in `nirvash`
+  --> tests/fixtures/old_macro_names.rs:18:15
    |
-37 |     nirvash::BoolExpr::new("old_style_invariant", |_| true)
-   |                        ^^^ private associated function
-   |
-  ::: $WORKSPACE/crates/nirvash/src/predicate.rs
-   |
-   |     pub(crate) const fn new(name: &'static str, test: fn(&S) -> bool) -> Self {
-   |     ------------------------------------------------------------------------- private associated function defined here
+18 | impl nirvash::__private::TransitionSystem for Spec {
+   |               ^^^^^^^^^ could not find `__private` in `nirvash`

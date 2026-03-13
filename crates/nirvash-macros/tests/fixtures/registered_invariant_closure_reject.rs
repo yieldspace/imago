@@ -1,12 +1,12 @@
-use nirvash::TransitionSystem;
-use nirvash_macros::{Signature as FormalSignature, invariant, subsystem_spec};
+use nirvash_lower::FrontendSpec;
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, invariant, subsystem_spec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum State {
     Idle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Tick,
 }
@@ -14,9 +14,13 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec]
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]

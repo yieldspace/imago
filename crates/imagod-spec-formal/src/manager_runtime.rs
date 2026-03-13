@@ -1,17 +1,18 @@
-use nirvash::{ModelCase, TransitionSystem};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
-    nirvash_transition_program, property, subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum TaskState {
     NotStarted,
     Succeeded,
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum ManagerRuntimePhase {
     Booting,
     ConfigReady,
@@ -21,14 +22,23 @@ pub enum ManagerRuntimePhase {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub struct ManagerRuntimeState {
     pub phase: ManagerRuntimePhase,
     pub config_loaded: bool,
     pub created_default: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum ManagerRuntimeAction {
     /// Load config
     LoadExistingConfig,
@@ -67,8 +77,8 @@ impl ManagerRuntimeSpec {
     }
 }
 
-fn manager_runtime_model_cases() -> Vec<ModelCase<ManagerRuntimeState, ManagerRuntimeAction>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+fn manager_runtime_model_cases() -> Vec<ModelInstance<ManagerRuntimeState, ManagerRuntimeAction>> {
+    vec![ModelInstance::default().with_check_deadlocks(false)]
 }
 
 #[invariant(ManagerRuntimeSpec)]
@@ -179,11 +189,11 @@ fn restore_progress() -> nirvash::Fairness<ManagerRuntimeState, ManagerRuntimeAc
 }
 
 #[subsystem_spec(model_cases(manager_runtime_model_cases))]
-impl TransitionSystem for ManagerRuntimeSpec {
+impl FrontendSpec for ManagerRuntimeSpec {
     type State = ManagerRuntimeState;
     type Action = ManagerRuntimeAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "manager_runtime"
     }
 

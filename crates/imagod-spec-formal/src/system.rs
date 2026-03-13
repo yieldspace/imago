@@ -1,13 +1,14 @@
 use std::any::{Any, TypeId};
 
 use imagod_spec::MessageType;
-use nirvash::{
-    BoolExpr, ModelCase, ModelCaseSource, ModelCheckConfig, Signature as _, StepExpr, TemporalSpec,
-    TransitionSystem, conformance::ProtocolConformanceSpec,
-};
+use nirvash::{BoolExpr, ModelCheckConfig, StepExpr};
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_lower::FiniteModelDomain as _;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
 use nirvash_macros::{
-    Signature as FormalSignature, action_constraint, invariant, nirvash_expr, nirvash_step_expr,
-    nirvash_transition_program, state_constraint, system_spec,
+    FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
+    action_constraint, invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program,
+    state_constraint, system_spec,
 };
 
 use crate::{
@@ -31,7 +32,7 @@ use crate::{
     wire_protocol::{WireProtocolAction, WireProtocolSpec, WireProtocolState},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub struct SystemState {
     pub manager: ManagerRuntimeState,
     pub session: SessionTransportState,
@@ -950,7 +951,7 @@ impl SystemSpec {
     }
 }
 
-fn system_model_cases() -> Vec<ModelCase<SystemState, SystemAtomicAction>> {
+fn system_model_cases() -> Vec<ModelInstance<SystemState, SystemAtomicAction>> {
     vec![
         boot_gc_and_restore_case(),
         session_auth_and_authorize_case(),
@@ -1407,127 +1408,128 @@ fn system_atomic_candidates(state: &SystemState) -> Vec<SystemAtomicAction> {
     actions
 }
 
-fn boot_gc_and_restore_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("boot_gc_and_restore")
+fn boot_gc_and_restore_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("boot_gc_and_restore")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn session_auth_and_authorize_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("session_auth_and_authorize")
+fn session_auth_and_authorize_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("session_auth_and_authorize")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn hello_negotiation_and_limits_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("hello_negotiation_and_limits")
+fn hello_negotiation_and_limits_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("hello_negotiation_and_limits")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn deploy_upload_and_commit_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("deploy_upload_and_commit")
+fn deploy_upload_and_commit_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("deploy_upload_and_commit")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn command_start_event_flow_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("command_start_event_flow")
+fn command_start_event_flow_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("command_start_event_flow")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn state_request_and_cancel_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("state_request_and_cancel")
+fn state_request_and_cancel_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("state_request_and_cancel")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn services_list_merge_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("services_list_merge")
+fn services_list_merge_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("services_list_merge")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn logs_request_snapshot_and_follow_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("logs_request_snapshot_and_follow")
+fn logs_request_snapshot_and_follow_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("logs_request_snapshot_and_follow")
         .with_checker_config(system_checker_config())
         .with_doc_checker_config(system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn bindings_cert_upload_updates_authorization_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("bindings_cert_upload_updates_authorization")
+fn bindings_cert_upload_updates_authorization_case()
+-> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("bindings_cert_upload_updates_authorization")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn parallel_deploy_and_start_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("parallel_deploy_and_start")
+fn parallel_deploy_and_start_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("parallel_deploy_and_start")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn service_scoped_rollback_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("service_scoped_rollback")
+fn service_scoped_rollback_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("service_scoped_rollback")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn local_rpc_happy_path_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("local_rpc_happy_path")
+fn local_rpc_happy_path_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("local_rpc_happy_path")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn local_rpc_denied_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("local_rpc_denied_or_target_missing")
+fn local_rpc_denied_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("local_rpc_denied_or_target_missing")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn remote_rpc_connection_lifecycle_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("remote_rpc_connection_lifecycle")
+fn remote_rpc_connection_lifecycle_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("remote_rpc_connection_lifecycle")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
 #[allow(dead_code)]
-fn shutdown_blocks_new_rpc_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("shutdown_blocks_new_rpc_and_drains_services")
+fn shutdown_blocks_new_rpc_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("shutdown_blocks_new_rpc_and_drains_services")
         .with_checker_config(shutdown_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn graceful_shutdown_and_force_fallback_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("graceful_shutdown_and_force_fallback")
+fn graceful_shutdown_and_force_fallback_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("graceful_shutdown_and_force_fallback")
         .with_checker_config(shutdown_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
 }
 
-fn maintenance_reap_and_idle_tick_case() -> ModelCase<SystemState, SystemAtomicAction> {
-    ModelCase::new("maintenance_reap_and_idle_tick")
+fn maintenance_reap_and_idle_tick_case() -> ModelInstance<SystemState, SystemAtomicAction> {
+    ModelInstance::new("maintenance_reap_and_idle_tick")
         .with_checker_config(focused_system_checker_config())
         .with_doc_checker_config(focused_system_doc_checker_config())
         .with_check_deadlocks(false)
@@ -1791,11 +1793,11 @@ fn cert_upload_updates_dynamic_authority() -> BoolExpr<SystemState> {
         crate::shutdown_flow::ShutdownFlowSpec
     )
 )]
-impl TransitionSystem for SystemSpec {
+impl FrontendSpec for SystemSpec {
     type State = SystemState;
     type Action = SystemAtomicAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "system"
     }
 
@@ -1826,17 +1828,6 @@ impl TransitionSystem for SystemSpec {
                 self.atomic_transition(state, &action)
                     .map(|next| (action, next))
             })
-            .collect()
-    }
-
-    fn successors_constrained(
-        &self,
-        state: &Self::State,
-        action_allowed: &dyn Fn(&Self::Action, &Self::State) -> bool,
-    ) -> Vec<(Self::Action, Self::State)> {
-        self.successors(state)
-            .into_iter()
-            .filter(|(action, next)| action_allowed(action, next))
             .collect()
     }
 }
@@ -2222,7 +2213,7 @@ fn multi_service_state_valid(state: &SystemState) -> bool {
 
 fn state_respects_spec<T>(spec: &T, state: &T::State) -> bool
 where
-    T: TemporalSpec + ModelCaseSource,
+    T: TemporalSpec,
 {
     spec.invariants()
         .iter()
@@ -3053,8 +3044,15 @@ mod tests {
 
     use super::*;
 
-    fn model_case(spec: &SystemSpec, label: &str) -> ModelCase<SystemState, SystemAtomicAction> {
-        spec.model_cases()
+    fn model_case(
+        spec: &SystemSpec,
+        label: &str,
+    ) -> nirvash_lower::ModelInstance<SystemState, SystemAtomicAction> {
+        let mut lowering_cx = nirvash_lower::LoweringCx;
+        let lowered = <SystemSpec as nirvash_lower::FrontendSpec>::lower(spec, &mut lowering_cx)
+            .expect("system spec should lower");
+        lowered
+            .model_instances()
             .into_iter()
             .find(|model_case| model_case.label() == label)
             .expect("model case should exist")
@@ -3064,7 +3062,10 @@ mod tests {
         spec: &SystemSpec,
         label: &str,
     ) -> nirvash::ReachableGraphSnapshot<SystemState, SystemAtomicAction> {
-        ModelChecker::for_case(spec, model_case(spec, label))
+        let mut lowering_cx = nirvash_lower::LoweringCx;
+        let lowered = <SystemSpec as nirvash_lower::FrontendSpec>::lower(spec, &mut lowering_cx)
+            .expect("system spec should lower");
+        ModelChecker::for_case(&lowered, model_case(spec, label))
             .full_reachable_graph_snapshot()
             .expect("snapshot should build")
     }

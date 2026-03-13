@@ -29,14 +29,25 @@ pub mod wire_protocol;
 mod toy_model_controls;
 
 #[cfg(test)]
+pub(crate) fn lowered_spec<T>(spec: &T) -> nirvash_lower::LoweredSpec<'_, T::State, T::Action>
+where
+    T: nirvash_lower::TemporalSpec,
+    T::State: PartialEq + nirvash_lower::FiniteModelDomain,
+    T::Action: PartialEq,
+{
+    let mut lowering_cx = nirvash_lower::LoweringCx;
+    spec.lower(&mut lowering_cx).expect("spec should lower")
+}
+
+#[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod symbolic_registration_tests {
     use std::collections::BTreeSet;
 
-    use nirvash::{
-        TransitionSystem,
-        registry::{registered_symbolic_effect_keys, registered_symbolic_pure_helper_keys},
+    use nirvash::registry::{
+        registered_symbolic_effect_keys, registered_symbolic_pure_helper_keys,
     };
+    use nirvash_lower::FrontendSpec;
 
     use super::{
         PluginPlatformSpec, RpcSpec, SupervisionSpec, SystemSpec,

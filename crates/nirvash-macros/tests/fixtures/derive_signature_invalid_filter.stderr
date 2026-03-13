@@ -1,5 +1,5 @@
 error: expected `self`
- --> tests/fixtures/derive_signature_invalid_filter.rs:4:20
+ --> tests/fixtures/derive_signature_invalid_filter.rs:4:30
   |
-4 | #[signature(filter(value => value.ready))]
-  |                    ^^^^^
+4 | #[finite_model_domain(filter(value => value.ready))]
+  |                              ^^^^^

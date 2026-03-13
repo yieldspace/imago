@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::Signature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::FiniteModelDomain)]
 enum Payload {
     First,
     Second,
@@ -14,12 +14,12 @@ fn payload_domain() -> Vec<Payload> {
     Debug,
     PartialEq,
     Eq,
-    nirvash_macros::Signature,
+    nirvash_macros::FiniteModelDomain,
     nirvash_macros::ActionVocabulary
 )]
 enum DemoAction {
     Tick,
-    Wrap(#[sig(domain = payload_domain)] Payload),
+    Wrap(#[finite_model(domain = payload_domain)] Payload),
 }
 
 fn main() {

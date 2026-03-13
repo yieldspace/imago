@@ -1,14 +1,17 @@
-use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, RelSet, StepExpr};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
-    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
-    subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, action_constraint, fairness, invariant,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::atoms::ServiceAtom;
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct DeployState {
     partial_uploads: RelSet<ServiceAtom>,
     complete_uploads: RelSet<ServiceAtom>,
@@ -82,7 +85,9 @@ fn install_runtime_release(state: &mut DeployState, service: ServiceAtom) {
     state.auto_rollback_enabled.insert(service);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::Signature, ActionVocabulary)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::FiniteModelDomain, ActionVocabulary,
+)]
 pub enum DeployAction {
     /// Advance upload from missing->partial or partial->complete.
     AdvanceUpload(ServiceAtom),
@@ -121,25 +126,13 @@ impl DeploySpec {
     }
 }
 
-nirvash::signature_spec!(
-    DeployStateSignatureSpec for DeployState,
+nirvash::finite_model_domain_spec!(
+    DeployStateFiniteModelDomainSpec for DeployState,
     representatives = crate::state_domain::reachable_state_domain(&DeploySpec::new())
 );
 
-nirvash::symbolic_state_spec!(for DeployState {
-    partial_uploads: RelSet<ServiceAtom>,
-    complete_uploads: RelSet<ServiceAtom>,
-    committed_uploads: RelSet<ServiceAtom>,
-    prepared_releases: RelSet<ServiceAtom>,
-    promoted_releases: RelSet<ServiceAtom>,
-    rollback_pending: RelSet<ServiceAtom>,
-    rolled_back: RelSet<ServiceAtom>,
-    restart_policy_persisted: RelSet<ServiceAtom>,
-    auto_rollback_enabled: RelSet<ServiceAtom>,
-});
-
-fn deploy_model_cases() -> Vec<ModelCase<DeployState, DeployAction>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+fn deploy_model_cases() -> Vec<ModelInstance<DeployState, DeployAction>> {
+    vec![ModelInstance::default().with_check_deadlocks(false)]
 }
 
 fn deploy_action_service(action: DeployAction) -> ServiceAtom {
@@ -235,11 +228,11 @@ fn rollback_completion_fairness() -> Fairness<DeployState, DeployAction> {
 }
 
 #[subsystem_spec(model_cases(deploy_model_cases))]
-impl TransitionSystem for DeploySpec {
+impl FrontendSpec for DeploySpec {
     type State = DeployState;
     type Action = DeployAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "deploy"
     }
 
@@ -530,8 +523,9 @@ mod tests {
     #[test]
     fn explicit_and_symbolic_backends_agree() {
         let spec = DeploySpec::new();
+        let lowered = crate::lowered_spec(&spec);
         let explicit_snapshot = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -540,7 +534,7 @@ mod tests {
         .full_reachable_graph_snapshot()
         .expect("explicit deploy snapshot");
         let symbolic_snapshot = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -559,7 +553,7 @@ mod tests {
         assert_eq!(symbolic_snapshot, explicit_snapshot);
 
         let explicit_result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -568,7 +562,7 @@ mod tests {
         .check_all()
         .expect("explicit deploy result");
         let symbolic_result = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()

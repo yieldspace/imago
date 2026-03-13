@@ -2,7 +2,18 @@
 
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 /// High-level command category accepted by the manager runtime.
 pub enum CommandKind {
     /// Starts an artifact deployment command.
@@ -13,7 +24,18 @@ pub enum CommandKind {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 /// Internal command lifecycle state tracked by the manager runtime.
 pub enum CommandLifecycleState {
     Accepted,
@@ -30,7 +52,18 @@ impl CommandLifecycleState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 /// Stable command-domain error classes used by runtime and conformance tests.
 pub enum CommandErrorKind {
     /// Rejects unauthenticated command requests.
@@ -63,14 +96,36 @@ pub enum CommandErrorKind {
     StorageQuota,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 /// Lifecycle phase around the spawn race tracked by `OperationManager`.
 pub enum OperationPhase {
     Starting,
     Spawned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, nirvash_macros::Signature)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+)]
 /// Stable stage identifiers used for rejected command-protocol actions.
 pub enum CommandProtocolStageId {
     CommandStart,
@@ -94,7 +149,13 @@ impl CommandProtocolStageId {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, nirvash_macros::Signature, nirvash_macros::ActionVocabulary,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::SymbolicEncoding,
+    nirvash_macros::ActionVocabulary,
 )]
 /// Shared command action vocabulary applied by `OperationManager`.
 pub enum CommandProtocolAction {
@@ -111,7 +172,7 @@ pub enum CommandProtocolAction {
     /// Finish succeeded
     FinishSucceeded,
     /// Finish failed
-    FinishFailed(#[sig(domain = finish_failed_error_domain)] CommandErrorKind),
+    FinishFailed(#[finite_model(domain = finish_failed_error_domain)] CommandErrorKind),
     /// Finish canceled
     FinishCanceled,
     /// Remove command
@@ -175,7 +236,8 @@ fn finish_failed_error_domain() -> Vec<CommandErrorKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash::{ActionVocabulary, Signature};
+    use nirvash::ActionVocabulary;
+    use nirvash_lower::FiniteModelDomain;
 
     #[test]
     fn command_signature_domains_match_expected_order() {

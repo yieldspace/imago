@@ -5,11 +5,11 @@ use z3::{
     ast::{Bool, Int},
 };
 
-use nirvash::{
-    BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelCase,
-    ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
-    ReachableGraphSnapshot, Signature, StepExpr, SymbolicStateSchema, TemporalSpec, Trace,
-    TraceStep, TransitionProgram, TransitionSystem, UpdateAst, UpdateOp,
+use nirvash_lower::{
+    BoolExpr, CheckerSpec, Counterexample, CounterexampleKind, ExplorationMode, Fairness,
+    FiniteModelDomain, Ltl, ModelCheckConfig, ModelCheckError, ModelCheckResult, ModelInstance,
+    ReachableGraphEdge, ReachableGraphSnapshot, StepExpr, SymbolicStateSchema,
+    SymbolicSupportIssue, Trace, TraceStep, TransitionProgram, UpdateAst, UpdateOp,
 };
 
 use crate::smt::{
@@ -42,16 +42,15 @@ struct ReachableGraph<S, A> {
 }
 
 type TraceList<S, A> = Vec<Trace<S, A>>;
-type MaybeTrace<T> = Option<Trace<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
+type MaybeTrace<T> = Option<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 type SymbolicSuccessor<T> = (
-    TraceStep<<T as TransitionSystem>::Action>,
-    <T as TransitionSystem>::State,
+    TraceStep<<T as CheckerSpec>::Action>,
+    <T as CheckerSpec>::State,
 );
-type MaybePredecessor<T> = Option<(Vec<usize>, TraceStep<<T as TransitionSystem>::Action>)>;
-type MaybeBlockedPath<T> = Option<(
-    Vec<Vec<usize>>,
-    Vec<TraceStep<<T as TransitionSystem>::Action>>,
-)>;
+type MaybePredecessor<T> = Option<(Vec<usize>, TraceStep<<T as CheckerSpec>::Action>)>;
+type MaybeBlockedPath<T> = Option<(Vec<Vec<usize>>, Vec<TraceStep<<T as CheckerSpec>::Action>>)>;
+
+const AUTO_DIRECT_SMT_DEPTH_CAP: usize = 4;
 
 impl<S, A> ReachableGraph<S, A> {
     fn state_index(&self, state: &S) -> Option<usize>
@@ -189,19 +188,19 @@ impl LassoVars {
     }
 }
 
-pub struct SymbolicModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
+pub struct SymbolicModelChecker<'a, T: CheckerSpec> {
     spec: &'a T,
-    model_case: ModelCase<T::State, T::Action>,
+    model_case: ModelInstance<T::State, T::Action>,
     config: ModelCheckConfig,
 }
 
 impl<'a, T> SymbolicModelChecker<'a, T>
 where
-    T: TemporalSpec + ModelCaseSource,
-    T::State: PartialEq + Signature + 'static,
+    T: CheckerSpec,
+    T::State: PartialEq + FiniteModelDomain + 'static,
     T::Action: PartialEq + 'static,
 {
-    pub fn for_case(spec: &'a T, model_case: ModelCase<T::State, T::Action>) -> Self {
+    pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
         let config = model_case.effective_checker_config();
         Self {
             spec,
@@ -214,7 +213,7 @@ where
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
         self.ensure_no_explicit_only_reducers()?;
-        let graph = self.build_relation_reachable_graph(self.doc_reachable_graph_config())?;
+        let graph = self.build_bridge_reachable_graph(self.doc_reachable_graph_config())?;
         Ok(self.snapshot_from_graph(&graph))
     }
 
@@ -222,7 +221,7 @@ where
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
         self.ensure_no_explicit_only_reducers()?;
-        let graph = self.build_relation_reachable_graph(self.config.clone())?;
+        let graph = self.build_bridge_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         Ok(self.snapshot_from_graph(&graph))
     }
@@ -232,13 +231,10 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         self.ensure_no_explicit_only_reducers()?;
         self.ensure_symbolic_invariants_ast_native()?;
-        match self.config.exploration {
-            ExplorationMode::ReachableGraph => match self.config.symbolic.safety {
-                nirvash::SymbolicSafetyEngine::ReachableGraph => self.check_invariants_graph(),
-                nirvash::SymbolicSafetyEngine::KInduction => self.check_invariants_kinduction(),
-                nirvash::SymbolicSafetyEngine::PdrIc3 => self.check_invariants_pdr(),
-            },
-            ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
+        match self.config.symbolic.safety {
+            nirvash::SymbolicSafetyEngine::Bmc => self.check_invariants_bmc(),
+            nirvash::SymbolicSafetyEngine::KInduction => self.check_invariants_kinduction(),
+            nirvash::SymbolicSafetyEngine::PdrIc3 => self.check_invariants_pdr(),
         }
     }
 
@@ -250,7 +246,7 @@ where
             return Ok(ModelCheckResult::ok());
         }
         match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
+            ExplorationMode::ReachableGraph => self.check_deadlocks_bmc(),
             ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
         }
     }
@@ -260,20 +256,22 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         self.ensure_no_explicit_only_reducers()?;
         self.ensure_symbolic_properties_ast_native()?;
-        if self.spec.properties().is_empty() {
+        if self.direct_properties().is_empty() {
             return Ok(ModelCheckResult::ok());
         }
 
         if self.model_case.symmetry().is_some()
-            && (!self.spec.properties().is_empty() || !self.spec.fairness().is_empty())
+            && (!self.direct_properties().is_empty() || !self.direct_fairness().is_empty())
         {
             return Err(ModelCheckError::UnsupportedConfiguration(
                 "symmetry reduction cannot be combined with temporal properties or fairness",
             ));
         }
-        match self.config.exploration {
-            ExplorationMode::ReachableGraph => self.check_properties_graph(),
-            ExplorationMode::BoundedLasso => self.check_properties_lasso(),
+        match self.config.symbolic.temporal {
+            nirvash::SymbolicTemporalEngine::BoundedLasso => self.check_properties_lasso(),
+            nirvash::SymbolicTemporalEngine::LivenessToSafety => {
+                self.check_properties_liveness_to_safety()
+            }
         }
     }
 
@@ -301,19 +299,19 @@ where
         Ok(result)
     }
 
-    fn build_relation_reachable_graph(
+    fn build_bridge_reachable_graph(
         &self,
         config: ModelCheckConfig,
     ) -> Result<ReachableGraph<T::State, T::Action>, ModelCheckError> {
         self.ensure_symbolic_constraints_ast_native()?;
-        let program = self.symbolic_transition_program()?;
-        let schema = self.symbolic_state_schema()?;
+        let program = self.direct_transition_program()?;
+        let schema = self.direct_state_schema()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
         self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
         if self.model_case.symmetry().is_some() {
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic reachable-graph backend does not support symmetry reduction for spec `{}`",
-                self.spec.name(),
+                self.spec.frontend_name(),
             )));
         }
 
@@ -348,7 +346,7 @@ where
             let next_depth = graph.depths[index] + 1;
             let mut edges = Vec::new();
 
-            for (step, next_state) in self.relation_successors(&current)? {
+            for (step, next_state) in self.enumerate_symbolic_successors(&current)? {
                 let Some(next_index) = self.push_state(
                     &mut graph,
                     next_state,
@@ -397,22 +395,27 @@ where
         config
     }
 
-    fn check_invariants_graph(
+    fn check_invariants_bmc(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
+        let schema = self.direct_state_schema()?;
+        let program = self.direct_transition_program()?;
+        let actions = self.action_domain();
+        self.ensure_symbolic_stutter_is_identity()?;
+        self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
         self.ensure_symbolic_schema_covers_invariants(&schema)?;
-        let graph = self.build_relation_reachable_graph(self.config.clone())?;
-        self.ensure_untruncated(&graph)?;
-        for (index, state) in graph.states.iter().enumerate() {
-            for predicate in self.spec.invariants() {
-                if !predicate.eval(state) {
-                    return Ok(ModelCheckResult::with_violation(Counterexample {
-                        kind: CounterexampleKind::Invariant,
-                        name: predicate.name().to_owned(),
-                        trace: self.trace_to_state(&graph, index),
-                    }));
-                }
+        let max_depth = self.bmc_max_depth(&schema);
+
+        for predicate in self.direct_invariants() {
+            if let Some(trace) = self.find_kinduction_counterexample(
+                &schema, &program, &actions, &predicate, max_depth,
+            )? {
+                return Ok(ModelCheckResult::with_violation(Counterexample {
+                    kind: CounterexampleKind::Invariant,
+                    name: predicate.name().to_owned(),
+                    trace,
+                }));
             }
         }
 
@@ -422,8 +425,8 @@ where
     fn check_invariants_kinduction(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
-        let program = self.symbolic_transition_program()?;
+        let schema = self.direct_state_schema()?;
+        let program = self.direct_transition_program()?;
         let actions = self.action_domain();
         self.ensure_symbolic_stutter_is_identity()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
@@ -431,7 +434,7 @@ where
         self.ensure_symbolic_schema_covers_invariants(&schema)?;
         let max_depth = self.kinduction_max_depth(&schema);
 
-        for predicate in self.spec.invariants() {
+        for predicate in self.direct_invariants() {
             if let Some(trace) = self.find_kinduction_counterexample(
                 &schema, &program, &actions, &predicate, max_depth,
             )? {
@@ -447,7 +450,7 @@ where
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic k-induction did not converge for invariant `{}` in spec `{}` within depth {}",
                 predicate.name(),
-                self.spec.name(),
+                self.spec.frontend_name(),
                 max_depth,
             )));
         }
@@ -458,8 +461,8 @@ where
     fn check_invariants_pdr(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
-        let program = self.symbolic_transition_program()?;
+        let schema = self.direct_state_schema()?;
+        let program = self.direct_transition_program()?;
         let actions = self.action_domain();
         self.ensure_symbolic_stutter_is_identity()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
@@ -467,7 +470,7 @@ where
         self.ensure_symbolic_schema_covers_invariants(&schema)?;
         let max_frames = self.pdr_max_frames(&schema);
 
-        for predicate in self.spec.invariants() {
+        for predicate in self.direct_invariants() {
             let mut frames: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
             let mut proved = false;
 
@@ -509,7 +512,7 @@ where
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic PDR/IC3 did not converge for invariant `{}` in spec `{}` within {} frames",
                     predicate.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     max_frames.max(1),
                 )));
             }
@@ -518,10 +521,58 @@ where
         Ok(ModelCheckResult::ok())
     }
 
-    fn check_deadlocks_graph(
+    #[allow(dead_code)]
+    fn check_invariants_bridge_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let graph = self.build_relation_reachable_graph(self.config.clone())?;
+        let schema = self.direct_state_schema()?;
+        self.ensure_symbolic_schema_covers_invariants(&schema)?;
+        let graph = self.build_bridge_reachable_graph(self.config.clone())?;
+        self.ensure_untruncated(&graph)?;
+        for (index, state) in graph.states.iter().enumerate() {
+            for predicate in self.direct_invariants() {
+                if !predicate.eval(state) {
+                    return Ok(ModelCheckResult::with_violation(Counterexample {
+                        kind: CounterexampleKind::Invariant,
+                        name: predicate.name().to_owned(),
+                        trace: self.trace_to_state(&graph, index),
+                    }));
+                }
+            }
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    fn check_deadlocks_bmc(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let schema = self.direct_state_schema()?;
+        let program = self.direct_transition_program()?;
+        let actions = self.action_domain();
+        self.ensure_symbolic_stutter_is_identity()?;
+        self.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
+        let max_depth = self.deadlock_max_depth(&schema);
+
+        if let Some(trace) =
+            self.find_deadlock_counterexample(&schema, &program, &actions, max_depth)?
+        {
+            return Ok(ModelCheckResult::with_violation(Counterexample {
+                kind: CounterexampleKind::Deadlock,
+                name: "deadlock".to_owned(),
+                trace,
+            }));
+        }
+
+        Ok(ModelCheckResult::ok())
+    }
+
+    #[allow(dead_code)]
+    fn check_deadlocks_bridge_graph(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        let graph = self.build_bridge_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         if let Some(deadlock) = graph.deadlocks.first() {
             return Ok(ModelCheckResult::with_violation(Counterexample {
@@ -534,17 +585,18 @@ where
         Ok(ModelCheckResult::ok())
     }
 
-    fn check_properties_graph(
+    #[allow(dead_code)]
+    fn check_properties_bridge_graph(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
+        let schema = self.direct_state_schema()?;
         self.ensure_symbolic_schema_covers_temporal(&schema)?;
-        let graph = self.build_relation_reachable_graph(self.config.clone())?;
+        let graph = self.build_bridge_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         let traces = self.graph_lasso_traces(&graph);
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
 
-        for property in self.spec.properties() {
+        for property in self.direct_properties() {
             let description = property.describe();
             for trace in &traces {
                 if !self.trace_satisfies_fairness_graph(trace, &graph) {
@@ -566,46 +618,17 @@ where
         Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
     }
 
-    fn check_invariants_lasso(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
-        self.ensure_symbolic_schema_covers_invariants(&schema)?;
-        let mut best = None;
-        for trace in self.collect_symbolic_lasso_traces()? {
-            for (index, state) in trace.states().iter().enumerate() {
-                for predicate in self.spec.invariants() {
-                    if predicate.eval(state) {
-                        continue;
-                    }
-                    self.consider_violation(
-                        &mut best,
-                        Counterexample {
-                            kind: CounterexampleKind::Invariant,
-                            name: predicate.name().to_owned(),
-                            trace: self.terminal_trace(
-                                trace.states()[..=index].to_vec(),
-                                trace.steps()[..index].to_vec(),
-                            ),
-                        },
-                    );
-                }
-            }
-        }
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
-    }
-
     fn check_deadlocks_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         let mut best = None;
-        for trace in self.collect_symbolic_lasso_traces()? {
+        for trace in self.collect_direct_lasso_traces()? {
             let state = trace
                 .states()
                 .last()
                 .expect("trace always has at least one state");
             let has_non_stutter = self
-                .relation_successors(state)?
+                .enumerate_symbolic_successors(state)?
                 .into_iter()
                 .any(|(step, _)| matches!(step, TraceStep::Action(_)));
             if has_non_stutter {
@@ -629,15 +652,15 @@ where
     fn check_properties_lasso(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let schema = self.symbolic_state_schema()?;
+        let schema = self.direct_state_schema()?;
         self.ensure_symbolic_schema_covers_temporal(&schema)?;
-        let traces = self.collect_symbolic_lasso_traces()?;
+        let traces = self.collect_direct_lasso_traces()?;
         let mut best: Option<Counterexample<T::State, T::Action>> = None;
 
-        for property in self.spec.properties() {
+        for property in self.direct_properties() {
             let description = property.describe();
             for trace in &traces {
-                if !self.trace_satisfies_fairness_lasso(trace) {
+                if !self.trace_satisfies_fairness_direct(trace) {
                     continue;
                 }
                 if !self.eval_formula(trace, &property)[0] {
@@ -654,6 +677,12 @@ where
         }
 
         Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+    }
+
+    fn check_properties_liveness_to_safety(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.check_properties_lasso()
     }
 
     fn push_state(
@@ -741,7 +770,7 @@ where
             initial_indices: graph.initial_indices.clone(),
             deadlocks: graph.deadlocks.clone(),
             truncated: graph.truncated,
-            stutter_omitted: self.spec.allow_stutter(),
+            stutter_omitted: false,
         }
     }
 
@@ -774,24 +803,7 @@ where
         self.action_domain().len() + 1
     }
 
-    fn bounded_depth(&self) -> usize {
-        self.config.bounded_depth.unwrap_or_default()
-    }
-
     fn ensure_symbolic_stutter_is_identity(&self) -> Result<(), ModelCheckError> {
-        if !self.spec.allow_stutter() {
-            return Ok(());
-        }
-
-        for state in self.initial_states_filtered()? {
-            if self.spec.stutter_state(&state) != state {
-                return Err(self.symbolic_ast_required_error(format!(
-                    "symbolic backend requires spec `{}` stutter_state() to be identity",
-                    self.spec.name(),
-                )));
-            }
-        }
-
         Ok(())
     }
 
@@ -851,6 +863,29 @@ where
             return configured;
         }
         self.symbolic_state_space_bound(schema).saturating_sub(1)
+    }
+
+    fn bmc_max_depth(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
+        self.config.bounded_depth.unwrap_or_else(|| {
+            self.symbolic_state_space_bound(schema)
+                .saturating_sub(1)
+                .min(AUTO_DIRECT_SMT_DEPTH_CAP)
+        })
+    }
+
+    fn deadlock_max_depth(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
+        self.config.bounded_depth.unwrap_or_else(|| {
+            self.symbolic_state_space_bound(schema)
+                .saturating_sub(1)
+                .min(AUTO_DIRECT_SMT_DEPTH_CAP)
+        })
+    }
+
+    fn temporal_max_depth(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
+        self.config.bounded_depth.unwrap_or_else(|| {
+            self.symbolic_state_space_bound(schema)
+                .min(AUTO_DIRECT_SMT_DEPTH_CAP)
+        })
     }
 
     fn pdr_max_frames(&self, schema: &SymbolicStateSchema<T::State>) -> usize {
@@ -970,18 +1005,93 @@ where
                     .not(),
             );
 
-            if !solver_is_sat(&solver) {
-                continue;
+            while solver_is_sat(&solver) {
+                let Some(model) = solver.get_model() else {
+                    break;
+                };
+                let Some(trace) = self.decode_path_trace(&model, schema, &states, &steps, actions)
+                else {
+                    break;
+                };
+                let final_state = trace
+                    .states()
+                    .last()
+                    .expect("trace always has at least one state");
+                if !predicate.eval(final_state) {
+                    return Ok(Some(trace));
+                }
+                block_current_model(&solver, &model, &states[depth].all_values());
             }
-            let Some(model) = solver.get_model() else {
-                continue;
-            };
-            let Some(trace) = self.decode_path_trace(&model, schema, &states, &steps, actions)
-            else {
-                continue;
-            };
-            return Ok(Some(trace));
         }
+        Ok(None)
+    }
+
+    fn find_deadlock_counterexample(
+        &self,
+        schema: &SymbolicStateSchema<T::State>,
+        program: &TransitionProgram<T::State, T::Action>,
+        actions: &[T::Action],
+        max_depth: usize,
+    ) -> Result<MaybeTrace<T>, ModelCheckError> {
+        for depth in 0..=max_depth {
+            let states = (0..=depth)
+                .map(|index| StateVars::new(&format!("deadlock_state_{depth}_{index}"), schema))
+                .collect::<Vec<_>>();
+            let steps = (0..depth)
+                .map(|index| Int::new_const(format!("deadlock_step_{depth}_{index}")))
+                .collect::<Vec<_>>();
+            let solver = Solver::new();
+
+            for state in &states {
+                state.assert_domains(&solver, schema);
+                self.assert_state_constraints(&solver, schema, state);
+            }
+            for step in &steps {
+                assert_in_domain(&solver, step, self.step_domain_size());
+            }
+            solver.assert(self.encode_initial_state_formula(schema, &states[0])?);
+            for index in 0..depth {
+                solver.assert(self.encode_transition_formula(
+                    schema,
+                    &states[index],
+                    &steps[index],
+                    &states[index + 1],
+                    program,
+                    actions,
+                ));
+                self.assert_action_constraints(
+                    &solver,
+                    schema,
+                    &states[index],
+                    &steps[index],
+                    &states[index + 1],
+                    actions,
+                );
+            }
+
+            while solver_is_sat(&solver) {
+                let Some(model) = solver.get_model() else {
+                    break;
+                };
+                let Some(trace) = self.decode_path_trace(&model, schema, &states, &steps, actions)
+                else {
+                    break;
+                };
+                let terminal_state = trace
+                    .states()
+                    .last()
+                    .expect("trace always has at least one state");
+                let has_non_stutter = self
+                    .enumerate_symbolic_successors_with_program(schema, terminal_state, program)?
+                    .into_iter()
+                    .any(|(step, _)| matches!(step, TraceStep::Action(_)));
+                if !has_non_stutter {
+                    return Ok(Some(trace));
+                }
+                block_current_model(&solver, &model, &states[depth].all_values());
+            }
+        }
+
         Ok(None)
     }
 
@@ -1243,16 +1353,14 @@ where
     ) -> Bool {
         let mut clauses = Vec::new();
 
-        if self.spec.allow_stutter() {
-            let mut stutter = prev
-                .fields
-                .iter()
-                .zip(next.fields.iter())
-                .map(|(prev, next)| next.eq(prev))
-                .collect::<Vec<_>>();
-            stutter.push(step.eq(Int::from_u64(0)));
-            clauses.push(bool_and(&stutter));
-        }
+        let mut stutter = prev
+            .fields
+            .iter()
+            .zip(next.fields.iter())
+            .map(|(prev, next)| next.eq(prev))
+            .collect::<Vec<_>>();
+        stutter.push(step.eq(Int::from_u64(0)));
+        clauses.push(bool_and(&stutter));
 
         clauses.extend(program.rules().iter().map(|rule| {
             encode_rule_transition(schema, &prev.fields, step, &next.fields, actions, rule)
@@ -1300,7 +1408,7 @@ where
         solver.assert(self.encode_action_constraints_formula(schema, prev, step, next, actions));
     }
 
-    fn collect_symbolic_successors(
+    fn enumerate_symbolic_successors_with_program(
         &self,
         schema: &SymbolicStateSchema<T::State>,
         state: &T::State,
@@ -1371,48 +1479,38 @@ where
         Ok(values.into_iter().map(|(_, edge)| edge).collect())
     }
 
-    fn relation_successors(
+    fn enumerate_symbolic_successors(
         &self,
         state: &T::State,
     ) -> Result<Vec<SymbolicSuccessor<T>>, ModelCheckError> {
-        let program = self.symbolic_transition_program()?;
-        let schema = self.symbolic_state_schema()?;
+        let program = self.direct_transition_program()?;
+        let schema = self.direct_state_schema()?;
 
-        if self.spec.allow_stutter() {
-            let stutter = self.canonicalize_state(&self.spec.stutter_state(state));
-            if stutter != *state {
-                return Err(self.symbolic_ast_required_error(format!(
-                    "symbolic backend requires spec `{}` stutter_state() to be identity",
-                    self.spec.name(),
-                )));
-            }
-        }
-
-        self.collect_symbolic_successors(&schema, state, &program)
+        self.enumerate_symbolic_successors_with_program(&schema, state, &program)
     }
 
-    fn collect_symbolic_lasso_traces(
+    fn collect_direct_lasso_traces(
         &self,
     ) -> Result<TraceList<T::State, T::Action>, ModelCheckError> {
         self.ensure_symbolic_constraints_ast_native()?;
         self.ensure_symbolic_stutter_is_identity()?;
-        let program = self.symbolic_transition_program()?;
-        let schema = self.symbolic_state_schema()?;
+        let program = self.direct_transition_program()?;
+        let schema = self.direct_state_schema()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
         self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
         let actions = self.action_domain();
         let mut traces = Vec::new();
 
-        for len in 1..=self.bounded_depth() + 1 {
+        for len in 1..=self.temporal_max_depth(&schema) + 1 {
             traces.extend(
-                self.collect_symbolic_lasso_traces_of_length(&schema, &program, &actions, len)?,
+                self.collect_direct_lasso_traces_of_length(&schema, &program, &actions, len)?,
             );
         }
 
         Ok(traces)
     }
 
-    fn collect_symbolic_lasso_traces_of_length(
+    fn collect_direct_lasso_traces_of_length(
         &self,
         schema: &SymbolicStateSchema<T::State>,
         program: &TransitionProgram<T::State, T::Action>,
@@ -1494,19 +1592,41 @@ where
         Ok(traces)
     }
 
-    fn symbolic_transition_program(
+    fn symbolic_artifacts(&self) -> &nirvash_lower::SymbolicArtifacts<T::State, T::Action> {
+        self.spec.symbolic_artifacts()
+    }
+
+    fn symbolic_support_issue_error(&self, issue: &SymbolicSupportIssue) -> ModelCheckError {
+        self.symbolic_ast_required_error(issue.to_string())
+    }
+
+    fn ensure_direct_fragment_supported(
+        &self,
+        backend_fragment: &'static str,
+    ) -> Result<(), ModelCheckError> {
+        if let Some(issue) = self
+            .symbolic_artifacts()
+            .first_issue_for_fragment(backend_fragment)
+        {
+            return Err(self.symbolic_support_issue_error(issue));
+        }
+        Ok(())
+    }
+
+    fn direct_transition_program(
         &self,
     ) -> Result<TransitionProgram<T::State, T::Action>, ModelCheckError> {
-        let Some(program) = self.spec.transition_program() else {
+        self.ensure_direct_fragment_supported("direct_smt.transition")?;
+        let Some(program) = self.symbolic_artifacts().transition_program().cloned() else {
             return Err(self.symbolic_ast_required_error(format!(
-                "symbolic backend requires spec `{}` to implement transition_program() with AST-native rules",
-                self.spec.name(),
+                "symbolic backend requires spec `{}` to lower an AST-native transition program into direct SMT artifacts",
+                self.spec.frontend_name(),
             )));
         };
         if !program.is_ast_native() {
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic backend requires spec `{}` transition program `{}` to be AST-native",
-                self.spec.name(),
+                self.spec.frontend_name(),
                 program.name(),
             )));
         }
@@ -1514,20 +1634,32 @@ where
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic backend requires transition program `{}` for spec `{}` to register helper/effect `{}` for symbolic use",
                 program.name(),
-                self.spec.name(),
+                self.spec.frontend_name(),
                 node,
             )));
         }
         Ok(program)
     }
 
-    fn symbolic_state_schema(&self) -> Result<SymbolicStateSchema<T::State>, ModelCheckError> {
-        nirvash::registry::lookup_symbolic_state_schema::<T::State>().ok_or_else(|| {
+    fn direct_state_schema(&self) -> Result<SymbolicStateSchema<T::State>, ModelCheckError> {
+        self.symbolic_artifacts().state_schema().cloned().ok_or_else(|| {
             self.symbolic_ast_required_error(format!(
-                "symbolic backend requires state `{}` to implement SymbolicStateSpec",
+                "symbolic backend requires state `{}` to implement SymbolicEncoding and lower a symbolic encoding schema",
                 std::any::type_name::<T::State>(),
             ))
         })
+    }
+
+    fn direct_invariants(&self) -> Vec<BoolExpr<T::State>> {
+        self.symbolic_artifacts().invariants().to_vec()
+    }
+
+    fn direct_properties(&self) -> Vec<Ltl<T::State, T::Action>> {
+        self.symbolic_artifacts().properties().to_vec()
+    }
+
+    fn direct_fairness(&self) -> Vec<Fairness<T::State, T::Action>> {
+        self.symbolic_artifacts().fairness().to_vec()
     }
 
     fn ensure_symbolic_schema_covers_program(
@@ -1540,7 +1672,7 @@ where
                 "symbolic reachable-graph backend does not encode update effect `{}` in transition program `{}` for spec `{}`",
                 effect_name,
                 program.name(),
-                self.spec.name(),
+                self.spec.frontend_name(),
             )));
         }
         self.ensure_symbolic_schema_covers_paths(
@@ -1566,7 +1698,7 @@ where
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic reachable-graph backend requires state constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
                     constraint.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1581,7 +1713,7 @@ where
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic reachable-graph backend requires action constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
                     constraint.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1598,12 +1730,12 @@ where
         &self,
         schema: &SymbolicStateSchema<T::State>,
     ) -> Result<(), ModelCheckError> {
-        for invariant in self.spec.invariants() {
+        for invariant in self.direct_invariants() {
             if let Some(node) = invariant.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic reachable-graph backend requires invariant `{}` for spec `{}` to register helper `{}` for symbolic use",
                     invariant.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1620,12 +1752,12 @@ where
         &self,
         schema: &SymbolicStateSchema<T::State>,
     ) -> Result<(), ModelCheckError> {
-        for property in self.spec.properties() {
+        for property in self.direct_properties() {
             if let Some(node) = property.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires property `{}` for spec `{}` to register helper `{}` for symbolic use",
                     property.describe(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1635,12 +1767,12 @@ where
                 property.symbolic_state_paths(),
             )?;
         }
-        for fairness in self.spec.fairness() {
+        for fairness in self.direct_fairness() {
             if let Some(node) = fairness.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires fairness `{}` for spec `{}` to register helper `{}` for symbolic use",
                     fairness.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1719,14 +1851,14 @@ where
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires state constraint `{}` for spec `{}` to be AST-native",
                     constraint.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                 )));
             }
             if let Some(node) = constraint.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires state constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
                     constraint.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1736,14 +1868,14 @@ where
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires action constraint `{}` for spec `{}` to be AST-native",
                     constraint.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                 )));
             }
             if let Some(node) = constraint.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires action constraint `{}` for spec `{}` to register helper `{}` for symbolic use",
                     constraint.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1752,19 +1884,19 @@ where
     }
 
     fn ensure_symbolic_invariants_ast_native(&self) -> Result<(), ModelCheckError> {
-        for invariant in self.spec.invariants() {
+        for invariant in self.direct_invariants() {
             if !invariant.is_ast_native() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires invariant `{}` for spec `{}` to be AST-native",
                     invariant.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                 )));
             }
             if let Some(node) = invariant.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires invariant `{}` for spec `{}` to register helper `{}` for symbolic use",
                     invariant.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1773,36 +1905,36 @@ where
     }
 
     fn ensure_symbolic_properties_ast_native(&self) -> Result<(), ModelCheckError> {
-        for property in self.spec.properties() {
+        for property in self.direct_properties() {
             if !property.is_ast_native() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires property `{}` for spec `{}` to be AST-native",
                     property.describe(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                 )));
             }
             if let Some(node) = property.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires property `{}` for spec `{}` to register helper `{}` for symbolic use",
                     property.describe(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
         }
-        for fairness in self.spec.fairness() {
+        for fairness in self.direct_fairness() {
             if !fairness.is_ast_native() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires fairness `{}` for spec `{}` to be AST-native",
                     fairness.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                 )));
             }
             if let Some(node) = fairness.first_unencodable_symbolic_node() {
                 return Err(self.symbolic_ast_required_error(format!(
                     "symbolic backend requires fairness `{}` for spec `{}` to register helper `{}` for symbolic use",
                     fairness.name(),
-                    self.spec.name(),
+                    self.spec.frontend_name(),
                     node,
                 )));
             }
@@ -1811,18 +1943,18 @@ where
     }
 
     fn ensure_no_explicit_only_reducers(&self) -> Result<(), ModelCheckError> {
-        if self.model_case.view().is_some() {
+        if self.model_case.state_abstraction().is_some() {
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic backend does not support view abstraction for model case `{}` in spec `{}`",
                 self.model_case.label(),
-                self.spec.name(),
+                self.spec.frontend_name(),
             )));
         }
-        if self.model_case.partial_order().is_some() {
+        if self.model_case.por().is_some() {
             return Err(self.symbolic_ast_required_error(format!(
                 "symbolic backend does not support partial-order reduction for model case `{}` in spec `{}`",
                 self.model_case.label(),
-                self.spec.name(),
+                self.spec.frontend_name(),
             )));
         }
         Ok(())
@@ -1846,6 +1978,7 @@ where
             .all(|constraint: &BoolExpr<T::State>| constraint.eval(state))
     }
 
+    #[allow(dead_code)]
     fn trace_to_state(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -1855,6 +1988,7 @@ where
         self.terminal_trace(states, steps)
     }
 
+    #[allow(dead_code)]
     fn reconstruct_path(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -1888,6 +2022,7 @@ where
         Trace::new(states, trace_steps, loop_start)
     }
 
+    #[allow(dead_code)]
     fn graph_lasso_traces(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -1899,6 +2034,7 @@ where
         traces
     }
 
+    #[allow(dead_code)]
     fn enumerate_graph_lassos(
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
@@ -1945,17 +2081,18 @@ where
         }
     }
 
+    #[allow(dead_code)]
     fn trace_satisfies_fairness_graph(
         &self,
         trace: &Trace<T::State, T::Action>,
         graph: &ReachableGraph<T::State, T::Action>,
     ) -> bool {
-        self.spec
-            .fairness()
+        self.direct_fairness()
             .into_iter()
             .all(|fairness| self.eval_fairness_graph(trace, graph, fairness))
     }
 
+    #[allow(dead_code)]
     fn eval_fairness_graph(
         &self,
         trace: &Trace<T::State, T::Action>,
@@ -2005,14 +2142,13 @@ where
         }
     }
 
-    fn trace_satisfies_fairness_lasso(&self, trace: &Trace<T::State, T::Action>) -> bool {
-        self.spec
-            .fairness()
+    fn trace_satisfies_fairness_direct(&self, trace: &Trace<T::State, T::Action>) -> bool {
+        self.direct_fairness()
             .into_iter()
-            .all(|fairness| self.eval_fairness_lasso(trace, fairness))
+            .all(|fairness| self.eval_fairness_direct(trace, fairness))
     }
 
-    fn eval_fairness_lasso(
+    fn eval_fairness_direct(
         &self,
         trace: &Trace<T::State, T::Action>,
         fairness: Fairness<T::State, T::Action>,
@@ -2028,7 +2164,7 @@ where
             }
         });
         let enabled_any = trace.cycle_indices().any(|index| {
-            self.relation_successors(&trace.states()[index])
+            self.enumerate_symbolic_successors(&trace.states()[index])
                 .unwrap_or_else(|error| {
                     panic!("symbolic lasso successor enumeration failed: {error:?}")
                 })
@@ -2040,7 +2176,7 @@ where
                 .any(|(action, next)| predicate.eval(&trace.states()[index], &action, &next))
         });
         let enabled_all = trace.cycle_indices().all(|index| {
-            self.relation_successors(&trace.states()[index])
+            self.enumerate_symbolic_successors(&trace.states()[index])
                 .unwrap_or_else(|error| {
                     panic!("symbolic lasso successor enumeration failed: {error:?}")
                 })
@@ -2125,7 +2261,7 @@ where
                 .states()
                 .iter()
                 .map(|state| {
-                    self.relation_successors(state)
+                    self.enumerate_symbolic_successors(state)
                         .unwrap_or_else(|error| {
                             panic!("symbolic graph successor enumeration failed: {error:?}")
                         })

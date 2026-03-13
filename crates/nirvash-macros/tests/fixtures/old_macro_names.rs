@@ -15,7 +15,7 @@ enum Action {
 struct Spec;
 
 #[imago_subsystem_spec]
-impl nirvash::TransitionSystem for Spec {
+impl nirvash::__private::TransitionSystem for Spec {
     type State = State;
     type Action = Action;
 

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 nirvash = { workspace = true }
 nirvash-backends = { workspace = true }
+nirvash-lower = { workspace = true }
 
 [dev-dependencies]
 nirvash-macros = { workspace = true }

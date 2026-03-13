@@ -1,27 +1,37 @@
 use nirvash::OpaqueModelValue;
-use nirvash::TransitionSystem;
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::{
-    ActionVocabulary, Signature, action_constraint, fairness, formal_tests, invariant,
-    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, state_constraint,
-    subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, action_constraint, fairness, formal_tests,
+    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
+    state_constraint, subsystem_spec,
 };
 
 struct WorkerTag;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 enum ToyPhase {
     Idle,
     Busy,
     Blocked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 struct ToyState {
     worker: OpaqueModelValue<WorkerTag, 2>,
     phase: ToyPhase,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 enum ToyAction {
     /// Start work
     Start,
@@ -124,11 +134,11 @@ fn finish_progress() -> nirvash::Fairness<ToyState, ToyAction> {
 }
 
 #[subsystem_spec]
-impl TransitionSystem for ToyModelControlSpec {
+impl FrontendSpec for ToyModelControlSpec {
     type State = ToyState;
     type Action = ToyAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "toy_model_controls"
     }
 

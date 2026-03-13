@@ -4,11 +4,13 @@ use imagod_spec::{
     ManagerRuntimeOutputSummary, ManagerRuntimeProbeOutput, ManagerRuntimeProbeState,
     ManagerRuntimeStateSummary,
 };
-use nirvash::{
-    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
+use nirvash::BoolExpr;
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
+use nirvash_macros::{
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, nirvash_projection_model,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     manager_runtime::{ManagerRuntimeAction, ManagerRuntimeSpec},
@@ -19,7 +21,16 @@ use crate::{
 };
 
 /// Boot/maintenance/shutdown milestones projected from the unified `system` spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum ManagerRuntimeProjectionAction {
     /// Observe loading an existing config.
     LoadExistingConfig,
@@ -185,11 +196,11 @@ fn normalize_manager_runtime_state(
     <ManagerRuntimeProjectionSpec as ProtocolConformanceSpec>::abstract_state(&spec, &summary)
 }
 
-impl TransitionSystem for ManagerRuntimeProjectionSpec {
+impl FrontendSpec for ManagerRuntimeProjectionSpec {
     type State = SystemState;
     type Action = ManagerRuntimeProjectionAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "manager_runtime_projection"
     }
 
@@ -242,6 +253,10 @@ impl TransitionSystem for ManagerRuntimeProjectionSpec {
         };
         Some(normalize_manager_runtime_state(*self, next))
     }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default().with_check_deadlocks(false)]
+    }
 }
 
 impl TemporalSpec for ManagerRuntimeProjectionSpec {
@@ -250,15 +265,9 @@ impl TemporalSpec for ManagerRuntimeProjectionSpec {
     }
 }
 
-impl ModelCaseSource for ManagerRuntimeProjectionSpec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-        vec![ModelCase::default().with_check_deadlocks(false)]
-    }
-}
-
 #[cfg(test)]
 fn manager_runtime_probe_state_domain() -> nirvash::BoundedDomain<ManagerRuntimeProbeState> {
-    <ManagerRuntimeProbeState as nirvash::Signature>::bounded_domain()
+    <ManagerRuntimeProbeState as nirvash_lower::FiniteModelDomain>::bounded_domain()
 }
 
 #[cfg(test)]

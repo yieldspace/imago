@@ -1,7 +1,7 @@
-use nirvash_macros::Signature;
+use nirvash_macros::FiniteModelDomain;
 
-#[derive(Clone, Debug, PartialEq, Eq, Signature)]
-#[signature(custom, bounds(ready(domain = ready_domain)))]
+#[derive(Clone, Debug, PartialEq, Eq, FiniteModelDomain)]
+#[finite_model_domain(custom, bounds(ready(domain = ready_domain)))]
 struct State {
     ready: bool,
 }

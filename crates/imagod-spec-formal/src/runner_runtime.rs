@@ -1,9 +1,9 @@
-use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, TransitionSystem,
-};
+use nirvash::{BoolExpr, Fairness, Ltl, RelAtom as _, RelSet};
+use nirvash_lower::{FiniteModelDomain as _, FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
-    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelAtom, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::RunnerAppType;
@@ -25,19 +25,23 @@ pub fn classify_runner_mode(app_type: RunnerAppType) -> RunnerModeClass {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum RuntimeEndpointAtom {
     HttpInbound,
     SocketInbound,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum HttpRequestAtom {
     Request0,
     Request1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum RuntimePhase {
     Idle,
     ComponentValidated,
@@ -45,22 +49,24 @@ pub enum RuntimePhase {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum ComponentLoadClass {
     Unknown,
     Loadable,
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum WasmTuningClass {
     Default,
     CustomValid,
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct RunnerRuntimeState {
     listening_endpoints: RelSet<RuntimeEndpointAtom>,
     queued_http_requests: RelSet<HttpRequestAtom>,
@@ -94,7 +100,16 @@ impl RunnerRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalSignature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum RunnerRuntimeAction {
     /// Select mode
     SelectMode(RunnerAppType),
@@ -228,22 +243,13 @@ impl RunnerRuntimeSpec {
     }
 }
 
-nirvash::signature_spec!(
-    RunnerRuntimeStateSignatureSpec for RunnerRuntimeState,
+nirvash::finite_model_domain_spec!(
+    RunnerRuntimeStateFiniteModelDomainSpec for RunnerRuntimeState,
     representatives = crate::state_domain::reachable_state_domain(&RunnerRuntimeSpec::new())
 );
 
-nirvash::symbolic_state_spec!(for RunnerRuntimeState {
-    listening_endpoints: RelSet<RuntimeEndpointAtom>,
-    queued_http_requests: RelSet<HttpRequestAtom>,
-    mode: Option<RunnerAppType>,
-    phase: RuntimePhase,
-    component: ComponentLoadClass,
-    tuning: WasmTuningClass,
-});
-
-fn runner_runtime_model_cases() -> Vec<ModelCase<RunnerRuntimeState, RunnerRuntimeAction>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+fn runner_runtime_model_cases() -> Vec<ModelInstance<RunnerRuntimeState, RunnerRuntimeAction>> {
+    vec![ModelInstance::default().with_check_deadlocks(false)]
 }
 
 #[invariant(RunnerRuntimeSpec)]
@@ -348,11 +354,11 @@ fn failure_fairness() -> Fairness<RunnerRuntimeState, RunnerRuntimeAction> {
 }
 
 #[subsystem_spec(model_cases(runner_runtime_model_cases))]
-impl TransitionSystem for RunnerRuntimeSpec {
+impl FrontendSpec for RunnerRuntimeSpec {
     type State = RunnerRuntimeState;
     type Action = RunnerRuntimeAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "runner_runtime"
     }
 

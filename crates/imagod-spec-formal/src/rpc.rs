@@ -1,11 +1,10 @@
-use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, Signature as _, StepExpr,
-    TransitionSystem,
-};
+use nirvash::{BoolExpr, Fairness, Ltl, RelSet, Relation2, StepExpr};
+use nirvash_lower::FiniteModelDomain as _;
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
-    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, property,
-    subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, action_constraint, fairness, invariant,
+    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::atoms::{
@@ -13,8 +12,10 @@ use crate::atoms::{
     binding_target_for,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct RpcState {
     bindings: Relation2<ServiceAtom, BindingTargetAtom>,
     local_call_owners: Relation2<RpcCallAtom, ServiceAtom>,
@@ -98,7 +99,9 @@ impl RpcState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::Signature, ActionVocabulary)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::FiniteModelDomain, ActionVocabulary,
+)]
 pub enum RpcAction {
     /// Grant the default binding for one source service.
     GrantBinding(ServiceAtom),
@@ -143,37 +146,23 @@ impl RpcSpec {
     }
 }
 
-nirvash::signature_spec!(
-    RpcStateSignatureSpec for RpcState,
+nirvash::finite_model_domain_spec!(
+    RpcStateFiniteModelDomainSpec for RpcState,
     representatives = rpc_state_representatives()
 );
 
-nirvash::symbolic_state_spec!(for RpcState {
-    bindings: Relation2<ServiceAtom, BindingTargetAtom>,
-    local_call_owners: Relation2<RpcCallAtom, ServiceAtom>,
-    local_call_targets: Relation2<RpcCallAtom, BindingTargetAtom>,
-    denied_local_calls: Relation2<RpcCallAtom, ServiceAtom>,
-    remote_connection_owners: Relation2<RpcConnectionAtom, ServiceAtom>,
-    remote_connection_authorities: Relation2<RpcConnectionAtom, RemoteAuthorityAtom>,
-    remote_call_owners: Relation2<RpcCallAtom, ServiceAtom>,
-    remote_call_targets: Relation2<RpcCallAtom, BindingTargetAtom>,
-    remote_inflight_calls: Relation2<RpcCallAtom, RpcConnectionAtom>,
-    completed_remote_calls: RelSet<RpcCallAtom>,
-    denied_remote_calls: Relation2<RpcCallAtom, ServiceAtom>,
-});
-
-fn rpc_model_cases() -> Vec<ModelCase<RpcState, RpcAction>> {
+fn rpc_model_cases() -> Vec<ModelInstance<RpcState, RpcAction>> {
     vec![local_rpc_model_case(), remote_rpc_model_case()]
 }
 
-fn local_rpc_model_case() -> ModelCase<RpcState, RpcAction> {
-    ModelCase::new("local_service0_only")
+fn local_rpc_model_case() -> ModelInstance<RpcState, RpcAction> {
+    ModelInstance::new("local_service0_only")
         .with_check_deadlocks(false)
         .with_state_constraint(local_service0_only_state())
 }
 
-fn remote_rpc_model_case() -> ModelCase<RpcState, RpcAction> {
-    ModelCase::new("remote_service0_only")
+fn remote_rpc_model_case() -> ModelInstance<RpcState, RpcAction> {
+    ModelInstance::new("remote_service0_only")
         .with_check_deadlocks(false)
         .with_state_constraint(remote_service0_only_state())
 }
@@ -343,11 +332,11 @@ fn remote_disconnect_fairness() -> Fairness<RpcState, RpcAction> {
 }
 
 #[subsystem_spec(model_cases(rpc_model_cases))]
-impl TransitionSystem for RpcSpec {
+impl FrontendSpec for RpcSpec {
     type State = RpcState;
     type Action = RpcAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "rpc"
     }
 
@@ -636,8 +625,9 @@ mod tests {
     #[test]
     fn explicit_and_symbolic_backends_agree() {
         let spec = RpcSpec::new();
+        let lowered = crate::lowered_spec(&spec);
         let explicit_snapshot = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -646,7 +636,7 @@ mod tests {
         .full_reachable_graph_snapshot()
         .expect("explicit rpc snapshot");
         let symbolic_snapshot = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()
@@ -665,7 +655,7 @@ mod tests {
         assert_eq!(symbolic_snapshot, explicit_snapshot);
 
         let explicit_result = ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 ..ModelCheckConfig::reachable_graph()
@@ -674,7 +664,7 @@ mod tests {
         .check_all()
         .expect("explicit rpc result");
         let symbolic_result = match ModelChecker::with_config(
-            &spec,
+            &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
                 ..ModelCheckConfig::reachable_graph()

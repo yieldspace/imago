@@ -1,8 +1,8 @@
-use nirvash_macros::Signature;
+use nirvash_macros::FiniteModelDomain;
 
-#[derive(Clone, Debug, PartialEq, Eq, Signature)]
+#[derive(Clone, Debug, PartialEq, Eq, FiniteModelDomain)]
 struct InvalidLen {
-    #[sig(len = "0..=2")]
+    #[finite_model(len = "0..=2")]
     ready: bool,
 }
 

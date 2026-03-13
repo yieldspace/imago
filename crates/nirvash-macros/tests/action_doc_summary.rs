@@ -1,14 +1,21 @@
-use nirvash::{TransitionSystem, collect_doc_graph_specs, format_doc_graph_action};
+use nirvash::{collect_doc_graph_specs, format_doc_graph_action};
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::nirvash_transition_program;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::Signature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::FiniteModelDomain)]
 enum InnerAction {
     /// Inner action
     Inner,
 }
 
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::Signature, nirvash_macros::ActionVocabulary,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::ActionVocabulary,
 )]
 enum WrapperAction {
     /// Explicit wrapper
@@ -18,13 +25,19 @@ enum WrapperAction {
     Missing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::Signature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::FiniteModelDomain)]
 struct DemoState {
     busy: bool,
 }
 
 #[derive(
-    Clone, Copy, Debug, PartialEq, Eq, nirvash_macros::Signature, nirvash_macros::ActionVocabulary,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    nirvash_macros::FiniteModelDomain,
+    nirvash_macros::ActionVocabulary,
 )]
 enum DemoAction {
     /// Start demo
@@ -38,11 +51,11 @@ enum DemoAction {
 struct DemoSpec;
 
 #[nirvash_macros::subsystem_spec]
-impl TransitionSystem for DemoSpec {
+impl FrontendSpec for DemoSpec {
     type State = DemoState;
     type Action = DemoAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "demo_action_docs"
     }
 
@@ -73,7 +86,7 @@ impl TransitionSystem for DemoSpec {
 const _: () = ();
 
 #[test]
-fn action_vocabulary_derive_uses_signature_domain() {
+fn action_vocabulary_derive_uses_finite_model_domain() {
     assert_eq!(
         <WrapperAction as nirvash::ActionVocabulary>::action_vocabulary(),
         vec![
@@ -85,7 +98,7 @@ fn action_vocabulary_derive_uses_signature_domain() {
 }
 
 #[test]
-fn signature_derive_registers_action_docs_and_delegates_single_field_wrappers() {
+fn finite_model_domain_derive_registers_action_docs_and_delegates_single_field_wrappers() {
     assert_eq!(
         format_doc_graph_action(&WrapperAction::Explicit(InnerAction::Inner)),
         "Explicit wrapper"

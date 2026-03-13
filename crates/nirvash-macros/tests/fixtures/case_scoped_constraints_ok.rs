@@ -1,17 +1,16 @@
-use nirvash::{
-    StepExpr, ModelCase, ModelCaseSource as _, BoolExpr, TransitionSystem,
-};
+use nirvash::{BoolExpr, StepExpr};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    Signature as FormalSignature, action_constraint, nirvash_expr, nirvash_step_expr,
+    FiniteModelDomain as FormalFiniteModelDomain, action_constraint, nirvash_expr, nirvash_step_expr,
     nirvash_transition_program, state_constraint, subsystem_spec,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 struct State {
     busy: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Start,
     Stop,
@@ -20,9 +19,13 @@ enum Action {
 struct Spec;
 
 #[subsystem_spec(model_cases(spec_model_cases))]
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State { busy: false }]
@@ -60,12 +63,12 @@ fn only_case_b_action_constraint() -> StepExpr<State, Action> {
     nirvash_step_expr! { only_case_b_action_constraint(_prev, _action, _next) => true }
 }
 
-fn spec_model_cases() -> Vec<ModelCase<State, Action>> {
-    vec![ModelCase::new("case_a"), ModelCase::new("case_b")]
+fn spec_model_cases() -> Vec<ModelInstance<State, Action>> {
+    vec![ModelInstance::new("case_a"), ModelInstance::new("case_b")]
 }
 
 fn main() {
-    let cases = Spec.model_cases();
+    let cases = Spec.model_instances();
     assert_eq!(cases[0].label(), "case_a");
     assert_eq!(cases[0].state_constraints().len(), 2);
     assert_eq!(cases[0].action_constraints().len(), 0);

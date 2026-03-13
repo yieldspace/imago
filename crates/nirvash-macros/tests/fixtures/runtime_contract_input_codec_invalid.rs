@@ -1,4 +1,5 @@
-use nirvash::{TransitionSystem, conformance::ProtocolConformanceSpec};
+use nirvash_lower::FrontendSpec;
+use nirvash_conformance::ProtocolConformanceSpec;
 use nirvash_macros::nirvash_runtime_contract;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -15,9 +16,13 @@ enum Action {
     Start,
 }
 
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]

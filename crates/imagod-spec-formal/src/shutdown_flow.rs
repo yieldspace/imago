@@ -1,10 +1,12 @@
-use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
-    nirvash_transition_program, property, subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum ShutdownPhase {
     Idle,
     SignalReceived,
@@ -14,7 +16,7 @@ pub enum ShutdownPhase {
     Completed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub struct ShutdownFlowState {
     pub phase: ShutdownPhase,
     pub accepts_stopped: bool,
@@ -24,7 +26,16 @@ pub struct ShutdownFlowState {
     pub forced_stop_attempted: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum ShutdownFlowAction {
     /// Signal shutdown
     ReceiveSignal,
@@ -134,8 +145,8 @@ fn shutdown_flow_state_valid(state: &ShutdownFlowState) -> bool {
     completed_requires_all_flags && maintenance_after_services && services_after_sessions
 }
 
-fn shutdown_model_cases() -> Vec<ModelCase<ShutdownFlowState, ShutdownFlowAction>> {
-    vec![ModelCase::default().with_check_deadlocks(false)]
+fn shutdown_model_cases() -> Vec<ModelInstance<ShutdownFlowState, ShutdownFlowAction>> {
+    vec![ModelInstance::default().with_check_deadlocks(false)]
 }
 
 #[invariant(ShutdownFlowSpec)]
@@ -251,11 +262,11 @@ fn finalize_progress() -> Fairness<ShutdownFlowState, ShutdownFlowAction> {
 }
 
 #[subsystem_spec(model_cases(shutdown_model_cases))]
-impl TransitionSystem for ShutdownFlowSpec {
+impl FrontendSpec for ShutdownFlowSpec {
     type State = ShutdownFlowState;
     type Action = ShutdownFlowAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "shutdown_flow"
     }
 

@@ -381,7 +381,7 @@ impl SourceCollector {
             Type::Path(type_path) if type_path.qself.is_none() => &type_path.path,
             _ => {
                 return Err(err(
-                    "nirvash-docgen only supports impl TransitionSystem for <simple path>",
+                    "nirvash-docgen only supports impl FrontendSpec for <simple path>",
                 ));
             }
         };
@@ -2783,7 +2783,8 @@ pub mod child;
 pub mod system;
 
 mod inline_parent {
-    use nirvash::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
+    use nirvash::{BoolExpr, Ltl, TransitionProgram};
+    use nirvash_lower::FrontendSpec;
     use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
     pub struct InlineState;
@@ -2791,7 +2792,7 @@ mod inline_parent {
     pub struct InlineSpec;
 
     #[subsystem_spec(model_cases(inline_model_cases))]
-    impl TransitionSystem for InlineSpec {
+    impl FrontendSpec for InlineSpec {
         type State = InlineState;
         type Action = InlineAction;
 
@@ -2836,7 +2837,8 @@ mod inline_parent {
         fs::write(
             src_dir.join("child.rs"),
             r#"
-use nirvash::{BoolExpr, Fairness, Ltl, StepExpr, TransitionProgram, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, StepExpr, TransitionProgram};
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
 pub struct ChildState;
@@ -2844,7 +2846,7 @@ pub struct ChildAction;
 pub struct ChildSpec;
 
 #[subsystem_spec]
-impl TransitionSystem for ChildSpec {
+impl FrontendSpec for ChildSpec {
     type State = ChildState;
     type Action = ChildAction;
 
@@ -2893,7 +2895,8 @@ nirvash::fairness!(weak ChildSpec, child_fairness(prev, action, next) => {
         fs::write(
             src_dir.join("system.rs"),
             r#"
-use nirvash::{BoolExpr, Ltl, TransitionProgram, TransitionSystem};
+use nirvash::{BoolExpr, Ltl, TransitionProgram};
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, system_spec};
 
 pub struct SystemState;
@@ -2904,7 +2907,7 @@ pub struct RootSystemSpec;
     subsystems(crate::child::ChildSpec, crate::inline_parent::InlineSpec),
     model_cases(system_model_cases)
 )]
-impl TransitionSystem for RootSystemSpec {
+impl FrontendSpec for RootSystemSpec {
     type State = SystemState;
     type Action = SystemAction;
 
@@ -3016,7 +3019,8 @@ fn system_model_cases() {}
             fs::write(
                 src_dir.join(format!("{module}.rs")),
                 r#"
-use nirvash::{TransitionProgram, TransitionSystem};
+use nirvash::TransitionProgram;
+use nirvash_lower::FrontendSpec;
 use nirvash_macros::{nirvash_transition_program, subsystem_spec};
 
 pub struct State;
@@ -3024,7 +3028,7 @@ pub struct Action;
 pub struct DuplicateSpec;
 
 #[subsystem_spec]
-impl TransitionSystem for DuplicateSpec {
+impl FrontendSpec for DuplicateSpec {
     type State = State;
     type Action = Action;
 

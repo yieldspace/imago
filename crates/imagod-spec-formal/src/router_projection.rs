@@ -1,11 +1,13 @@
 #[cfg(test)]
 use imagod_spec::{ContractEffectSummary, SummaryRequestKind, SummaryStreamId};
 use imagod_spec::{RouterOutputSummary, RouterProbeOutput, RouterProbeState, RouterStateSummary};
-use nirvash::{
-    BoolExpr, ModelCase, ModelCaseSource, TemporalSpec, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
+use nirvash::BoolExpr;
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
+use nirvash_macros::{
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain,
+    SymbolicEncoding as FormalSymbolicEncoding, nirvash_projection_model,
 };
-use nirvash_macros::{ActionVocabulary, Signature, nirvash_projection_model};
 
 use crate::{
     CommandKind, CommandProtocolAction,
@@ -18,7 +20,16 @@ use crate::{
 };
 
 /// Request/response router surface projected from the unified `system` spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum RouterProjectionAction {
     /// Observe `hello.negotiate`.
     HelloNegotiate,
@@ -173,11 +184,11 @@ impl RouterProjectionSpec {
     }
 }
 
-impl TransitionSystem for RouterProjectionSpec {
+impl FrontendSpec for RouterProjectionSpec {
     type State = SystemState;
     type Action = RouterProjectionAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "router_projection"
     }
 
@@ -247,6 +258,10 @@ impl TransitionSystem for RouterProjectionSpec {
                 <Self as ProtocolConformanceSpec>::abstract_state(self, &summary)
             })
     }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default().with_check_deadlocks(false)]
+    }
 }
 
 impl TemporalSpec for RouterProjectionSpec {
@@ -255,15 +270,9 @@ impl TemporalSpec for RouterProjectionSpec {
     }
 }
 
-impl ModelCaseSource for RouterProjectionSpec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-        vec![ModelCase::default().with_check_deadlocks(false)]
-    }
-}
-
 #[cfg(test)]
 fn router_probe_state_domain() -> nirvash::BoundedDomain<RouterProbeState> {
-    <RouterProbeState as nirvash::Signature>::bounded_domain()
+    <RouterProbeState as nirvash_lower::FiniteModelDomain>::bounded_domain()
 }
 
 #[cfg(test)]

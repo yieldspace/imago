@@ -117,10 +117,15 @@ imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.2.0" }
 imago-plugin-nanokvm-plugin = { path = "plugins/imago-plugin-nanokvm-plugin", version = "0.1.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.2.0" }
 nirvash = { path = "crates/nirvash", version = "0.2.0" }
+nirvash-foundation = { path = "crates/nirvash-foundation", version = "0.2.0" }
+nirvash-conformance = { path = "crates/nirvash-conformance", version = "0.2.0" }
 nirvash-backends = { path = "crates/nirvash-backends", version = "0.2.0" }
 nirvash-check = { path = "crates/nirvash-check", version = "0.2.0" }
 nirvash-docgen = { path = "crates/nirvash-docgen", version = "0.2.0" }
+nirvash-ir = { path = "crates/nirvash-ir", version = "0.2.0" }
+nirvash-lower = { path = "crates/nirvash-lower", version = "0.2.0" }
 nirvash-macros = { path = "crates/nirvash-macros", version = "0.2.0" }
+nirvash-proof = { path = "crates/nirvash-proof", version = "0.2.0" }
 imago-project-config = { path = "crates/imago-project-config", version = "0.2.0" }
 imago-protocol = { path = "crates/imago-protocol", version = "0.2.0" }
 imago-schema-gen = { path = "crates/imago-schema-gen", version = "0.2.0" }

@@ -6,7 +6,7 @@ use imagod_spec::{
     CommandErrorKind, CommandLifecycleState, CommandProtocolAction, CommandProtocolContext,
     CommandProtocolObservedState, CommandProtocolOutput, CommandProtocolStageId, OperationPhase,
 };
-use nirvash::conformance::{ActionApplier, StateObserver};
+use nirvash_conformance::{ActionApplier, StateObserver};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

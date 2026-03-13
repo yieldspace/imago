@@ -5,24 +5,23 @@ use std::{
     path::Path,
 };
 
-use nirvash::{
-    BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelBackend,
-    ModelCase, ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult,
-    ReachableGraphEdge, ReachableGraphSnapshot, Signature, StepExpr, TemporalSpec, Trace,
-    TraceStep, TransitionSystem,
+use nirvash_lower::{
+    BoolExpr, CheckerSpec, Counterexample, CounterexampleKind, ExplorationMode, Fairness,
+    FiniteModelDomain, Ltl, ModelBackend, ModelCheckConfig, ModelCheckError, ModelCheckResult,
+    ModelInstance, ReachableGraphEdge, ReachableGraphSnapshot, StepExpr, Trace, TraceStep,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::symbolic::SymbolicModelChecker;
 
-type TraceVec<T> = Vec<Trace<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
+type TraceVec<T> = Vec<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 type ReachableGraphCheckpointLoad<T> = Option<(
-    ReachableGraph<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>,
+    ReachableGraph<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>,
     ExplicitStateIndex,
     Vec<usize>,
 )>;
 type FrontierBatch<T> =
-    Vec<FrontierExpansion<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
+    Vec<FrontierExpansion<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GraphEdge<A> {
@@ -97,10 +96,10 @@ impl ExplicitStateIndex {
     fn from_states<S>(
         storage: nirvash::ExplicitStateStorage,
         states: &ExplicitStateStore<S>,
-        view: Option<nirvash::ViewProjector<S>>,
+        view: Option<nirvash_lower::StateAbstraction<S>>,
     ) -> Self
     where
-        S: Signature + std::fmt::Debug,
+        S: FiniteModelDomain + std::fmt::Debug,
     {
         let mut index = Self::new(storage);
         for state_index in 0..states.len() {
@@ -113,10 +112,10 @@ impl ExplicitStateIndex {
         &self,
         states: &ExplicitStateStore<S>,
         state: &S,
-        view: Option<nirvash::ViewProjector<S>>,
+        view: Option<nirvash_lower::StateAbstraction<S>>,
     ) -> Option<usize>
     where
-        S: PartialEq + Signature + std::fmt::Debug,
+        S: PartialEq + FiniteModelDomain + std::fmt::Debug,
     {
         match self {
             Self::Exact => states
@@ -138,9 +137,9 @@ impl ExplicitStateIndex {
         &mut self,
         states: &ExplicitStateStore<S>,
         state_index: usize,
-        view: Option<nirvash::ViewProjector<S>>,
+        view: Option<nirvash_lower::StateAbstraction<S>>,
     ) where
-        S: Signature + std::fmt::Debug,
+        S: FiniteModelDomain + std::fmt::Debug,
     {
         let Self::Fingerprinted { buckets } = self else {
             return;
@@ -163,7 +162,7 @@ fn fingerprint_hash<T: Hash>(value: &T) -> u64 {
 fn states_share_key<S: PartialEq>(
     lhs: &S,
     rhs: &S,
-    view: Option<nirvash::ViewProjector<S>>,
+    view: Option<nirvash_lower::StateAbstraction<S>>,
 ) -> bool {
     match view {
         Some(view) => view.project(lhs) == view.project(rhs),
@@ -173,7 +172,7 @@ fn states_share_key<S: PartialEq>(
 
 fn fingerprint_state<S: std::fmt::Debug>(
     state: &S,
-    view: Option<nirvash::ViewProjector<S>>,
+    view: Option<nirvash_lower::StateAbstraction<S>>,
 ) -> u64 {
     match view {
         Some(view) => fingerprint_hash(&view.project(state)),
@@ -189,7 +188,7 @@ enum ExplicitStateStore<S> {
 
 impl<S> ExplicitStateStore<S>
 where
-    S: Signature + PartialEq + Clone,
+    S: FiniteModelDomain + PartialEq + Clone,
 {
     fn new(compression: nirvash::ExplicitStateCompression) -> Self {
         match compression {
@@ -299,7 +298,7 @@ where
 
 impl<S> std::ops::Index<usize> for ExplicitStateStore<S>
 where
-    S: Signature + PartialEq + Clone,
+    S: FiniteModelDomain + PartialEq + Clone,
 {
     type Output = S;
 
@@ -354,30 +353,34 @@ type TraceList<S, A> = Vec<Trace<S, A>>;
 impl<S, A> ReachableGraph<S, A> {
     fn state_index(&self, state: &S) -> Option<usize>
     where
-        S: Signature + PartialEq + Clone,
+        S: FiniteModelDomain + PartialEq + Clone,
     {
         self.states.iter().position(|candidate| candidate == state)
     }
 }
 
-pub struct BackendModelChecker<'a, T: TemporalSpec + ModelCaseSource> {
+pub struct BackendModelChecker<'a, T: CheckerSpec> {
     spec: &'a T,
-    model_case: ModelCase<T::State, T::Action>,
+    model_case: ModelInstance<T::State, T::Action>,
     config: ModelCheckConfig,
 }
 
 impl<'a, T> BackendModelChecker<'a, T>
 where
-    T: TemporalSpec + ModelCaseSource + Sync,
-    T::State: PartialEq + Signature + Send + Sync,
+    T: CheckerSpec,
+    T::State: PartialEq + FiniteModelDomain + Send + Sync,
     T::Action: PartialEq + Send + Sync,
 {
     pub fn new(spec: &'a T) -> Self {
-        let model_case = spec.model_cases().into_iter().next().unwrap_or_default();
+        let model_case = spec
+            .model_instances()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         Self::for_case(spec, model_case)
     }
 
-    pub fn for_case(spec: &'a T, model_case: ModelCase<T::State, T::Action>) -> Self {
+    pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
         let model_case = model_case.with_resolved_backend(
             spec.default_model_backend()
                 .unwrap_or(ModelBackend::Explicit),
@@ -396,7 +399,11 @@ where
             .backend
             .or(spec.default_model_backend())
             .unwrap_or(ModelBackend::Explicit);
-        let mut model_case = spec.model_cases().into_iter().next().unwrap_or_default();
+        let mut model_case = spec
+            .model_instances()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         model_case = model_case
             .with_checker_config(ModelCheckConfig {
                 backend: Some(backend),
@@ -864,7 +871,7 @@ where
             fs::read(path).map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))?;
         let saved: ReachableGraphCheckpoint = serde_json::from_slice(&bytes)
             .map_err(|error| ModelCheckError::CheckpointIo(error.to_string()))?;
-        if saved.spec_name != self.spec.name()
+        if saved.spec_name != self.spec.frontend_name()
             || saved.exploration != config.exploration
             || saved.state_storage != config.explicit.state_storage
             || saved.compression != config.explicit.compression
@@ -924,7 +931,7 @@ where
         let state_index = ExplicitStateIndex::from_states(
             config.explicit.state_storage,
             &graph.states,
-            self.model_case.view(),
+            self.model_case.state_abstraction(),
         );
 
         Ok(Some((graph, state_index, saved.frontier)))
@@ -947,7 +954,7 @@ where
 
         let actions = self.spec.actions();
         let snapshot = ReachableGraphCheckpoint {
-            spec_name: self.spec.name().to_owned(),
+            spec_name: self.spec.frontend_name().to_owned(),
             exploration: config.exploration,
             state_storage: config.explicit.state_storage,
             compression: config.explicit.compression,
@@ -1045,8 +1052,8 @@ where
             if !self.model_case.state_constraints().is_empty()
                 || !self.model_case.action_constraints().is_empty()
                 || self.model_case.symmetry().is_some()
-                || self.model_case.view().is_some()
-                || self.model_case.partial_order().is_some()
+                || self.model_case.state_abstraction().is_some()
+                || self.model_case.por().is_some()
             {
                 return Err(ModelCheckError::UnsupportedConfiguration(
                     "parallel frontier exploration does not support state/action constraints, symmetry reduction, view abstraction, or partial-order reduction",
@@ -1070,59 +1077,13 @@ where
         &self,
         graph: &ReachableGraph<T::State, T::Action>,
         frontier: &[usize],
-        workers: usize,
+        _workers: usize,
     ) -> Vec<FrontierExpansion<T::State, T::Action>> {
-        if workers <= 1 || frontier.len() <= 1 {
-            return frontier
-                .iter()
-                .copied()
-                .map(|index| self.expand_frontier_state(index, graph.states[index].clone()))
-                .collect();
-        }
-
-        let tasks = frontier
+        frontier
             .iter()
             .copied()
-            .map(|index| (index, graph.states[index].clone()))
-            .collect::<Vec<_>>();
-        let chunk_size = tasks.len().div_ceil(workers);
-        let spec = self.spec;
-        let allow_stutter = spec.allow_stutter();
-        let mut expansions = Vec::with_capacity(tasks.len());
-        std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for chunk in tasks.chunks(chunk_size.max(1)) {
-                let owned = chunk.to_vec();
-                handles.push(scope.spawn(move || {
-                    owned
-                        .into_iter()
-                        .map(|(index, state)| {
-                            let mut successors = spec
-                                .successors(&state)
-                                .into_iter()
-                                .map(|(action, next)| (TraceStep::Action(action), next))
-                                .collect::<Vec<_>>();
-                            if allow_stutter {
-                                successors.push((TraceStep::Stutter, spec.stutter_state(&state)));
-                            }
-                            FrontierExpansion {
-                                source: index,
-                                successors,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                }));
-            }
-            for handle in handles {
-                expansions.extend(
-                    handle
-                        .join()
-                        .expect("parallel frontier worker should not panic"),
-                );
-            }
-        });
-        expansions.sort_by_key(|expansion| expansion.source);
-        expansions
+            .map(|index| self.expand_frontier_state(index, graph.states[index].clone()))
+            .collect()
     }
 
     fn expand_frontier_state(
@@ -1286,7 +1247,7 @@ where
         config: &ModelCheckConfig,
     ) -> Result<Option<usize>, ModelCheckError> {
         if let Some(existing) =
-            state_index.state_index(&graph.states, &state, self.model_case.view())
+            state_index.state_index(&graph.states, &state, self.model_case.state_abstraction())
         {
             return Ok(Some(existing));
         }
@@ -1300,7 +1261,7 @@ where
         graph.edges.push(Vec::new());
         graph.parents.push(parent);
         graph.depths.push(depth);
-        state_index.record_state(&graph.states, index, self.model_case.view());
+        state_index.record_state(&graph.states, index, self.model_case.state_abstraction());
         push_frontier(index, &graph.states[index]);
         Ok(Some(index))
     }
@@ -1375,7 +1336,7 @@ where
     fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {
         let mut values = Vec::new();
         let mut actions = self.spec.actions();
-        if let Some(reducer) = self.model_case.partial_order() {
+        if let Some(reducer) = self.model_case.por() {
             actions.retain(|action| reducer.allow_action(state, action));
         }
 
@@ -1391,11 +1352,9 @@ where
             }
         }
 
-        if self.spec.allow_stutter() {
-            let stutter = self.canonicalize_state(&self.spec.stutter_state(state));
-            if self.state_constraints_allow(&stutter) {
-                values.push((TraceStep::Stutter, stutter));
-            }
+        let stutter = self.canonicalize_state(state);
+        if self.state_constraints_allow(&stutter) {
+            values.push((TraceStep::Stutter, stutter));
         }
 
         values
@@ -1439,7 +1398,7 @@ where
             initial_indices: graph.initial_indices.clone(),
             deadlocks: graph.deadlocks.clone(),
             truncated: graph.truncated,
-            stutter_omitted: self.spec.allow_stutter(),
+            stutter_omitted: false,
         }
     }
 

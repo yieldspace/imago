@@ -1,20 +1,19 @@
-use nirvash::{
-    ModelCase, ModelCaseSource, BoolExpr, TemporalSpec, TransitionSystem,
-    conformance::ProtocolConformanceSpec,
-};
-use nirvash_macros::{Signature as FormalSignature, nirvash_projection_model};
+use nirvash::BoolExpr;
+use nirvash_lower::{FrontendSpec, ModelInstance, TemporalSpec};
+use nirvash_conformance::ProtocolConformanceSpec;
+use nirvash_macros::{FiniteModelDomain as FormalFiniteModelDomain, nirvash_projection_model};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Spec;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, FormalFiniteModelDomain)]
 enum State {
     #[default]
     Idle,
     Busy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalSignature)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
 enum Action {
     Start,
 }
@@ -41,9 +40,13 @@ enum Effect {
     DropMe,
 }
 
-impl TransitionSystem for Spec {
+impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
+    
+    fn frontend_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -59,17 +62,15 @@ impl TransitionSystem for Spec {
             _ => None,
         }
     }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default()]
+    }
 }
 
 impl TemporalSpec for Spec {
     fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
         Vec::new()
-    }
-}
-
-impl ModelCaseSource for Spec {
-    fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
-        vec![ModelCase::default()]
     }
 }
 

@@ -1,10 +1,9 @@
-use nirvash::{
-    Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2, StepExpr,
-    TransitionSystem,
-};
+use nirvash::{Fairness, Ltl, ModelBackend, ModelCheckConfig, RelSet, Relation2, StepExpr};
+use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
-    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, action_constraint, fairness, nirvash_expr,
+    nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
 use crate::atoms::{
@@ -12,8 +11,10 @@ use crate::atoms::{
 };
 use crate::summary_mapping::session_role_atom;
 
-#[derive(Debug, Clone, PartialEq, Eq, FormalSignature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct SessionAuthState {
     accepted_sessions: RelSet<SessionAtom>,
     authenticated_roles: Relation2<SessionAtom, SessionRoleAtom>,
@@ -123,7 +124,9 @@ impl SessionAuthState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::Signature, ActionVocabulary)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, nirvash_macros::FiniteModelDomain, ActionVocabulary,
+)]
 pub enum SessionAuthAction {
     /// Accept a new session.
     AcceptSession(SessionAtom),
@@ -166,22 +169,14 @@ impl SessionAuthSpec {
     }
 }
 
-nirvash::signature_spec!(
-    SessionAuthStateSignatureSpec for SessionAuthState,
+nirvash::finite_model_domain_spec!(
+    SessionAuthStateFiniteModelDomainSpec for SessionAuthState,
     representatives = crate::state_domain::reachable_state_domain(&SessionAuthSpec::new())
 );
 
-nirvash::symbolic_state_spec!(for SessionAuthState {
-    accepted_sessions: RelSet<SessionAtom>,
-    authenticated_roles: Relation2<SessionAtom, SessionRoleAtom>,
-    timed_out_streams: RelSet<StreamAtom>,
-    closed_streams: RelSet<StreamAtom>,
-    uploaded_authorities: RelSet<RemoteAuthorityAtom>,
-});
-
-fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthAction>> {
+fn session_auth_model_cases() -> Vec<ModelInstance<SessionAuthState, SessionAuthAction>> {
     vec![
-        ModelCase::default()
+        ModelInstance::default()
             .with_label("client_rpc_surface")
             .with_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
@@ -204,7 +199,7 @@ fn session_auth_model_cases() -> Vec<ModelCase<SessionAuthState, SessionAuthActi
                 ..ModelCheckConfig::default()
             })
             .with_check_deadlocks(false),
-        ModelCase::new("timeout_and_reject_surface")
+        ModelInstance::new("timeout_and_reject_surface")
             .with_checker_config(ModelCheckConfig {
                 backend: Some(ModelBackend::Explicit),
                 exploration: nirvash::ExplorationMode::ReachableGraph,
@@ -303,11 +298,11 @@ fn authentication_progress_fairness() -> Fairness<SessionAuthState, SessionAuthA
 }
 
 #[subsystem_spec(model_cases(session_auth_model_cases))]
-impl TransitionSystem for SessionAuthSpec {
+impl FrontendSpec for SessionAuthSpec {
     type State = SessionAuthState;
     type Action = SessionAuthAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "session_auth"
     }
 

@@ -1,16 +1,20 @@
-use nirvash::{BoolExpr, Fairness, Ltl, RelSet, Signature as _, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, RelSet};
+use nirvash_lower::{FiniteModelDomain as _, FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, nirvash_expr,
+    ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelAtom, RelationalState,
+    SymbolicEncoding as FormalSymbolicEncoding, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, RelAtom)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelAtom,
+)]
 enum ServiceAtom {
     Service0,
     Service1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
 pub enum ServicePhase {
     Idle,
     Starting,
@@ -21,8 +25,10 @@ pub enum ServicePhase {
     Reaped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Signature, RelationalState)]
-#[signature(custom)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
+)]
+#[finite_model_domain(custom)]
 pub struct ServiceSupervisionState {
     active_services: RelSet<ServiceAtom>,
     ready_services: RelSet<ServiceAtom>,
@@ -48,7 +54,16 @@ impl ServiceSupervisionState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Signature, ActionVocabulary)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+    ActionVocabulary,
+)]
 pub enum ServiceSupervisionAction {
     /// Start service
     StartService,
@@ -86,17 +101,10 @@ impl ServiceSupervisionSpec {
     }
 }
 
-nirvash::signature_spec!(
-    ServiceSupervisionStateSignatureSpec for ServiceSupervisionState,
+nirvash::finite_model_domain_spec!(
+    ServiceSupervisionStateFiniteModelDomainSpec for ServiceSupervisionState,
     representatives = crate::state_domain::reachable_state_domain(&ServiceSupervisionSpec::new())
 );
-
-nirvash::symbolic_state_spec!(for ServiceSupervisionState {
-    active_services: RelSet<ServiceAtom>,
-    ready_services: RelSet<ServiceAtom>,
-    retained_logs: RelSet<ServiceAtom>,
-    phase: ServicePhase,
-});
 
 #[allow(dead_code)]
 fn service_supervision_state_valid(state: &ServiceSupervisionState) -> bool {
@@ -236,11 +244,11 @@ fn log_cleanup_progress() -> Fairness<ServiceSupervisionState, ServiceSupervisio
 }
 
 #[subsystem_spec]
-impl TransitionSystem for ServiceSupervisionSpec {
+impl FrontendSpec for ServiceSupervisionSpec {
     type State = ServiceSupervisionState;
     type Action = ServiceSupervisionAction;
 
-    fn name(&self) -> &'static str {
+    fn frontend_name(&self) -> &'static str {
         "service_supervision"
     }
 
@@ -312,6 +320,10 @@ impl TransitionSystem for ServiceSupervisionSpec {
                 set retained_logs <= RelSet::empty();
             }
         })
+    }
+
+    fn model_instances(&self) -> Vec<ModelInstance<Self::State, Self::Action>> {
+        vec![ModelInstance::default().with_check_deadlocks(false)]
     }
 }
 
