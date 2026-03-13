@@ -1,0 +1,17 @@
+listen_addr = "127.0.0.1:4444"
+control_socket_path = "/tmp/imagod-componentize-js-hono.sock"
+storage_root = ".imagod-data"
+server_version = "imagod/componentize-js-hono-example"
+
+[tls]
+server_key = "certs/server.key"
+client_public_keys = ["fcd89a1ca20df647e248b412ae08effc924ab4cde1622c6596aed291e4d22243"]
+
+[runtime]
+chunk_size = 1048576
+max_inflight_chunks = 16
+upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 300
+runner_log_buffer_bytes = 262144
+epoch_tick_interval_ms = 50

@@ -1,0 +1,78 @@
+version = 1
+
+[requested]
+fingerprint = "e21955e96dc7a4e9d685284704114e6f671c7d53dd3f0cb5e72389da32e97f50"
+dependencies = []
+
+[resolved]
+dependencies = []
+
+[[resolved.packages]]
+package_ref = "wasi:cli@0.2.6#wasi.dev"
+name = "wasi:cli"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:cli"
+path = "wit/deps/wasi-cli-0.2.6"
+digest = "sha256:db75b71f0dfc8915e5cf6534dc150ff2c9c8d509873d054d47ff1863efc4e64d"
+
+[[resolved.packages]]
+package_ref = "wasi:clocks@0.2.6#wasi.dev"
+name = "wasi:clocks"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:clocks"
+path = "wit/deps/wasi-clocks-0.2.6"
+digest = "sha256:a8251bb0878e8d546eb399c500a0e6b0f2b1cde1d16a9529a157861bd333bc5d"
+
+[[resolved.packages]]
+package_ref = "wasi:filesystem@0.2.6#wasi.dev"
+name = "wasi:filesystem"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:filesystem"
+path = "wit/deps/wasi-filesystem-0.2.6"
+digest = "sha256:6542c609ef56df7712b06f6480df33347c04173095d113f1153c6e4d78c181b9"
+
+[[resolved.packages]]
+package_ref = "wasi:http@0.2.6#wasi.dev"
+name = "wasi:http"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:http"
+path = "wit/deps/wasi-http-0.2.6"
+digest = "sha256:2d4a437f3780aad7cf0423a7e226b0befd99d3e0dc1d4341d037c23cdfb48dba"
+
+[[resolved.packages]]
+package_ref = "wasi:io@0.2.6#wasi.dev"
+name = "wasi:io"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:io"
+path = "wit/deps/wasi-io-0.2.6"
+digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
+
+[[resolved.packages]]
+package_ref = "wasi:random@0.2.6#wasi.dev"
+name = "wasi:random"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:random"
+path = "wit/deps/wasi-random-0.2.6"
+digest = "sha256:2e8a87a15b17729cb45744439d053d90e2eb282b8e26876c5d5df3504acd9d94"
+
+[[resolved.packages]]
+package_ref = "wasi:sockets@0.2.6#wasi.dev"
+name = "wasi:sockets"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
+source = "wasi:sockets"
+path = "wit/deps/wasi-sockets-0.2.6"
+digest = "sha256:42c3038a068755d15be40f627bd94d322a1156fa5e791038b47927230a808c41"

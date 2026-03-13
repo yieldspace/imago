@@ -7,7 +7,7 @@
 ## 実行
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
-あわせて OpenSSH client/server を用意し、`ssh localhost true` が対話なしで成功し、`imagod proxy-stdio --socket /tmp/imagod-local-plugin-hello.sock` を SSH ログインシェルから実行できる状態にしてください。
+`imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-local-plugin-hello.sock"` と `imagod.toml` の `control_socket_path` を一致させ、同じユーザーからその socket に接続できる状態にしてください。
 
 1. ターミナル A で `imagod` を起動します。
 

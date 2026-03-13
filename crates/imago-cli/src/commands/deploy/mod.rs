@@ -151,6 +151,11 @@ struct LocalProxyTargetSession {
     inner: tokio::sync::Mutex<ProcessIo>,
 }
 
+#[cfg(unix)]
+struct DirectSocketTargetSession {
+    socket_path: String,
+}
+
 struct ProcessIo {
     child: Option<Child>,
     stdin: ChildStdin,
@@ -200,6 +205,12 @@ struct ConnectedTargetMetadata {
     resolved_addr: String,
     configured_host: String,
     remote_input: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DefaultTargetTransportKind {
+    Ssh,
+    DirectSocket,
 }
 
 fn build_connected_target_metadata(
@@ -324,6 +335,40 @@ impl network::AdminTransport for LocalProxyTargetSession {
         on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
     ) -> anyhow::Result<StreamRequestTermination> {
         request_streamed_frames_over_local_proxy(
+            self,
+            framed,
+            open_write_timeout,
+            read_idle_timeout,
+            follow,
+            on_frame,
+        )
+        .await
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl network::AdminTransport for DirectSocketTargetSession {
+    fn close(&self) {}
+
+    async fn request_response_bytes(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_timeout: Option<Duration>,
+    ) -> anyhow::Result<Vec<u8>> {
+        request_events_over_direct_socket(self, framed, open_write_timeout, read_timeout).await
+    }
+
+    async fn stream_response_frames(
+        &self,
+        framed: &[u8],
+        open_write_timeout: Duration,
+        read_idle_timeout: Option<Duration>,
+        follow: bool,
+        on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+    ) -> anyhow::Result<StreamRequestTermination> {
+        request_streamed_frames_over_direct_socket(
             self,
             framed,
             open_write_timeout,
@@ -1102,6 +1147,18 @@ fn contains_unauthorized_marker(err: &anyhow::Error) -> bool {
 pub(crate) async fn connect_target(
     target: &build::DeployTargetConfig,
 ) -> anyhow::Result<ConnectedTargetSession> {
+    match default_target_transport_kind(&target.ssh_remote) {
+        DefaultTargetTransportKind::Ssh => connect_ssh_target_only(target).await,
+        #[cfg(unix)]
+        DefaultTargetTransportKind::DirectSocket => connect_direct_socket_target(target),
+        #[cfg(not(unix))]
+        DefaultTargetTransportKind::DirectSocket => unreachable!("direct sockets are unix-only"),
+    }
+}
+
+pub(crate) async fn connect_ssh_target_only(
+    target: &build::DeployTargetConfig,
+) -> anyhow::Result<ConnectedTargetSession> {
     connect_ssh_target(target, &target.ssh_remote).await
 }
 
@@ -1123,6 +1180,27 @@ async fn connect_ssh_target(
             remote: remote.clone(),
             remote_input: target.remote.clone(),
             inner: tokio::sync::Mutex::new(process_io),
+        }),
+        authority: metadata.authority,
+        resolved_addr: metadata.resolved_addr,
+        configured_host: metadata.configured_host,
+        remote_input: metadata.remote_input,
+    })
+}
+
+#[cfg(unix)]
+fn connect_direct_socket_target(
+    target: &build::DeployTargetConfig,
+) -> anyhow::Result<ConnectedTargetSession> {
+    let socket_path = required_direct_socket_path(&target.ssh_remote)?;
+    let authority = format_ssh_authority(&target.ssh_remote);
+    let resolved_addr = format!("local-socket:{socket_path}");
+    let metadata =
+        build_connected_target_metadata(target, &target.ssh_remote.host, &authority, resolved_addr);
+
+    Ok(ConnectedTargetSession {
+        transport: Arc::new(DirectSocketTargetSession {
+            socket_path: socket_path.to_string(),
         }),
         authority: metadata.authority,
         resolved_addr: metadata.resolved_addr,
@@ -1156,13 +1234,43 @@ pub(crate) fn connect_local_proxy_target(
     })
 }
 
-fn required_local_proxy_socket_path(remote: &build::SshTargetRemote) -> anyhow::Result<&str> {
-    if !matches!(
-        remote.host.as_str(),
-        "localhost" | "127.0.0.1" | "::1" | "[::1]"
-    ) {
+pub(crate) fn default_target_transport_kind(
+    remote: &build::SshTargetRemote,
+) -> DefaultTargetTransportKind {
+    if should_use_direct_socket_target(remote) {
+        DefaultTargetTransportKind::DirectSocket
+    } else {
+        DefaultTargetTransportKind::Ssh
+    }
+}
+
+fn should_use_direct_socket_target(remote: &build::SshTargetRemote) -> bool {
+    #[cfg(unix)]
+    {
+        is_loopback_ssh_target_host(&remote.host)
+            && remote.user.is_none()
+            && remote.port.is_none()
+            && remote.socket_path.is_some()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = remote;
+        false
+    }
+}
+
+fn is_loopback_ssh_target_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn required_loopback_socket_path<'a>(
+    remote: &'a build::SshTargetRemote,
+    connector_label: &str,
+) -> anyhow::Result<&'a str> {
+    if !is_loopback_ssh_target_host(&remote.host) {
         return Err(anyhow!(
-            "local proxy connector only supports loopback ssh targets, got '{}'",
+            "{connector_label} only supports loopback ssh targets, got '{}'",
             remote.host
         ));
     }
@@ -1170,7 +1278,21 @@ fn required_local_proxy_socket_path(remote: &build::SshTargetRemote) -> anyhow::
     remote
         .socket_path
         .as_deref()
-        .ok_or_else(|| anyhow!("local proxy connector requires ?socket=/abs/path"))
+        .ok_or_else(|| anyhow!("{connector_label} requires ?socket=/abs/path"))
+}
+
+fn required_local_proxy_socket_path(remote: &build::SshTargetRemote) -> anyhow::Result<&str> {
+    required_loopback_socket_path(remote, "local proxy connector")
+}
+
+#[cfg(unix)]
+fn required_direct_socket_path(remote: &build::SshTargetRemote) -> anyhow::Result<&str> {
+    if remote.user.is_some() || remote.port.is_some() {
+        return Err(anyhow!(
+            "direct socket connector only supports loopback ssh targets without user/port overrides"
+        ));
+    }
+    required_loopback_socket_path(remote, "direct socket connector")
 }
 
 fn spawn_ssh_proxy_process(
@@ -1726,6 +1848,93 @@ async fn request_events_over_local_proxy(
     }
 }
 
+#[cfg(unix)]
+async fn connect_direct_socket_with_timeout(
+    session: &DirectSocketTargetSession,
+    open_write_timeout: Duration,
+) -> anyhow::Result<tokio::net::UnixStream> {
+    tokio::time::timeout(
+        open_write_timeout,
+        tokio::net::UnixStream::connect(&session.socket_path),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "local socket transport connect timed out after {} ms",
+            open_write_timeout.as_millis()
+        )
+    })?
+    .with_context(|| {
+        format!(
+            "local socket transport connect failed for {}",
+            session.socket_path
+        )
+    })
+}
+
+#[cfg(unix)]
+async fn request_events_over_direct_socket(
+    session: &DirectSocketTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_timeout: Option<Duration>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut stream = connect_direct_socket_with_timeout(session, open_write_timeout).await?;
+    tokio::time::timeout(open_write_timeout, stream.write_all(framed))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local socket transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+    tokio::time::timeout(
+        open_write_timeout,
+        stream.write_all(&STDIO_MESSAGE_TERMINATOR),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "local socket transport write timed out after {} ms",
+            open_write_timeout.as_millis()
+        )
+    })??;
+    tokio::time::timeout(open_write_timeout, stream.flush())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local socket transport flush timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+
+    // Local control socket requests are stdio-terminated, but responses finish on EOF.
+    // `imagod proxy-stdio` is the adapter that converts socket EOF into a stdio terminator.
+    match read_timeout {
+        Some(read_timeout) => {
+            match tokio::time::timeout(
+                read_timeout,
+                read_direct_socket_response_message_with_label(
+                    &mut stream,
+                    "local socket transport",
+                ),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!(
+                    "local socket transport read timed out after {} ms",
+                    read_timeout.as_millis()
+                )),
+            }
+        }
+        None => {
+            read_direct_socket_response_message_with_label(&mut stream, "local socket transport")
+                .await
+        }
+    }
+}
+
 async fn request_streamed_frames_over_ssh(
     session: &SshTargetSession,
     framed: &[u8],
@@ -1920,6 +2129,113 @@ async fn request_streamed_frames_over_local_proxy(
     }
 }
 
+#[cfg(unix)]
+async fn request_streamed_frames_over_direct_socket(
+    session: &DirectSocketTargetSession,
+    framed: &[u8],
+    open_write_timeout: Duration,
+    read_idle_timeout: Option<Duration>,
+    follow: bool,
+    on_frame: &mut (dyn FnMut(Vec<u8>) -> anyhow::Result<bool> + Send),
+) -> anyhow::Result<StreamRequestTermination> {
+    let mut stream = connect_direct_socket_with_timeout(session, open_write_timeout).await?;
+    tokio::time::timeout(open_write_timeout, stream.write_all(framed))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local socket transport write timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+    tokio::time::timeout(
+        open_write_timeout,
+        stream.write_all(&STDIO_MESSAGE_TERMINATOR),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "local socket transport write timed out after {} ms",
+            open_write_timeout.as_millis()
+        )
+    })??;
+    tokio::time::timeout(open_write_timeout, stream.flush())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "local socket transport flush timed out after {} ms",
+                open_write_timeout.as_millis()
+            )
+        })??;
+
+    loop {
+        let next = if follow {
+            tokio::select! {
+                frame = read_next_direct_socket_response_frame_with_label(&mut stream, "local socket transport") => Some(frame),
+                _ = tokio::signal::ctrl_c() => None,
+            }
+        } else if let Some(read_idle_timeout) = read_idle_timeout {
+            match tokio::time::timeout(
+                read_idle_timeout,
+                read_next_direct_socket_response_frame_with_label(
+                    &mut stream,
+                    "local socket transport",
+                ),
+            )
+            .await
+            {
+                Ok(result) => Some(result),
+                Err(_) => {
+                    return Err(anyhow!(
+                        "local socket transport read timed out after {} ms",
+                        read_idle_timeout.as_millis()
+                    ));
+                }
+            }
+        } else {
+            Some(
+                read_next_direct_socket_response_frame_with_label(
+                    &mut stream,
+                    "local socket transport",
+                )
+                .await,
+            )
+        };
+        let Some(next) = next else {
+            return Ok(StreamRequestTermination::Interrupted);
+        };
+        let Some(frame) = next? else {
+            return Ok(StreamRequestTermination::Completed);
+        };
+        if on_frame(frame)? {
+            return Ok(StreamRequestTermination::Completed);
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn read_direct_socket_response_message_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut out = Vec::new();
+    loop {
+        let Some(payload_len) =
+            read_next_direct_socket_response_frame_len_with_label(reader, transport_label).await?
+        else {
+            break;
+        };
+        ensure_stdio_response_message_growth_with_label(out.len(), payload_len, transport_label)?;
+        let payload =
+            read_direct_socket_response_payload_with_label(reader, payload_len, transport_label)
+                .await?;
+        out.extend_from_slice(&encode_frame(&payload));
+    }
+    Ok(out)
+}
+
 async fn read_stdio_response_message_with_label<R>(
     reader: &mut R,
     transport_label: &str,
@@ -2004,6 +2320,58 @@ where
         .await
 }
 
+#[cfg(unix)]
+async fn read_next_direct_socket_response_frame_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(payload_len) =
+        read_next_direct_socket_response_frame_len_with_label(reader, transport_label).await?
+    else {
+        return Ok(None);
+    };
+    let payload =
+        read_direct_socket_response_payload_with_label(reader, payload_len, transport_label)
+            .await?;
+    Ok(Some(payload))
+}
+
+#[cfg(unix)]
+async fn read_next_direct_socket_response_frame_len_with_label<R>(
+    reader: &mut R,
+    transport_label: &str,
+) -> anyhow::Result<Option<usize>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut header = [0u8; 4];
+    let mut read = 0usize;
+    while read < header.len() {
+        match reader.read(&mut header[read..]).await {
+            Ok(0) if read == 0 => return Ok(None),
+            Ok(0) => {
+                return Err(anyhow!(
+                    "{transport_label} closed in the middle of a response"
+                ));
+            }
+            Ok(chunk) => {
+                read = read.saturating_add(chunk);
+            }
+            Err(err) => return Err(anyhow::Error::from(err)),
+        }
+    }
+
+    let len = u32::from_be_bytes(header) as usize;
+    if len == 0 {
+        return Ok(None);
+    }
+    ensure_stdio_response_frame_len_with_label(len, transport_label)?;
+    Ok(Some(len))
+}
+
 async fn read_next_stdio_response_frame_with_label<R>(
     reader: &mut R,
     transport_label: &str,
@@ -2021,6 +2389,33 @@ where
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
     Ok(Some(payload))
+}
+
+#[cfg(unix)]
+async fn read_direct_socket_response_payload_with_label<R>(
+    reader: &mut R,
+    len: usize,
+    transport_label: &str,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut payload = vec![0u8; len];
+    let mut read = 0usize;
+    while read < len {
+        match reader.read(&mut payload[read..]).await {
+            Ok(0) => {
+                return Err(anyhow!(
+                    "{transport_label} closed in the middle of a response"
+                ));
+            }
+            Ok(chunk) => {
+                read = read.saturating_add(chunk);
+            }
+            Err(err) => return Err(anyhow::Error::from(err)),
+        }
+    }
+    Ok(payload)
 }
 
 fn ensure_stdio_response_frame_len_with_label(
@@ -2583,6 +2978,7 @@ fn decode_frames(value: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {
 mod tests {
     use super::*;
     use crate::commands::dependency_cache;
+    use crate::commands::deploy::network::AdminTransport as _;
     use crate::commands::error_diagnostics::format_command_error;
     use crate::lockfile::{
         ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
@@ -2598,6 +2994,8 @@ mod tests {
         },
         time::Duration,
     };
+    #[cfg(unix)]
+    use tokio::{io::AsyncWriteExt, net::UnixListener};
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -2613,6 +3011,12 @@ mod tests {
             fs::create_dir_all(parent).expect("parent dir should be created");
         }
         fs::write(path, bytes).expect("file should be written");
+    }
+
+    #[cfg(unix)]
+    fn new_temp_socket_path(test_name: &str) -> PathBuf {
+        let _ = test_name;
+        PathBuf::from(format!("/tmp/imago-{}.sock", Uuid::new_v4().simple()))
     }
 
     struct CountingTransport {
@@ -2910,6 +3314,315 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("only supports loopback ssh targets")
+        );
+    }
+
+    #[test]
+    fn default_target_transport_kind_uses_direct_socket_only_for_loopback_without_user_or_port() {
+        let loopback = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let ipv4 = build::SshTargetRemote {
+            user: None,
+            host: "127.0.0.1".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let ipv6 = build::SshTargetRemote {
+            user: None,
+            host: "::1".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let bracketed_ipv6 = build::SshTargetRemote {
+            user: None,
+            host: "[::1]".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let with_user = build::SshTargetRemote {
+            user: Some("root".to_string()),
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let with_port = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: Some(2222),
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let missing_socket = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: None,
+        };
+        let remote_host = build::SshTargetRemote {
+            user: None,
+            host: "edge.example.com".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                default_target_transport_kind(&loopback),
+                DefaultTargetTransportKind::DirectSocket
+            );
+            assert_eq!(
+                default_target_transport_kind(&ipv4),
+                DefaultTargetTransportKind::DirectSocket
+            );
+            assert_eq!(
+                default_target_transport_kind(&ipv6),
+                DefaultTargetTransportKind::DirectSocket
+            );
+            assert_eq!(
+                default_target_transport_kind(&bracketed_ipv6),
+                DefaultTargetTransportKind::DirectSocket
+            );
+        }
+
+        #[cfg(not(unix))]
+        {
+            assert_eq!(
+                default_target_transport_kind(&loopback),
+                DefaultTargetTransportKind::Ssh
+            );
+            assert_eq!(
+                default_target_transport_kind(&ipv4),
+                DefaultTargetTransportKind::Ssh
+            );
+            assert_eq!(
+                default_target_transport_kind(&ipv6),
+                DefaultTargetTransportKind::Ssh
+            );
+            assert_eq!(
+                default_target_transport_kind(&bracketed_ipv6),
+                DefaultTargetTransportKind::Ssh
+            );
+        }
+
+        assert_eq!(
+            default_target_transport_kind(&with_user),
+            DefaultTargetTransportKind::Ssh
+        );
+        assert_eq!(
+            default_target_transport_kind(&with_port),
+            DefaultTargetTransportKind::Ssh
+        );
+        assert_eq!(
+            default_target_transport_kind(&missing_socket),
+            DefaultTargetTransportKind::Ssh
+        );
+        assert_eq!(
+            default_target_transport_kind(&remote_host),
+            DefaultTargetTransportKind::Ssh
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_direct_socket_path_rejects_user_or_port_overrides() {
+        let with_user = build::SshTargetRemote {
+            user: Some("root".to_string()),
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let with_port = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: Some(2222),
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        let user_err = required_direct_socket_path(&with_user)
+            .expect_err("direct socket connector must reject user override");
+        assert!(user_err.to_string().contains("without user/port overrides"));
+
+        let port_err = required_direct_socket_path(&with_port)
+            .expect_err("direct socket connector must reject port override");
+        assert!(port_err.to_string().contains("without user/port overrides"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_socket_request_response_bytes_uses_framed_protocol() {
+        let socket_path = new_temp_socket_path("direct-request-response");
+        let listener =
+            UnixListener::bind(&socket_path).expect("test unix listener should bind successfully");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            let request = read_stdio_response_message_with_label(&mut stream, "test server")
+                .await
+                .expect("server should read framed request");
+            stream
+                .write_all(&encode_frame(b"reply-frame"))
+                .await
+                .expect("server should write response frame");
+            stream.flush().await.expect("server should flush response");
+            request
+        });
+
+        let session = DirectSocketTargetSession {
+            socket_path: socket_path.display().to_string(),
+        };
+        let request = encode_frame(b"request-frame");
+        let response = session
+            .request_response_bytes(
+                &request,
+                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect("direct socket request should succeed");
+
+        assert_eq!(
+            server.await.expect("server task should complete"),
+            request,
+            "server should receive the exact framed request"
+        );
+        assert_eq!(response, encode_frame(b"reply-frame"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_socket_stream_response_frames_reads_multiple_frames() {
+        let socket_path = new_temp_socket_path("direct-stream-frames");
+        let listener =
+            UnixListener::bind(&socket_path).expect("test unix listener should bind successfully");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            let request = read_stdio_response_message_with_label(&mut stream, "test server")
+                .await
+                .expect("server should read framed request");
+            for frame in [b"frame-a".as_slice(), b"frame-b".as_slice()] {
+                stream
+                    .write_all(&encode_frame(frame))
+                    .await
+                    .expect("server should write response frame");
+            }
+            stream.flush().await.expect("server should flush response");
+            request
+        });
+
+        let session = DirectSocketTargetSession {
+            socket_path: socket_path.display().to_string(),
+        };
+        let request = encode_frame(b"stream-request");
+        let mut frames = Vec::new();
+        let termination = session
+            .stream_response_frames(
+                &request,
+                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
+                true,
+                &mut |frame| {
+                    frames.push(frame);
+                    Ok(false)
+                },
+            )
+            .await
+            .expect("direct socket stream should succeed");
+
+        assert_eq!(
+            server.await.expect("server task should complete"),
+            request,
+            "server should receive the exact framed request"
+        );
+        assert_eq!(termination, StreamRequestTermination::Completed);
+        assert_eq!(frames, vec![b"frame-a".to_vec(), b"frame-b".to_vec()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_socket_request_response_rejects_truncated_header() {
+        let socket_path = new_temp_socket_path("direct-truncated-header");
+        let listener =
+            UnixListener::bind(&socket_path).expect("test unix listener should bind successfully");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            let _request = read_stdio_response_message_with_label(&mut stream, "test server")
+                .await
+                .expect("server should read framed request");
+            stream
+                .write_all(&[0x00, 0x00])
+                .await
+                .expect("server should write partial header");
+            stream
+                .flush()
+                .await
+                .expect("server should flush partial header");
+        });
+
+        let session = DirectSocketTargetSession {
+            socket_path: socket_path.display().to_string(),
+        };
+        let request = encode_frame(b"request-frame");
+        let err = session
+            .request_response_bytes(
+                &request,
+                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect_err("truncated header must fail");
+
+        server.await.expect("server task should complete");
+        assert!(
+            err.to_string()
+                .contains("closed in the middle of a response")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_socket_request_response_rejects_truncated_payload() {
+        let socket_path = new_temp_socket_path("direct-truncated-payload");
+        let listener =
+            UnixListener::bind(&socket_path).expect("test unix listener should bind successfully");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("server should accept");
+            let _request = read_stdio_response_message_with_label(&mut stream, "test server")
+                .await
+                .expect("server should read framed request");
+            stream
+                .write_all(&4u32.to_be_bytes())
+                .await
+                .expect("server should write frame header");
+            stream
+                .write_all(&[0x01, 0x02])
+                .await
+                .expect("server should write partial payload");
+            stream
+                .flush()
+                .await
+                .expect("server should flush partial payload");
+        });
+
+        let session = DirectSocketTargetSession {
+            socket_path: socket_path.display().to_string(),
+        };
+        let request = encode_frame(b"request-frame");
+        let err = session
+            .request_response_bytes(
+                &request,
+                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect_err("truncated payload must fail");
+
+        server.await.expect("server task should complete");
+        assert!(
+            err.to_string()
+                .contains("closed in the middle of a response")
         );
     }
 
