@@ -359,7 +359,7 @@ where
     Spec: ProtocolConformanceSpec,
 {
     let projected = spec.abstract_state(summary);
-    <Spec as FrontendSpec>::transition(spec, &projected, action).is_some()
+    !<Spec as FrontendSpec>::transition_relation(spec, &projected, action).is_empty()
 }
 
 struct SummaryRefinementMap<'a, Spec>(&'a Spec);
@@ -438,6 +438,22 @@ where
     })
 }
 
+pub fn step_refines_summary<Spec>(
+    spec: &Spec,
+    before_summary: &Spec::SummaryState,
+    action: &Spec::Action,
+    after_summary: &Spec::SummaryState,
+) -> Result<
+    StepRefinementWitness<Spec::State, Spec::Action>,
+    StepRefinementError<Spec::State, Spec::Action>,
+>
+where
+    Spec: ProtocolConformanceSpec,
+{
+    let map = SummaryRefinementMap(spec);
+    step_refines_relation(spec, &map, before_summary, action, &(), after_summary, &())
+}
+
 pub fn assert_initial_refinement<Spec>(spec: &Spec, summary: &Spec::SummaryState)
 where
     Spec: ProtocolConformanceSpec,
@@ -463,8 +479,7 @@ where
     Spec: ProtocolConformanceSpec,
     Spec::State: PartialEq,
 {
-    let map = SummaryRefinementMap(spec);
-    step_refines_relation(spec, &map, before_summary, action, &(), after_summary, &())
+    step_refines_summary(spec, before_summary, action, after_summary)
         .unwrap_or_else(|error| {
             panic!("step refinement failed for {action:?} from {before_summary:?}: {error}")
         })
@@ -768,6 +783,38 @@ mod tests {
         }
     }
 
+    impl ProtocolConformanceSpec for RelationDemoSpec {
+        type ExpectedOutput = ();
+        type ProbeState = DemoState;
+        type ProbeOutput = ();
+        type SummaryState = DemoState;
+        type SummaryOutput = ();
+
+        fn expected_output(
+            &self,
+            _prev: &Self::State,
+            _action: &Self::Action,
+            _next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+        }
+
+        fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+            probe.clone()
+        }
+
+        fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+            *probe
+        }
+
+        fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+            summary.clone()
+        }
+
+        fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+            *summary
+        }
+    }
+
     #[derive(Debug, Clone, Copy, Default)]
     struct IdentityRefinementMap;
 
@@ -846,6 +893,55 @@ mod tests {
                 abstract_before: DemoState::Start,
                 chosen_action: DemoAction::Branch,
                 abstract_after: DemoState::Right,
+            }
+        );
+    }
+
+    #[test]
+    fn enabled_from_summary_accepts_multi_successor_transition() {
+        assert!(enabled_from_summary(
+            &RelationDemoSpec,
+            &DemoState::Start,
+            &DemoAction::Branch,
+        ));
+    }
+
+    #[test]
+    fn step_refines_summary_returns_relation_witness() {
+        let witness = step_refines_summary(
+            &DeterministicDemoSpec,
+            &DemoState::Start,
+            &DemoAction::Advance,
+            &DemoState::Next,
+        )
+        .expect("summary-based helper should refine deterministic transition");
+
+        assert_eq!(
+            witness,
+            StepRefinementWitness {
+                abstract_before: DemoState::Start,
+                chosen_action: DemoAction::Advance,
+                abstract_after: DemoState::Next,
+            }
+        );
+    }
+
+    #[test]
+    fn step_refines_summary_reports_mismatch() {
+        let error = step_refines_summary(
+            &DeterministicDemoSpec,
+            &DemoState::Start,
+            &DemoAction::Advance,
+            &DemoState::Invalid,
+        )
+        .expect_err("summary-based helper should reject mismatched target state");
+
+        assert_eq!(
+            error,
+            StepRefinementError::NoMatchingAbstractSuccessor {
+                abstract_before: DemoState::Start,
+                abstract_after: DemoState::Invalid,
+                candidate_actions: vec![DemoAction::Advance],
             }
         );
     }
