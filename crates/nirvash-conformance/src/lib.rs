@@ -2,7 +2,7 @@ use std::{fmt::Debug, panic::AssertUnwindSafe, process};
 
 use nirvash::{IntoBoundedDomain, into_bounded_domain};
 pub use nirvash::{ReachableGraphSnapshot, inventory};
-pub use nirvash_lower::{FrontendSpec, ModelInstance, Trace};
+pub use nirvash_lower::{FrontendSpec, ModelInstance, Trace, TraceStep};
 
 #[allow(async_fn_in_trait)]
 pub trait ActionApplier {
@@ -130,6 +130,242 @@ where
 }
 
 impl<S, A> std::error::Error for StepRefinementError<S, A>
+where
+    S: Debug,
+    A: Debug,
+{
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservedEvent<A, SummaryOutput> {
+    Action { action: A, output: SummaryOutput },
+    Stutter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedTrace<SummaryState, A, SummaryOutput> {
+    states: Vec<SummaryState>,
+    events: Vec<ObservedEvent<A, SummaryOutput>>,
+    loop_start: usize,
+}
+
+impl<SummaryState, A, SummaryOutput> ObservedTrace<SummaryState, A, SummaryOutput> {
+    pub fn new(
+        states: Vec<SummaryState>,
+        events: Vec<ObservedEvent<A, SummaryOutput>>,
+        loop_start: usize,
+    ) -> Self {
+        Self {
+            states,
+            events,
+            loop_start,
+        }
+    }
+
+    pub fn terminal(states: Vec<SummaryState>, action_events: Vec<(A, SummaryOutput)>) -> Self {
+        assert!(
+            !states.is_empty(),
+            "observed terminal traces require at least one state"
+        );
+        assert_eq!(
+            states.len(),
+            action_events.len() + 1,
+            "observed terminal traces require exactly one more state than action events",
+        );
+        let mut events = action_events
+            .into_iter()
+            .map(|(action, output)| ObservedEvent::Action { action, output })
+            .collect::<Vec<_>>();
+        events.push(ObservedEvent::Stutter);
+        let loop_start = states.len() - 1;
+        Self::new(states, events, loop_start)
+    }
+
+    pub fn states(&self) -> &[SummaryState] {
+        &self.states
+    }
+
+    pub fn events(&self) -> &[ObservedEvent<A, SummaryOutput>] {
+        &self.events
+    }
+
+    pub const fn loop_start(&self) -> usize {
+        self.loop_start
+    }
+
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
+    pub fn next_index(&self, index: usize) -> usize {
+        if index + 1 < self.states.len() {
+            index + 1
+        } else {
+            self.loop_start
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceStepRefinementWitness<S, A> {
+    pub index: usize,
+    pub abstract_before: S,
+    pub step: TraceStep<A>,
+    pub abstract_after: S,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceRefinementWitness<S, A> {
+    pub abstract_trace: Trace<S, A>,
+    pub steps: Vec<TraceStepRefinementWitness<S, A>>,
+    pub model_case_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceRefinementError<S, A> {
+    InitialStateMismatch {
+        model_case_label: String,
+        observed_initial: S,
+        abstract_initial: S,
+        candidate_trace: Option<Trace<S, A>>,
+    },
+    ShapeMismatch {
+        model_case_label: String,
+        detail: String,
+        candidate_trace: Option<Trace<S, A>>,
+    },
+    StepMismatch {
+        model_case_label: String,
+        index: usize,
+        matching_prefix_len: usize,
+        step: TraceStep<A>,
+        abstract_before: S,
+        abstract_after: S,
+        expected_after: S,
+        detail: String,
+        refinement_error: Option<StepRefinementError<S, A>>,
+        candidate_trace: Option<Trace<S, A>>,
+    },
+    StutterMismatch {
+        model_case_label: String,
+        index: usize,
+        matching_prefix_len: usize,
+        abstract_before: S,
+        abstract_after: S,
+        detail: String,
+        candidate_trace: Option<Trace<S, A>>,
+    },
+    SearchFailed {
+        model_case_label: String,
+        detail: String,
+    },
+    NoMatchingExplicitCandidate {
+        model_case_label: String,
+        matching_prefix_len: usize,
+        candidate_trace: Option<Trace<S, A>>,
+        failure: Box<TraceRefinementError<S, A>>,
+    },
+}
+
+impl<S, A> TraceRefinementError<S, A> {
+    fn failing_index(&self) -> Option<usize> {
+        match self {
+            Self::StepMismatch { index, .. } | Self::StutterMismatch { index, .. } => Some(*index),
+            Self::NoMatchingExplicitCandidate { failure, .. } => failure.failing_index(),
+            _ => None,
+        }
+    }
+}
+
+impl<S, A> std::fmt::Display for TraceRefinementError<S, A>
+where
+    S: Debug,
+    A: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InitialStateMismatch {
+                model_case_label,
+                observed_initial,
+                abstract_initial,
+                candidate_trace,
+            } => write!(
+                f,
+                "model case `{model_case_label}` initial state mismatch: observed {:?}, candidate {:?}, candidate trace {:?}",
+                observed_initial, abstract_initial, candidate_trace
+            ),
+            Self::ShapeMismatch {
+                model_case_label,
+                detail,
+                candidate_trace,
+            } => write!(
+                f,
+                "model case `{model_case_label}` trace shape mismatch: {detail}; candidate trace {:?}",
+                candidate_trace
+            ),
+            Self::StepMismatch {
+                model_case_label,
+                index,
+                matching_prefix_len,
+                step,
+                abstract_before,
+                abstract_after,
+                expected_after,
+                detail,
+                refinement_error,
+                candidate_trace,
+            } => write!(
+                f,
+                "model case `{model_case_label}` failed at step {index} after matching {matching_prefix_len} steps: candidate step {:?} from {:?} expected {:?}, observed {:?}; {}; refinement error: {:?}; candidate trace {:?}",
+                step,
+                abstract_before,
+                expected_after,
+                abstract_after,
+                detail,
+                refinement_error,
+                candidate_trace
+            ),
+            Self::StutterMismatch {
+                model_case_label,
+                index,
+                matching_prefix_len,
+                abstract_before,
+                abstract_after,
+                detail,
+                candidate_trace,
+            } => write!(
+                f,
+                "model case `{model_case_label}` stutter mismatch at step {index} after matching {matching_prefix_len} steps: before {:?}, after {:?}; {}; candidate trace {:?}",
+                abstract_before, abstract_after, detail, candidate_trace
+            ),
+            Self::SearchFailed {
+                model_case_label,
+                detail,
+            } => write!(
+                f,
+                "model case `{model_case_label}` candidate search failed: {detail}"
+            ),
+            Self::NoMatchingExplicitCandidate {
+                model_case_label,
+                matching_prefix_len,
+                candidate_trace,
+                failure,
+            } => write!(
+                f,
+                "model case `{model_case_label}` found no matching explicit candidate after matching {matching_prefix_len} steps; failing index {:?}; candidate trace {:?}; cause: {}",
+                failure.failing_index(),
+                candidate_trace,
+                failure
+            ),
+        }
+    }
+}
+
+impl<S, A> std::error::Error for TraceRefinementError<S, A>
 where
     S: Debug,
     A: Debug,
@@ -506,6 +742,277 @@ pub fn assert_output_refinement<Spec>(
     );
 }
 
+fn trace_refines_summary_with_label<Spec>(
+    spec: &Spec,
+    observed: &ObservedTrace<Spec::SummaryState, Spec::Action, Spec::SummaryOutput>,
+    abstract_trace: &Trace<Spec::State, Spec::Action>,
+    model_case_label: String,
+) -> Result<
+    TraceRefinementWitness<Spec::State, Spec::Action>,
+    TraceRefinementError<Spec::State, Spec::Action>,
+>
+where
+    Spec: ProtocolConformanceSpec,
+    Spec::State: PartialEq,
+{
+    let candidate_trace = abstract_trace.clone();
+    let candidate_trace_option =
+        |candidate_trace: &Trace<Spec::State, Spec::Action>| Some(candidate_trace.clone());
+    let shape_error = |detail: String| TraceRefinementError::ShapeMismatch {
+        model_case_label: model_case_label.clone(),
+        detail,
+        candidate_trace: candidate_trace_option(&candidate_trace),
+    };
+
+    if observed.is_empty() {
+        return Err(shape_error("observed trace has no states".to_owned()));
+    }
+    if observed.events().len() != observed.states().len() {
+        return Err(shape_error(format!(
+            "observed trace has {} states but {} events",
+            observed.states().len(),
+            observed.events().len()
+        )));
+    }
+    if observed.loop_start() >= observed.states().len() {
+        return Err(shape_error(format!(
+            "observed loop_start {} is outside state length {}",
+            observed.loop_start(),
+            observed.states().len()
+        )));
+    }
+    if observed.states().len() != abstract_trace.states().len() {
+        return Err(shape_error(format!(
+            "observed trace has {} states but candidate has {}",
+            observed.states().len(),
+            abstract_trace.states().len()
+        )));
+    }
+    if observed.events().len() != abstract_trace.steps().len() {
+        return Err(shape_error(format!(
+            "observed trace has {} events but candidate has {} steps",
+            observed.events().len(),
+            abstract_trace.steps().len()
+        )));
+    }
+    if observed.loop_start() != abstract_trace.loop_start() {
+        return Err(shape_error(format!(
+            "observed loop_start {} does not match candidate loop_start {}",
+            observed.loop_start(),
+            abstract_trace.loop_start()
+        )));
+    }
+
+    let observed_initial = spec.abstract_state(&observed.states()[0]);
+    let abstract_initial = abstract_trace.states()[0].clone();
+    if observed_initial != abstract_initial {
+        return Err(TraceRefinementError::InitialStateMismatch {
+            model_case_label,
+            observed_initial,
+            abstract_initial,
+            candidate_trace: candidate_trace_option(&candidate_trace),
+        });
+    }
+
+    let mut step_witnesses = Vec::with_capacity(observed.events().len());
+    for index in 0..observed.events().len() {
+        let step = abstract_trace.steps()[index].clone();
+        let abstract_before = abstract_trace.states()[index].clone();
+        let expected_after = abstract_trace.states()[abstract_trace.next_index(index)].clone();
+        let observed_before = spec.abstract_state(&observed.states()[index]);
+        let observed_after_summary = &observed.states()[observed.next_index(index)];
+        let observed_after = spec.abstract_state(observed_after_summary);
+
+        if observed_before != abstract_before {
+            return Err(TraceRefinementError::StepMismatch {
+                model_case_label: model_case_label.clone(),
+                index,
+                matching_prefix_len: index,
+                step,
+                abstract_before,
+                abstract_after: observed_before,
+                expected_after,
+                detail: "observed abstract state does not match candidate prefix state".to_owned(),
+                refinement_error: None,
+                candidate_trace: candidate_trace_option(&candidate_trace),
+            });
+        }
+
+        match (&abstract_trace.steps()[index], &observed.events()[index]) {
+            (TraceStep::Action(expected_action), ObservedEvent::Action { action, output }) => {
+                if action != expected_action {
+                    return Err(TraceRefinementError::StepMismatch {
+                        model_case_label: model_case_label.clone(),
+                        index,
+                        matching_prefix_len: index,
+                        step: TraceStep::Action(expected_action.clone()),
+                        abstract_before,
+                        abstract_after: observed_after,
+                        expected_after,
+                        detail: "observed action does not match candidate action".to_owned(),
+                        refinement_error: None,
+                        candidate_trace: candidate_trace_option(&candidate_trace),
+                    });
+                }
+
+                let refinement = step_refines_summary(
+                    spec,
+                    &observed.states()[index],
+                    action,
+                    observed_after_summary,
+                )
+                .map_err(|error| TraceRefinementError::StepMismatch {
+                    model_case_label: model_case_label.clone(),
+                    index,
+                    matching_prefix_len: index,
+                    step: TraceStep::Action(expected_action.clone()),
+                    abstract_before: abstract_before.clone(),
+                    abstract_after: observed_after.clone(),
+                    expected_after: expected_after.clone(),
+                    detail: "summary step does not refine candidate transition".to_owned(),
+                    refinement_error: Some(error),
+                    candidate_trace: candidate_trace_option(&candidate_trace),
+                })?;
+
+                if refinement.abstract_after != expected_after {
+                    return Err(TraceRefinementError::StepMismatch {
+                        model_case_label: model_case_label.clone(),
+                        index,
+                        matching_prefix_len: index,
+                        step: TraceStep::Action(expected_action.clone()),
+                        abstract_before,
+                        abstract_after: refinement.abstract_after,
+                        expected_after,
+                        detail: "observed abstract successor does not match candidate successor"
+                            .to_owned(),
+                        refinement_error: None,
+                        candidate_trace: candidate_trace_option(&candidate_trace),
+                    });
+                }
+
+                let expected_output = spec.expected_output(
+                    &refinement.abstract_before,
+                    expected_action,
+                    Some(&expected_after),
+                );
+                let observed_output = spec.abstract_output(output);
+                if observed_output != expected_output {
+                    return Err(TraceRefinementError::StepMismatch {
+                        model_case_label: model_case_label.clone(),
+                        index,
+                        matching_prefix_len: index,
+                        step: TraceStep::Action(expected_action.clone()),
+                        abstract_before: refinement.abstract_before,
+                        abstract_after: refinement.abstract_after,
+                        expected_after,
+                        detail: format!(
+                            "expected output {:?} but observed {:?}",
+                            expected_output, observed_output
+                        ),
+                        refinement_error: None,
+                        candidate_trace: candidate_trace_option(&candidate_trace),
+                    });
+                }
+
+                step_witnesses.push(TraceStepRefinementWitness {
+                    index,
+                    abstract_before: refinement.abstract_before,
+                    step: TraceStep::Action(expected_action.clone()),
+                    abstract_after: refinement.abstract_after,
+                });
+            }
+            (TraceStep::Action(expected_action), ObservedEvent::Stutter) => {
+                return Err(TraceRefinementError::StepMismatch {
+                    model_case_label: model_case_label.clone(),
+                    index,
+                    matching_prefix_len: index,
+                    step: TraceStep::Action(expected_action.clone()),
+                    abstract_before,
+                    abstract_after: observed_after,
+                    expected_after,
+                    detail: "observed stutter does not match candidate action".to_owned(),
+                    refinement_error: None,
+                    candidate_trace: candidate_trace_option(&candidate_trace),
+                });
+            }
+            (TraceStep::Stutter, ObservedEvent::Action { action: _, .. }) => {
+                return Err(TraceRefinementError::StutterMismatch {
+                    model_case_label: model_case_label.clone(),
+                    index,
+                    matching_prefix_len: index,
+                    abstract_before,
+                    abstract_after: observed_after,
+                    detail: "observed action does not match candidate stutter".to_owned(),
+                    candidate_trace: candidate_trace_option(&candidate_trace),
+                });
+            }
+            (TraceStep::Stutter, ObservedEvent::Stutter) => {
+                if abstract_before != expected_after {
+                    return Err(TraceRefinementError::StutterMismatch {
+                        model_case_label: model_case_label.clone(),
+                        index,
+                        matching_prefix_len: index,
+                        abstract_before,
+                        abstract_after: expected_after,
+                        detail: "candidate stutter must stay in the same abstract state".to_owned(),
+                        candidate_trace: candidate_trace_option(&candidate_trace),
+                    });
+                }
+                if observed_before != observed_after {
+                    return Err(TraceRefinementError::StutterMismatch {
+                        model_case_label: model_case_label.clone(),
+                        index,
+                        matching_prefix_len: index,
+                        abstract_before,
+                        abstract_after: observed_after,
+                        detail: "observed stutter changed the abstract state".to_owned(),
+                        candidate_trace: candidate_trace_option(&candidate_trace),
+                    });
+                }
+                if observed_after != expected_after {
+                    return Err(TraceRefinementError::StutterMismatch {
+                        model_case_label: model_case_label.clone(),
+                        index,
+                        matching_prefix_len: index,
+                        abstract_before,
+                        abstract_after: observed_after,
+                        detail: "observed stutter state does not match candidate state".to_owned(),
+                        candidate_trace: candidate_trace_option(&candidate_trace),
+                    });
+                }
+
+                step_witnesses.push(TraceStepRefinementWitness {
+                    index,
+                    abstract_before,
+                    step: TraceStep::Stutter,
+                    abstract_after: expected_after,
+                });
+            }
+        }
+    }
+
+    Ok(TraceRefinementWitness {
+        abstract_trace: candidate_trace,
+        steps: step_witnesses,
+        model_case_label,
+    })
+}
+
+pub fn trace_refines_summary<Spec>(
+    spec: &Spec,
+    observed: &ObservedTrace<Spec::SummaryState, Spec::Action, Spec::SummaryOutput>,
+    abstract_trace: &Trace<Spec::State, Spec::Action>,
+) -> Result<
+    TraceRefinementWitness<Spec::State, Spec::Action>,
+    TraceRefinementError<Spec::State, Spec::Action>,
+>
+where
+    Spec: ProtocolConformanceSpec,
+    Spec::State: PartialEq,
+{
+    trace_refines_summary_with_label(spec, observed, abstract_trace, "direct".to_owned())
+}
+
 pub fn assert_declared_state_projection<Summary, State>(
     summary: &Summary,
     expected_summary: &Summary,
@@ -685,6 +1192,7 @@ pub fn run_registered_code_witness_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash_lower::TemporalSpec;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum DemoAction {
@@ -840,6 +1348,156 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum TraceDemoAction {
+        Advance,
+        Reset,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum TraceDemoState {
+        Start,
+        Left,
+        Right,
+        Done,
+        Other,
+        Bad,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum TraceDemoOutput {
+        Ack,
+        Rejected,
+        Wrong,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct TraceDemoSpec;
+
+    impl nirvash::FiniteModelDomain for TraceDemoState {
+        fn finite_domain() -> nirvash::BoundedDomain<Self> {
+            into_bounded_domain(vec![
+                Self::Start,
+                Self::Left,
+                Self::Right,
+                Self::Done,
+                Self::Other,
+                Self::Bad,
+            ])
+        }
+    }
+
+    impl nirvash::FiniteModelDomain for TraceDemoAction {
+        fn finite_domain() -> nirvash::BoundedDomain<Self> {
+            into_bounded_domain(vec![Self::Advance, Self::Reset])
+        }
+    }
+
+    impl FrontendSpec for TraceDemoSpec {
+        type State = TraceDemoState;
+        type Action = TraceDemoAction;
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![TraceDemoState::Start]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![TraceDemoAction::Advance, TraceDemoAction::Reset]
+        }
+
+        fn transition_relation(
+            &self,
+            state: &Self::State,
+            action: &Self::Action,
+        ) -> Vec<Self::State> {
+            match (state, action) {
+                (TraceDemoState::Start, TraceDemoAction::Advance) => {
+                    vec![TraceDemoState::Left, TraceDemoState::Right]
+                }
+                (TraceDemoState::Left, TraceDemoAction::Advance) => vec![TraceDemoState::Done],
+                (TraceDemoState::Right, TraceDemoAction::Advance) => vec![TraceDemoState::Other],
+                (TraceDemoState::Done, TraceDemoAction::Reset)
+                | (TraceDemoState::Other, TraceDemoAction::Reset) => vec![TraceDemoState::Start],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    impl TemporalSpec for TraceDemoSpec {
+        fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
+    impl ProtocolConformanceSpec for TraceDemoSpec {
+        type ExpectedOutput = TraceDemoOutput;
+        type ProbeState = TraceDemoState;
+        type ProbeOutput = TraceDemoOutput;
+        type SummaryState = TraceDemoState;
+        type SummaryOutput = TraceDemoOutput;
+
+        fn expected_output(
+            &self,
+            _prev: &Self::State,
+            _action: &Self::Action,
+            next: Option<&Self::State>,
+        ) -> Self::ExpectedOutput {
+            if next.is_some() {
+                TraceDemoOutput::Ack
+            } else {
+                TraceDemoOutput::Rejected
+            }
+        }
+
+        fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
+            probe.clone()
+        }
+
+        fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
+            probe.clone()
+        }
+
+        fn abstract_state(&self, summary: &Self::SummaryState) -> Self::State {
+            summary.clone()
+        }
+
+        fn abstract_output(&self, summary: &Self::SummaryOutput) -> Self::ExpectedOutput {
+            summary.clone()
+        }
+    }
+
+    fn left_terminal_trace() -> Trace<TraceDemoState, TraceDemoAction> {
+        Trace::new(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                TraceStep::Action(TraceDemoAction::Advance),
+                TraceStep::Action(TraceDemoAction::Advance),
+                TraceStep::Stutter,
+            ],
+            2,
+        )
+    }
+
+    fn reset_lasso_trace() -> Trace<TraceDemoState, TraceDemoAction> {
+        Trace::new(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                TraceStep::Action(TraceDemoAction::Advance),
+                TraceStep::Action(TraceDemoAction::Advance),
+                TraceStep::Action(TraceDemoAction::Reset),
+            ],
+            0,
+        )
+    }
+
     #[test]
     fn step_refines_relation_succeeds_for_deterministic_summary_projection() {
         let spec = DeterministicDemoSpec;
@@ -944,6 +1602,168 @@ mod tests {
                 candidate_actions: vec![DemoAction::Advance],
             }
         );
+    }
+
+    #[test]
+    fn observed_terminal_trace_helper_refines_finite_prefix() {
+        let observed = ObservedTrace::terminal(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+            ],
+        );
+
+        let witness = trace_refines_summary(&TraceDemoSpec, &observed, &left_terminal_trace())
+            .expect("terminal helper should produce a refinement-compatible trace");
+
+        assert_eq!(observed.loop_start(), 2);
+        assert_eq!(witness.model_case_label, "direct");
+        assert_eq!(witness.steps.len(), 3);
+        assert!(matches!(
+            witness.steps.last(),
+            Some(TraceStepRefinementWitness {
+                step: TraceStep::Stutter,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn trace_refines_summary_accepts_full_lasso() {
+        let observed = ObservedTrace::new(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Advance,
+                    output: TraceDemoOutput::Ack,
+                },
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Advance,
+                    output: TraceDemoOutput::Ack,
+                },
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Reset,
+                    output: TraceDemoOutput::Ack,
+                },
+            ],
+            0,
+        );
+
+        let witness = trace_refines_summary(&TraceDemoSpec, &observed, &reset_lasso_trace())
+            .expect("explicit lasso should refine");
+
+        assert_eq!(witness.abstract_trace.loop_start(), 0);
+        assert_eq!(
+            witness.steps[2].step,
+            TraceStep::Action(TraceDemoAction::Reset)
+        );
+        assert_eq!(witness.steps[2].abstract_after, TraceDemoState::Start);
+    }
+
+    #[test]
+    fn trace_refines_summary_reports_loop_start_mismatch() {
+        let observed = ObservedTrace::new(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Advance,
+                    output: TraceDemoOutput::Ack,
+                },
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Advance,
+                    output: TraceDemoOutput::Ack,
+                },
+                ObservedEvent::Stutter,
+            ],
+            0,
+        );
+
+        let error = trace_refines_summary(&TraceDemoSpec, &observed, &left_terminal_trace())
+            .expect_err("loop_start mismatch should fail");
+
+        assert!(matches!(
+            error,
+            TraceRefinementError::ShapeMismatch { detail, .. }
+                if detail.contains("loop_start")
+        ));
+    }
+
+    #[test]
+    fn trace_refines_summary_reports_output_mismatch() {
+        let observed = ObservedTrace::terminal(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                (TraceDemoAction::Advance, TraceDemoOutput::Wrong),
+            ],
+        );
+
+        let error = trace_refines_summary(&TraceDemoSpec, &observed, &left_terminal_trace())
+            .expect_err("output mismatch should fail");
+
+        assert!(matches!(
+            error,
+            TraceRefinementError::StepMismatch {
+                index,
+                matching_prefix_len,
+                detail,
+                ..
+            } if index == 1
+                && matching_prefix_len == 1
+                && detail.contains("expected output")
+        ));
+    }
+
+    #[test]
+    fn trace_refines_summary_rejects_action_event_when_candidate_stutters() {
+        let observed = ObservedTrace::new(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Advance,
+                    output: TraceDemoOutput::Ack,
+                },
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Advance,
+                    output: TraceDemoOutput::Ack,
+                },
+                ObservedEvent::Action {
+                    action: TraceDemoAction::Reset,
+                    output: TraceDemoOutput::Ack,
+                },
+            ],
+            2,
+        );
+
+        let error = trace_refines_summary(&TraceDemoSpec, &observed, &left_terminal_trace())
+            .expect_err("candidate stutter should reject action event");
+
+        assert!(matches!(
+            error,
+            TraceRefinementError::StutterMismatch { index, detail, .. }
+                if index == 2 && detail.contains("does not match candidate stutter")
+        ));
     }
 
     #[test]
