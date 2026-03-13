@@ -457,10 +457,7 @@ impl SymbolicSort {
         }
     }
 
-    pub fn composite<T>(fields: Vec<SymbolicSortField>) -> Self
-    where
-        T: FiniteModelDomain,
-    {
+    pub fn composite<T>(fields: Vec<SymbolicSortField>) -> Self {
         Self::Composite {
             type_name: type_name::<T>(),
             domain_size: saturating_product_domain_size(
@@ -644,10 +641,13 @@ impl<S> fmt::Debug for SymbolicStateSchema<S> {
     }
 }
 
-pub trait SymbolicEncoding: FiniteModelDomain {
+pub trait SymbolicEncoding {
     fn symbolic_sort() -> SymbolicSort;
 
-    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>> {
+    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>>
+    where
+        Self: Sized,
+    {
         None
     }
 }
@@ -791,7 +791,7 @@ pub fn symbolic_leaf_field<S, T, R, W>(
     write: W,
 ) -> SymbolicStateField<S>
 where
-    T: SymbolicEncoding + Clone + Eq + 'static,
+    T: SymbolicEncoding + FiniteModelDomain + Clone + Eq + 'static,
     R: for<'a> Fn(&'a S) -> &'a T + Send + Sync + 'static,
     W: Fn(&mut S, T) + Send + Sync + 'static,
 {
@@ -809,7 +809,7 @@ pub fn symbolic_state_fields<S, T, R, W>(
     write: W,
 ) -> Vec<SymbolicStateField<S>>
 where
-    T: SymbolicEncoding + Clone + Eq + 'static,
+    T: SymbolicEncoding + FiniteModelDomain + Clone + Eq + 'static,
     R: for<'a> Fn(&'a S) -> &'a T + Send + Sync + 'static,
     W: Fn(&mut S, T) + Send + Sync + 'static,
     S: 'static,

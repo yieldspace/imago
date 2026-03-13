@@ -7,7 +7,7 @@
 - [x] Phase 1B: `assert_step_refinement` / `enabled_from_summary` を relation-aware に整理する
 - [x] Phase 1C: code witness / macro harness を relation API に追従させる
 - [x] Phase 2: `trace_refines` を explicit backend で実装する
-- [ ] Phase 3: `ExplicitModelChecker` / `SymbolicModelChecker` へ checker front door を分離する
+- [x] Phase 3: `ExplicitModelChecker` / `SymbolicModelChecker` へ checker front door を分離する
 - [ ] Phase 4: sound reduction と heuristic reduction の API を分離する
 - [ ] Phase 5: Rust 検証アダプタ (`proptest-state-machine` / `Kani` / `loom`) を追加する
 - [ ] Phase 6: proof export を pretty / sound に分離する
@@ -508,9 +508,9 @@ fn output_refines(
 
 ### Phase 3
 
-- `ExplicitModelChecker` / `SymbolicModelChecker` を導入
-- 既存 `ModelChecker` を façade 化
-- symbolic path から `FiniteModelDomain` 要件を外す
+- [x] `ExplicitModelChecker` / `SymbolicModelChecker` を導入
+- [x] 既存 `ModelChecker` を façade 化
+- [x] symbolic path から `FiniteModelDomain` 要件を外す
 
 ### Phase 4
 

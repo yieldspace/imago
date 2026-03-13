@@ -1212,9 +1212,18 @@ mod tests {
         case: ModelInstance<SystemState, SystemAction>,
     ) -> ModelInstance<SystemState, SystemAction> {
         let mut config = case.effective_checker_config();
+        let doc_config = case.doc_checker_config().map(|mut config| {
+            config.max_states = Some(64);
+            config.max_transitions = Some(256);
+            config
+        });
         config.max_states = Some(64);
         config.max_transitions = Some(256);
-        case.with_checker_config(config)
+        let case = case.with_checker_config(config);
+        match doc_config {
+            Some(doc_config) => case.with_doc_checker_config(doc_config),
+            None => case,
+        }
     }
 
     #[test]

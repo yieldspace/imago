@@ -1118,7 +1118,7 @@ where
     let mut config = ModelCheckConfig::bounded_lasso(observed.events().len());
     config.backend = Some(ModelBackend::Explicit);
     let candidate_case = model_case.clone().with_checker_config(config);
-    let candidates = nirvash_check::ModelChecker::for_case(&lowered, candidate_case)
+    let candidates = nirvash_check::ExplicitModelChecker::for_case(&lowered, candidate_case)
         .candidate_traces()
         .map_err(|error| TraceRefinementError::SearchFailed {
             model_case_label: model_case_label.clone(),

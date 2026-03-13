@@ -12,7 +12,7 @@ authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgra
 - `nirvash-lower`
   - `FrontendSpec`, `LoweredSpec`, `FiniteModelDomain`, `SymbolicEncoding`, checker-facing config/model boundary
 - `nirvash-check`
-  - `ModelChecker` front door と checker-facing API
+  - `ExplicitModelChecker` / `SymbolicModelChecker` と `ModelChecker` compatibility façade
 - `nirvash-backends`
   - explicit / symbolic backend 実装（`LoweredSpec` を受ける）
 - `nirvash-conformance`
@@ -45,18 +45,20 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
   - 現時点では `state_storage = InMemoryExact | InMemoryFingerprinted`、`compression = None | DomainIndex`、`reachability = BreadthFirst | ParallelFrontier | DistributedFrontier`、`bounded_lasso = EnumeratedPaths`
   - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定
   - `parallel = ExplicitParallelOptions { workers }` と `distributed = ExplicitDistributedOptions { shards }` で explicit reachable-graph frontier の local/distributed wave を設定
-  - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ModelChecker::simulate()` の deterministic random walk を設定
+  - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ExplicitModelChecker::simulate()` と explicit に解決された `ModelChecker::simulate()` の deterministic random walk を設定
 - `ModelInstance::with_state_abstraction(StateAbstraction)` と `ModelInstance::with_por(PorHints)` を通じて explicit reachable-graph dedup / branch pruning を付ける
 - `symbolic: SymbolicModelCheckOptions`
   - 現時点では `bridge = RelationalBridgeOptions { strategy = SolverEnumeration }`、`temporal = BoundedLasso | LivenessToSafety`、`safety = Bmc | KInduction | PdrIc3`
   - `k_induction = SymbolicKInductionOptions { max_depth }` と `pdr = SymbolicPdrOptions { max_frames }` で invariant proof engine の bound を設定
 
 これらは current implementation を present tense で表す public contract です。symbolic backend は explicit-only reducer (`with_state_abstraction` / `with_por`) を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression を同じ config surface で切り替えます。
+`nirvash-check` は backend 固定の `ExplicitModelChecker` / `SymbolicModelChecker` を正本にし、既存 `ModelChecker` は backend-resolving compatibility façade として維持されます。symbolic-only 利用では `FiniteModelDomain` を持たない state でも lower した `LoweredSpec` を `SymbolicModelChecker` に直接渡せます。
 
 ## What It Provides
 
 - `FiniteModelDomain`: bounded helper 型へ finite domain と値 invariant を与える checker-facing trait
 - `SymbolicEncoding`: symbolic sort / state schema を与える checker-facing trait
+- `ExplicitModelChecker` / `SymbolicModelChecker` / `ModelChecker`: typed checker front door と compatibility façade (`nirvash-check`)
 - `RelAtom` / `RelSet<T>` / `Relation2<A, B>`: relational kernel
 - `TransitionProgram`: frontend DSL の遷移記述 surface
 - `FrontendSpec` / `LoweredSpec`: backend へ渡る lowering boundary

@@ -12,8 +12,6 @@ use nirvash_lower::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::symbolic::SymbolicModelChecker;
-
 type TraceVec<T> = Vec<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 type ReachableGraphCheckpointLoad<T> = Option<(
     ReachableGraph<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>,
@@ -359,13 +357,13 @@ impl<S, A> ReachableGraph<S, A> {
     }
 }
 
-pub struct BackendModelChecker<'a, T: CheckerSpec> {
+pub struct ExplicitModelChecker<'a, T: CheckerSpec> {
     spec: &'a T,
     model_case: ModelInstance<T::State, T::Action>,
     config: ModelCheckConfig,
 }
 
-impl<'a, T> BackendModelChecker<'a, T>
+impl<'a, T> ExplicitModelChecker<'a, T>
 where
     T: CheckerSpec,
     T::State: PartialEq + FiniteModelDomain + Send + Sync,
@@ -381,10 +379,15 @@ where
     }
 
     pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
-        let model_case = model_case.with_resolved_backend(
-            spec.default_model_backend()
-                .unwrap_or(ModelBackend::Explicit),
-        );
+        let check_deadlocks = model_case.check_deadlocks();
+        let config = model_case.checker_config();
+        let model_case = model_case
+            .with_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Explicit),
+                ..config
+            })
+            .with_check_deadlocks(check_deadlocks)
+            .with_resolved_backend(ModelBackend::Explicit);
         let config = model_case.effective_checker_config();
         Self {
             spec,
@@ -395,10 +398,6 @@ where
 
     pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
         let check_deadlocks = config.check_deadlocks;
-        let backend = config
-            .backend
-            .or(spec.default_model_backend())
-            .unwrap_or(ModelBackend::Explicit);
         let mut model_case = spec
             .model_instances()
             .into_iter()
@@ -406,47 +405,35 @@ where
             .unwrap_or_default();
         model_case = model_case
             .with_checker_config(ModelCheckConfig {
-                backend: Some(backend),
+                backend: Some(ModelBackend::Explicit),
                 ..config
             })
-            .with_check_deadlocks(check_deadlocks);
+            .with_check_deadlocks(check_deadlocks)
+            .with_resolved_backend(ModelBackend::Explicit);
         Self::for_case(spec, model_case)
     }
 
     pub fn reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        match self.resolved_doc_backend() {
-            ModelBackend::Explicit => {
-                let graph = self.build_reachable_graph_for_docs()?;
-                Ok(self.snapshot_from_graph(&graph))
-            }
-            ModelBackend::Symbolic => self.symbolic_reachable_graph_snapshot(),
-        }
+        let graph = self.build_reachable_graph_for_docs()?;
+        Ok(self.snapshot_from_graph(&graph))
     }
 
     pub fn full_reachable_graph_snapshot(
         &self,
     ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        match self.resolved_backend() {
-            ModelBackend::Explicit => {
-                let graph = self.build_reachable_graph()?;
-                self.ensure_untruncated(&graph)?;
-                Ok(self.snapshot_from_graph(&graph))
-            }
-            ModelBackend::Symbolic => self.symbolic_full_reachable_graph_snapshot(),
-        }
+        let graph = self.build_reachable_graph()?;
+        self.ensure_untruncated(&graph)?;
+        Ok(self.snapshot_from_graph(&graph))
     }
 
     pub fn check_invariants(
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.resolved_backend() {
-            ModelBackend::Explicit => match self.config.exploration {
-                ExplorationMode::ReachableGraph => self.check_invariants_graph(),
-                ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
-            },
-            ModelBackend::Symbolic => self.symbolic_check_invariants(),
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_invariants_graph(),
+            ExplorationMode::BoundedLasso => self.check_invariants_lasso(),
         }
     }
 
@@ -457,12 +444,9 @@ where
             return Ok(ModelCheckResult::ok());
         }
 
-        match self.resolved_backend() {
-            ModelBackend::Explicit => match self.config.exploration {
-                ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
-                ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
-            },
-            ModelBackend::Symbolic => self.symbolic_check_deadlocks(),
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_deadlocks_graph(),
+            ExplorationMode::BoundedLasso => self.check_deadlocks_lasso(),
         }
     }
 
@@ -473,124 +457,57 @@ where
             return Ok(ModelCheckResult::ok());
         }
 
-        match self.resolved_backend() {
-            ModelBackend::Explicit => match self.config.exploration {
-                ExplorationMode::ReachableGraph => self.check_properties_graph(),
-                ExplorationMode::BoundedLasso => self.check_properties_lasso(),
-            },
-            ModelBackend::Symbolic => self.symbolic_check_properties(),
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => self.check_properties_graph(),
+            ExplorationMode::BoundedLasso => self.check_properties_lasso(),
         }
     }
 
     pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.resolved_backend() {
-            ModelBackend::Explicit => {
-                let mut result = ModelCheckResult::ok();
+        let mut result = ModelCheckResult::ok();
 
-                let invariants = self.check_invariants()?;
-                if self.config.stop_on_first_violation && !invariants.is_ok() {
-                    return Ok(invariants);
-                }
-                result.extend(invariants);
-
-                let deadlocks = self.check_deadlocks()?;
-                if self.config.stop_on_first_violation && !deadlocks.is_ok() {
-                    return Ok(deadlocks);
-                }
-                result.extend(deadlocks);
-
-                let properties = self.check_properties()?;
-                if self.config.stop_on_first_violation && !properties.is_ok() {
-                    return Ok(properties);
-                }
-                result.extend(properties);
-
-                Ok(result)
-            }
-            ModelBackend::Symbolic => self.symbolic_check_all(),
+        let invariants = self.check_invariants()?;
+        if self.config.stop_on_first_violation && !invariants.is_ok() {
+            return Ok(invariants);
         }
+        result.extend(invariants);
+
+        let deadlocks = self.check_deadlocks()?;
+        if self.config.stop_on_first_violation && !deadlocks.is_ok() {
+            return Ok(deadlocks);
+        }
+        result.extend(deadlocks);
+
+        let properties = self.check_properties()?;
+        if self.config.stop_on_first_violation && !properties.is_ok() {
+            return Ok(properties);
+        }
+        result.extend(properties);
+
+        Ok(result)
     }
 
     pub fn simulate(&self) -> Result<TraceVec<T>, ModelCheckError> {
-        match self.resolved_backend() {
-            ModelBackend::Explicit => self.simulate_explicit(),
-            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
-                "simulation is only supported by the explicit backend",
-            )),
-        }
+        self.simulate_explicit()
     }
 
     pub fn candidate_traces(&self) -> Result<TraceVec<T>, ModelCheckError> {
-        match self.resolved_backend() {
-            ModelBackend::Explicit => match self.config.exploration {
-                ExplorationMode::ReachableGraph => {
-                    let graph = self.build_reachable_graph()?;
-                    self.ensure_untruncated(&graph)?;
-                    Ok(self.graph_lasso_traces(&graph))
-                }
-                ExplorationMode::BoundedLasso => self.bounded_lasso_traces(),
-            },
-            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
-                "candidate trace enumeration is only supported by the explicit backend",
-            )),
+        match self.config.exploration {
+            ExplorationMode::ReachableGraph => {
+                let graph = self.build_reachable_graph()?;
+                self.ensure_untruncated(&graph)?;
+                Ok(self.graph_lasso_traces(&graph))
+            }
+            ExplorationMode::BoundedLasso => self.bounded_lasso_traces(),
         }
     }
 
     pub fn backend(&self) -> ModelBackend {
-        self.resolved_backend()
+        ModelBackend::Explicit
     }
 
     pub fn doc_backend(&self) -> ModelBackend {
-        self.resolved_doc_backend()
-    }
-
-    fn resolved_backend(&self) -> ModelBackend {
-        self.config.backend.unwrap_or(ModelBackend::Explicit)
-    }
-
-    fn resolved_doc_backend(&self) -> ModelBackend {
-        self.model_case
-            .doc_checker_config()
-            .and_then(|config| config.backend)
-            .unwrap_or(ModelBackend::Explicit)
-    }
-
-    fn symbolic_checker(&self) -> SymbolicModelChecker<'a, T> {
-        SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
-    }
-
-    fn symbolic_reachable_graph_snapshot(
-        &self,
-    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        self.symbolic_checker().reachable_graph_snapshot()
-    }
-
-    fn symbolic_full_reachable_graph_snapshot(
-        &self,
-    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        self.symbolic_checker().full_reachable_graph_snapshot()
-    }
-
-    fn symbolic_check_invariants(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        self.symbolic_checker().check_invariants()
-    }
-
-    fn symbolic_check_deadlocks(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        self.symbolic_checker().check_deadlocks()
-    }
-
-    fn symbolic_check_properties(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        self.symbolic_checker().check_properties()
-    }
-
-    fn symbolic_check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        self.symbolic_checker().check_all()
+        ModelBackend::Explicit
     }
 
     fn simulate_explicit(&self) -> Result<TraceVec<T>, ModelCheckError> {

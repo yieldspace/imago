@@ -2,7 +2,7 @@ use nirvash::{
     CounterexampleKind, ExprDomain, GuardExpr, ModelBackend, ModelCheckConfig, ModelCheckError,
     SymbolicSort, TransitionProgram, TransitionRule, UpdateProgram,
 };
-use nirvash_check::ModelChecker;
+use nirvash_check::{ExplicitModelChecker, ModelChecker, SymbolicModelChecker};
 use nirvash_lower::{
     FiniteModelDomain, FrontendSpec, LoweringCx, ModelInstance, SymbolicEncoding,
     SymbolicStateSchema, TemporalSpec,
@@ -28,6 +28,17 @@ where
 {
     let mut lowering_cx = LoweringCx;
     spec.lower(&mut lowering_cx).expect("spec should lower")
+}
+
+fn lower_symbolic_spec<T>(spec: &T) -> nirvash_lower::LoweredSpec<'_, T::State, T::Action>
+where
+    T: TemporalSpec,
+    T::State: PartialEq,
+    T::Action: PartialEq,
+{
+    let mut lowering_cx = LoweringCx;
+    spec.lower(&mut lowering_cx)
+        .expect("symbolic-only spec should lower")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
@@ -286,12 +297,71 @@ nirvash::inventory::submit! {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolicOnlyState {
+    phase: Phase,
+}
+
+impl SymbolicEncoding for SymbolicOnlyState {
+    fn symbolic_sort() -> SymbolicSort {
+        SymbolicSort::Composite {
+            type_name: std::any::type_name::<Self>(),
+            domain_size: 0,
+            fields: vec![nirvash::SymbolicSortField::new(
+                "phase",
+                <Phase as SymbolicEncoding>::symbolic_sort(),
+            )],
+        }
+    }
+
+    fn symbolic_state_schema() -> Option<SymbolicStateSchema<Self>> {
+        Some(SymbolicStateSchema::new(
+            vec![nirvash::symbolic_leaf_field(
+                "phase",
+                |state: &Self| &state.phase,
+                |state: &mut Self, value: Phase| {
+                    state.phase = value;
+                },
+            )],
+            || SymbolicOnlyState {
+                phase: nirvash::symbolic_seed_value::<Phase>(),
+            },
+        ))
+    }
+}
+
+fn symbolic_only_state_type_id() -> std::any::TypeId {
+    std::any::TypeId::of::<SymbolicOnlyState>()
+}
+
+fn build_symbolic_only_state_schema() -> Box<dyn std::any::Any> {
+    Box::new(
+        <SymbolicOnlyState as SymbolicEncoding>::symbolic_state_schema()
+            .expect("symbolic-only schema should be registered"),
+    )
+}
+
+nirvash::inventory::submit! {
+    nirvash::registry::RegisteredSymbolicStateSchema {
+        state_type_id: symbolic_only_state_type_id,
+        build: build_symbolic_only_state_schema,
+    }
+}
+
 fn toggled_phase(phase: Phase) -> Phase {
     match phase {
         Phase::Idle => Phase::Busy,
         Phase::Busy => Phase::Idle,
     }
 }
+
+fn toggled_symbolic_only_state(prev: &SymbolicOnlyState) -> SymbolicOnlyState {
+    SymbolicOnlyState {
+        phase: toggled_phase(prev.phase),
+    }
+}
+
+nirvash::register_symbolic_pure_helpers!("toggled_symbolic_only_state");
 
 fn toggled_manual_state(prev: &ManualSchemaState) -> ManualSchemaState {
     ManualSchemaState {
@@ -500,6 +570,38 @@ impl FrontendSpec for NoProgramSchemaSpec {
 }
 
 impl TemporalSpec for NoProgramSchemaSpec {
+    fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SymbolicOnlySpec;
+
+impl FrontendSpec for SymbolicOnlySpec {
+    type State = SymbolicOnlyState;
+    type Action = ToggleAction;
+
+    frontend_name!();
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![SymbolicOnlyState { phase: Phase::Idle }]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![ToggleAction::Flip]
+    }
+
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule toggle when matches!(action, ToggleAction::Flip) => {
+                set self <= toggled_symbolic_only_state(prev);
+            }
+        })
+    }
+}
+
+impl TemporalSpec for SymbolicOnlySpec {
     fn invariants(&self) -> Vec<nirvash::BoolExpr<Self::State>> {
         Vec::new()
     }
@@ -940,6 +1042,30 @@ fn deadlocks_are_reported_by_frontdoor_checker() {
 }
 
 #[test]
+fn explicit_typed_checker_matches_frontdoor_checker() {
+    let lowered = lower_spec(&ChoicePropertySpec);
+    let expected_snapshot = ModelChecker::new(&lowered)
+        .full_reachable_graph_snapshot()
+        .expect("frontdoor explicit snapshot should build");
+    let actual_snapshot = ExplicitModelChecker::new(&lowered)
+        .full_reachable_graph_snapshot()
+        .expect("typed explicit snapshot should build");
+
+    assert_eq!(actual_snapshot, expected_snapshot);
+
+    let expected_properties =
+        ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("frontdoor explicit property check should run");
+    let actual_properties =
+        ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("typed explicit property check should run");
+
+    assert_eq!(actual_properties, expected_properties);
+}
+
+#[test]
 fn symbolic_backend_rejects_specs_without_transition_program() {
     let lowered = lower_spec(&NoProgramSchemaSpec);
     let err = ModelChecker::with_config(
@@ -1068,6 +1194,45 @@ fn symbolic_backend_matches_explicit_snapshot_for_choice_updates() {
 }
 
 #[test]
+fn symbolic_typed_checker_matches_frontdoor_checker() {
+    let lowered = lower_spec(&ChoicePropertySpec);
+    let config = ModelCheckConfig {
+        backend: Some(ModelBackend::Symbolic),
+        ..ModelCheckConfig::bounded_lasso(3)
+    };
+
+    let expected_snapshot = ModelChecker::with_config(
+        &lowered,
+        ModelCheckConfig {
+            backend: Some(ModelBackend::Symbolic),
+            ..ModelCheckConfig::reachable_graph()
+        },
+    )
+    .full_reachable_graph_snapshot()
+    .expect("frontdoor symbolic snapshot should build");
+    let actual_snapshot = SymbolicModelChecker::with_config(
+        &lowered,
+        ModelCheckConfig {
+            backend: Some(ModelBackend::Symbolic),
+            ..ModelCheckConfig::reachable_graph()
+        },
+    )
+    .full_reachable_graph_snapshot()
+    .expect("typed symbolic snapshot should build");
+
+    assert_eq!(actual_snapshot, expected_snapshot);
+
+    let expected_properties = ModelChecker::with_config(&lowered, config.clone())
+        .check_properties()
+        .expect("frontdoor symbolic property check should run");
+    let actual_properties = SymbolicModelChecker::with_config(&lowered, config)
+        .check_properties()
+        .expect("typed symbolic property check should run");
+
+    assert_eq!(actual_properties, expected_properties);
+}
+
+#[test]
 fn symbolic_bounded_lasso_matches_explicit_for_choice_property_violation() {
     let lowered = lower_spec(&ChoicePropertySpec);
     let explicit = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
@@ -1191,6 +1356,40 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
         )
         .check_properties()
         .expect("symbolic reachable-graph property check should run")
+        .is_ok()
+    );
+}
+
+#[test]
+fn symbolic_typed_checker_works_without_state_finite_model_domain() {
+    let lowered = lower_symbolic_spec(&SymbolicOnlySpec);
+    let snapshot = SymbolicModelChecker::with_config(
+        &lowered,
+        ModelCheckConfig {
+            backend: Some(ModelBackend::Symbolic),
+            ..ModelCheckConfig::reachable_graph()
+        },
+    )
+    .full_reachable_graph_snapshot()
+    .expect("symbolic typed checker should build without finite state domain");
+
+    assert_eq!(
+        snapshot.states,
+        vec![
+            SymbolicOnlyState { phase: Phase::Idle },
+            SymbolicOnlyState { phase: Phase::Busy },
+        ]
+    );
+    assert!(
+        SymbolicModelChecker::with_config(
+            &lowered,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::bounded_lasso(3)
+            },
+        )
+        .check_all()
+        .expect("symbolic typed checker should run without finite state domain")
         .is_ok()
     );
 }

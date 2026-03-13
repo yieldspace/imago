@@ -6,8 +6,8 @@ use z3::{
 };
 
 use nirvash_lower::{
-    BoolExpr, CheckerSpec, Counterexample, CounterexampleKind, ExplorationMode, Fairness,
-    FiniteModelDomain, Ltl, ModelCheckConfig, ModelCheckError, ModelCheckResult, ModelInstance,
+    BoolExpr, CheckerSpec, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl,
+    ModelBackend, ModelCheckConfig, ModelCheckError, ModelCheckResult, ModelInstance,
     ReachableGraphEdge, ReachableGraphSnapshot, StepExpr, SymbolicStateSchema,
     SymbolicSupportIssue, Trace, TraceStep, TransitionProgram, UpdateAst, UpdateOp,
 };
@@ -197,16 +197,51 @@ pub struct SymbolicModelChecker<'a, T: CheckerSpec> {
 impl<'a, T> SymbolicModelChecker<'a, T>
 where
     T: CheckerSpec,
-    T::State: PartialEq + FiniteModelDomain + 'static,
+    T::State: PartialEq + 'static,
     T::Action: PartialEq + 'static,
 {
+    pub fn new(spec: &'a T) -> Self {
+        let model_case = spec
+            .model_instances()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        Self::for_case(spec, model_case)
+    }
+
     pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
+        let check_deadlocks = model_case.check_deadlocks();
+        let config = model_case.checker_config();
+        let model_case = model_case
+            .with_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..config
+            })
+            .with_check_deadlocks(check_deadlocks)
+            .with_resolved_backend(ModelBackend::Symbolic);
         let config = model_case.effective_checker_config();
         Self {
             spec,
             model_case,
             config,
         }
+    }
+
+    pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
+        let check_deadlocks = config.check_deadlocks;
+        let mut model_case = spec
+            .model_instances()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        model_case = model_case
+            .with_checker_config(ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..config
+            })
+            .with_check_deadlocks(check_deadlocks)
+            .with_resolved_backend(ModelBackend::Symbolic);
+        Self::for_case(spec, model_case)
     }
 
     pub fn reachable_graph_snapshot(
@@ -297,6 +332,14 @@ where
         result.extend(properties);
 
         Ok(result)
+    }
+
+    pub fn backend(&self) -> ModelBackend {
+        ModelBackend::Symbolic
+    }
+
+    pub fn doc_backend(&self) -> ModelBackend {
+        ModelBackend::Symbolic
     }
 
     fn build_bridge_reachable_graph(

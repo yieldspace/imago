@@ -869,7 +869,7 @@ pub trait FrontendSpec {
     ) -> Result<LoweredSpec<'a, Self::State, Self::Action>, LoweringError>
     where
         Self: TemporalSpec,
-        Self::State: PartialEq + FiniteModelDomain,
+        Self::State: PartialEq,
         Self::Action: PartialEq,
     {
         let initial_states = self.initial_states();

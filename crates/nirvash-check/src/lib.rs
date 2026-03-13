@@ -6,26 +6,38 @@ pub use nirvash_lower::{
 
 type TraceVec<T> = Vec<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 
-pub struct ModelChecker<'a, T: CheckerSpec>(nirvash_backends::BackendModelChecker<'a, T>);
+fn first_model_case<T: CheckerSpec>(spec: &T) -> ModelInstance<T::State, T::Action> {
+    spec.model_instances()
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
 
-impl<'a, T> ModelChecker<'a, T>
+fn resolved_default_backend<T: CheckerSpec>(spec: &T) -> ModelBackend {
+    spec.default_model_backend()
+        .unwrap_or(ModelBackend::Explicit)
+}
+
+pub struct ExplicitModelChecker<'a, T: CheckerSpec>(nirvash_backends::ExplicitModelChecker<'a, T>);
+
+impl<'a, T> ExplicitModelChecker<'a, T>
 where
     T: CheckerSpec,
     T::State: PartialEq + FiniteModelDomain + Send + Sync,
     T::Action: PartialEq + Send + Sync,
 {
     pub fn new(spec: &'a T) -> Self {
-        Self(nirvash_backends::BackendModelChecker::new(spec))
+        Self(nirvash_backends::ExplicitModelChecker::new(spec))
     }
 
     pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
-        Self(nirvash_backends::BackendModelChecker::for_case(
+        Self(nirvash_backends::ExplicitModelChecker::for_case(
             spec, model_case,
         ))
     }
 
     pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
-        Self(nirvash_backends::BackendModelChecker::with_config(
+        Self(nirvash_backends::ExplicitModelChecker::with_config(
             spec, config,
         ))
     }
@@ -78,6 +90,204 @@ where
 
     pub fn doc_backend(&self) -> ModelBackend {
         self.0.doc_backend()
+    }
+}
+
+pub struct SymbolicModelChecker<'a, T: CheckerSpec>(nirvash_backends::SymbolicModelChecker<'a, T>);
+
+impl<'a, T> SymbolicModelChecker<'a, T>
+where
+    T: CheckerSpec,
+    T::State: PartialEq + 'static,
+    T::Action: PartialEq + 'static,
+{
+    pub fn new(spec: &'a T) -> Self {
+        Self(nirvash_backends::SymbolicModelChecker::new(spec))
+    }
+
+    pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
+        Self(nirvash_backends::SymbolicModelChecker::for_case(
+            spec, model_case,
+        ))
+    }
+
+    pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
+        Self(nirvash_backends::SymbolicModelChecker::with_config(
+            spec, config,
+        ))
+    }
+
+    pub fn reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        self.0.reachable_graph_snapshot()
+    }
+
+    pub fn full_reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        self.0.full_reachable_graph_snapshot()
+    }
+
+    pub fn check_invariants(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.0.check_invariants()
+    }
+
+    pub fn check_deadlocks(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.0.check_deadlocks()
+    }
+
+    pub fn check_properties(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.0.check_properties()
+    }
+
+    pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        self.0.check_all()
+    }
+
+    pub fn backend(&self) -> ModelBackend {
+        self.0.backend()
+    }
+
+    pub fn doc_backend(&self) -> ModelBackend {
+        self.0.doc_backend()
+    }
+}
+
+pub struct ModelChecker<'a, T: CheckerSpec> {
+    spec: &'a T,
+    model_case: ModelInstance<T::State, T::Action>,
+}
+
+impl<'a, T> ModelChecker<'a, T>
+where
+    T: CheckerSpec,
+    T::State: PartialEq + FiniteModelDomain + Send + Sync,
+    T::Action: PartialEq + Send + Sync,
+{
+    pub fn new(spec: &'a T) -> Self {
+        Self::for_case(spec, first_model_case(spec))
+    }
+
+    pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
+        Self {
+            spec,
+            model_case: model_case.with_resolved_backend(resolved_default_backend(spec)),
+        }
+    }
+
+    pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
+        let check_deadlocks = config.check_deadlocks;
+        let backend = config
+            .backend
+            .or(spec.default_model_backend())
+            .unwrap_or(ModelBackend::Explicit);
+        let model_case = first_model_case(spec)
+            .with_checker_config(ModelCheckConfig {
+                backend: Some(backend),
+                ..config
+            })
+            .with_check_deadlocks(check_deadlocks)
+            .with_resolved_backend(backend);
+        Self { spec, model_case }
+    }
+
+    fn explicit_checker(&self) -> ExplicitModelChecker<'a, T> {
+        ExplicitModelChecker::for_case(self.spec, self.model_case.clone())
+    }
+
+    fn symbolic_checker(&self) -> SymbolicModelChecker<'a, T> {
+        SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
+    }
+
+    pub fn reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        match self.doc_backend() {
+            ModelBackend::Explicit => self.explicit_checker().reachable_graph_snapshot(),
+            ModelBackend::Symbolic => self.symbolic_checker().reachable_graph_snapshot(),
+        }
+    }
+
+    pub fn full_reachable_graph_snapshot(
+        &self,
+    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().full_reachable_graph_snapshot(),
+            ModelBackend::Symbolic => self.symbolic_checker().full_reachable_graph_snapshot(),
+        }
+    }
+
+    pub fn check_invariants(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().check_invariants(),
+            ModelBackend::Symbolic => self.symbolic_checker().check_invariants(),
+        }
+    }
+
+    pub fn check_deadlocks(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().check_deadlocks(),
+            ModelBackend::Symbolic => self.symbolic_checker().check_deadlocks(),
+        }
+    }
+
+    pub fn check_properties(
+        &self,
+    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().check_properties(),
+            ModelBackend::Symbolic => self.symbolic_checker().check_properties(),
+        }
+    }
+
+    pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().check_all(),
+            ModelBackend::Symbolic => self.symbolic_checker().check_all(),
+        }
+    }
+
+    pub fn simulate(&self) -> Result<TraceVec<T>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().simulate(),
+            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
+                "simulation is only supported by the explicit backend",
+            )),
+        }
+    }
+
+    pub fn candidate_traces(&self) -> Result<TraceVec<T>, ModelCheckError> {
+        match self.backend() {
+            ModelBackend::Explicit => self.explicit_checker().candidate_traces(),
+            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
+                "candidate trace enumeration is only supported by the explicit backend",
+            )),
+        }
+    }
+
+    pub fn backend(&self) -> ModelBackend {
+        self.model_case
+            .effective_checker_config()
+            .backend
+            .unwrap_or(ModelBackend::Explicit)
+    }
+
+    pub fn doc_backend(&self) -> ModelBackend {
+        self.model_case
+            .doc_checker_config()
+            .and_then(|config| config.backend)
+            .unwrap_or(self.backend())
     }
 }
 
