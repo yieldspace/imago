@@ -2921,6 +2921,7 @@ mod tests {
         nirvash::DocGraphCase {
             label: label.to_owned(),
             backend: nirvash::ModelBackend::Explicit,
+            soundness_tier: nirvash::SoundnessTier::Exact,
             graph: nirvash::DocGraphSnapshot {
                 states: vec![nirvash::DocGraphState {
                     summary: format!("{label}State"),
@@ -3399,6 +3400,7 @@ impl FrontendSpec for DuplicateSpec {
             doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
                 backend: nirvash::ModelBackend::Explicit,
+                soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states: vec![
                         nirvash::DocGraphState {
@@ -3470,6 +3472,7 @@ impl FrontendSpec for DuplicateSpec {
             doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
                 backend: nirvash::ModelBackend::Explicit,
+                soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states: vec![
                         nirvash::DocGraphState {
@@ -3591,6 +3594,7 @@ impl FrontendSpec for DuplicateSpec {
             doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
                 backend: nirvash::ModelBackend::Explicit,
+                soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states: vec![
                         nirvash::DocGraphState {
@@ -3693,6 +3697,7 @@ impl FrontendSpec for DuplicateSpec {
             vec![nirvash::DocGraphCase {
                 label: "large".to_owned(),
                 backend: nirvash::ModelBackend::Explicit,
+                soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states,
                     edges,

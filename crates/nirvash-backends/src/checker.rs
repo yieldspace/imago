@@ -94,14 +94,15 @@ impl ExplicitStateIndex {
     fn from_states<S>(
         storage: nirvash::ExplicitStateStorage,
         states: &ExplicitStateStore<S>,
-        view: Option<nirvash_lower::StateAbstraction<S>>,
+        quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+        projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
     ) -> Self
     where
         S: FiniteModelDomain + std::fmt::Debug,
     {
         let mut index = Self::new(storage);
         for state_index in 0..states.len() {
-            index.record_state(states, state_index, view);
+            index.record_state(states, state_index, quotient, projection);
         }
         index
     }
@@ -110,7 +111,8 @@ impl ExplicitStateIndex {
         &self,
         states: &ExplicitStateStore<S>,
         state: &S,
-        view: Option<nirvash_lower::StateAbstraction<S>>,
+        quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+        projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
     ) -> Option<usize>
     where
         S: PartialEq + FiniteModelDomain + std::fmt::Debug,
@@ -118,14 +120,13 @@ impl ExplicitStateIndex {
         match self {
             Self::Exact => states
                 .iter()
-                .position(|candidate| states_share_key(candidate, state, view)),
+                .position(|candidate| states_share_key(candidate, state, quotient, projection)),
             Self::Fingerprinted { buckets } => {
-                let fingerprint = fingerprint_state(state, view);
+                let fingerprint = fingerprint_state(state, quotient, projection);
                 buckets.get(&fingerprint).and_then(|candidates| {
-                    candidates
-                        .iter()
-                        .copied()
-                        .find(|index| states_share_key(&states[*index], state, view))
+                    candidates.iter().copied().find(|index| {
+                        states_share_key(&states[*index], state, quotient, projection)
+                    })
                 })
             }
         }
@@ -135,14 +136,15 @@ impl ExplicitStateIndex {
         &mut self,
         states: &ExplicitStateStore<S>,
         state_index: usize,
-        view: Option<nirvash_lower::StateAbstraction<S>>,
+        quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+        projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
     ) where
         S: FiniteModelDomain + std::fmt::Debug,
     {
         let Self::Fingerprinted { buckets } = self else {
             return;
         };
-        let fingerprint = fingerprint_state(&states[state_index], view);
+        let fingerprint = fingerprint_state(&states[state_index], quotient, projection);
         buckets.entry(fingerprint).or_default().push(state_index);
     }
 }
@@ -160,22 +162,36 @@ fn fingerprint_hash<T: Hash>(value: &T) -> u64 {
 fn states_share_key<S: PartialEq>(
     lhs: &S,
     rhs: &S,
-    view: Option<nirvash_lower::StateAbstraction<S>>,
+    quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+    projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
 ) -> bool {
-    match view {
-        Some(view) => view.project(lhs) == view.project(rhs),
+    match projected_state_key(lhs, quotient, projection) {
+        Some(lhs_key) => {
+            projected_state_key(rhs, quotient, projection).is_some_and(|rhs_key| lhs_key == rhs_key)
+        }
         None => lhs == rhs,
     }
 }
 
 fn fingerprint_state<S: std::fmt::Debug>(
     state: &S,
-    view: Option<nirvash_lower::StateAbstraction<S>>,
+    quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+    projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
 ) -> u64 {
-    match view {
-        Some(view) => fingerprint_hash(&view.project(state)),
+    match projected_state_key(state, quotient, projection) {
+        Some(key) => fingerprint_hash(&key),
         None => fingerprint_debug(state),
     }
+}
+
+fn projected_state_key<S>(
+    state: &S,
+    quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+    projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
+) -> Option<String> {
+    projection
+        .map(|projection| projection.project(state))
+        .or_else(|| quotient.map(|quotient| quotient.quotient_key(state)))
 }
 
 #[derive(Debug, Clone)]
@@ -441,7 +457,7 @@ where
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         if !self.config.check_deadlocks {
-            return Ok(ModelCheckResult::ok());
+            return Ok(self.empty_result());
         }
 
         match self.config.exploration {
@@ -454,7 +470,7 @@ where
         &self,
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         if self.spec.properties().is_empty() {
-            return Ok(ModelCheckResult::ok());
+            return Ok(self.empty_result());
         }
 
         match self.config.exploration {
@@ -464,7 +480,7 @@ where
     }
 
     pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let mut result = ModelCheckResult::ok();
+        let mut result = self.empty_result();
 
         let invariants = self.check_invariants()?;
         if self.config.stop_on_first_violation && !invariants.is_ok() {
@@ -542,12 +558,13 @@ where
                         kind: CounterexampleKind::Invariant,
                         name: predicate.name().to_owned(),
                         trace: self.trace_to_state(&graph, index),
+                        soundness_tier: self.model_case.soundness_tier(),
                     }));
                 }
             }
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     fn check_deadlocks_graph(
@@ -560,10 +577,11 @@ where
                 kind: CounterexampleKind::Deadlock,
                 name: "deadlock".to_owned(),
                 trace: self.trace_to_state(&graph, *deadlock),
+                soundness_tier: self.model_case.soundness_tier(),
             }));
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     fn check_properties_graph(
@@ -587,13 +605,14 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
+                            soundness_tier: self.model_case.soundness_tier(),
                         },
                     );
                 }
             }
         }
 
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn check_invariants_lasso(
@@ -603,7 +622,7 @@ where
         for init in self.initial_states_filtered()? {
             self.search_invariants_lasso(vec![init], Vec::new(), &mut best);
         }
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn check_deadlocks_lasso(
@@ -613,7 +632,7 @@ where
         for init in self.initial_states_filtered()? {
             self.search_deadlocks_lasso(vec![init], Vec::new(), &mut best);
         }
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn check_properties_lasso(
@@ -634,13 +653,14 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
+                            soundness_tier: self.model_case.soundness_tier(),
                         },
                     );
                 }
             }
         }
 
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn build_reachable_graph(
@@ -864,7 +884,8 @@ where
         let state_index = ExplicitStateIndex::from_states(
             config.explicit.state_storage,
             &graph.states,
-            self.model_case.state_abstraction(),
+            self.verified_quotient(),
+            self.heuristic_state_projection(),
         );
 
         Ok(Some((graph, state_index, saved.frontier)))
@@ -984,12 +1005,11 @@ where
         ) {
             if !self.model_case.state_constraints().is_empty()
                 || !self.model_case.action_constraints().is_empty()
-                || self.model_case.symmetry().is_some()
-                || self.model_case.state_abstraction().is_some()
-                || self.model_case.por().is_some()
+                || self.model_case.sound_reduction().is_some()
+                || self.model_case.heuristic_reduction().is_some()
             {
                 return Err(ModelCheckError::UnsupportedConfiguration(
-                    "parallel frontier exploration does not support state/action constraints, symmetry reduction, view abstraction, or partial-order reduction",
+                    "parallel frontier exploration does not support state/action constraints, sound reductions, or heuristic reductions",
                 ));
             }
             return Ok(self.expand_frontier_parallel(
@@ -1179,9 +1199,12 @@ where
         push_frontier: &mut dyn FnMut(usize, &T::State),
         config: &ModelCheckConfig,
     ) -> Result<Option<usize>, ModelCheckError> {
-        if let Some(existing) =
-            state_index.state_index(&graph.states, &state, self.model_case.state_abstraction())
-        {
+        if let Some(existing) = state_index.state_index(
+            &graph.states,
+            &state,
+            self.verified_quotient(),
+            self.heuristic_state_projection(),
+        ) {
             return Ok(Some(existing));
         }
 
@@ -1194,7 +1217,12 @@ where
         graph.edges.push(Vec::new());
         graph.parents.push(parent);
         graph.depths.push(depth);
-        state_index.record_state(&graph.states, index, self.model_case.state_abstraction());
+        state_index.record_state(
+            &graph.states,
+            index,
+            self.verified_quotient(),
+            self.heuristic_state_projection(),
+        );
         push_frontier(index, &graph.states[index]);
         Ok(Some(index))
     }
@@ -1241,10 +1269,47 @@ where
     }
 
     fn canonicalize_state(&self, state: &T::State) -> T::State {
-        self.model_case
-            .symmetry()
+        self.verified_symmetry()
             .map(|symmetry| symmetry.canonicalize(state))
             .unwrap_or_else(|| state.clone())
+    }
+
+    fn verified_symmetry(&self) -> Option<&nirvash_lower::VerifiedSymmetry<T::State>> {
+        self.model_case
+            .sound_reduction()
+            .and_then(|reduction| reduction.symmetry())
+    }
+
+    fn verified_quotient(&self) -> Option<&nirvash_lower::VerifiedStateQuotient<T::State>> {
+        self.model_case
+            .sound_reduction()
+            .and_then(|reduction| reduction.quotient())
+    }
+
+    fn verified_por(&self) -> Option<&nirvash_lower::VerifiedPor<T::State, T::Action>> {
+        self.model_case
+            .sound_reduction()
+            .and_then(|reduction| reduction.por())
+    }
+
+    fn heuristic_state_projection(
+        &self,
+    ) -> Option<nirvash_lower::HeuristicStateProjection<T::State>> {
+        self.model_case
+            .heuristic_reduction()
+            .and_then(|reduction| reduction.state_projection())
+    }
+
+    fn heuristic_action_pruning(
+        &self,
+    ) -> Option<nirvash_lower::HeuristicActionPruning<T::State, T::Action>> {
+        self.model_case
+            .heuristic_reduction()
+            .and_then(|reduction| reduction.action_pruning())
+    }
+
+    fn empty_result(&self) -> ModelCheckResult<T::State, T::Action> {
+        ModelCheckResult::with_tier(self.model_case.soundness_tier())
     }
 
     fn state_constraints_allow(&self, state: &T::State) -> bool {
@@ -1269,7 +1334,10 @@ where
     fn constrained_successors(&self, state: &T::State) -> Vec<(TraceStep<T::Action>, T::State)> {
         let mut values = Vec::new();
         let mut actions = self.spec.actions();
-        if let Some(reducer) = self.model_case.por() {
+        if let Some(reducer) = self.verified_por() {
+            actions.retain(|action| reducer.allow_action(state, action));
+        }
+        if let Some(reducer) = self.heuristic_action_pruning() {
             actions.retain(|action| reducer.allow_action(state, action));
         }
 
@@ -1332,6 +1400,7 @@ where
             deadlocks: graph.deadlocks.clone(),
             truncated: graph.truncated,
             stutter_omitted: false,
+            soundness_tier: self.model_case.soundness_tier(),
         }
     }
 
@@ -1352,6 +1421,7 @@ where
                         kind: CounterexampleKind::Invariant,
                         name: predicate.name().to_owned(),
                         trace: self.terminal_trace(states.clone(), steps.clone()),
+                        soundness_tier: self.model_case.soundness_tier(),
                     },
                 );
                 return;
@@ -1391,6 +1461,7 @@ where
                     kind: CounterexampleKind::Deadlock,
                     name: "deadlock".to_owned(),
                     trace: self.terminal_trace(states.clone(), steps.clone()),
+                    soundness_tier: self.model_case.soundness_tier(),
                 },
             );
             return;

@@ -12,6 +12,21 @@ pub enum ModelBackend {
     Symbolic,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum SoundnessTier {
+    Exact,
+    SoundReduced,
+    Heuristic,
+}
+
+impl SoundnessTier {
+    pub fn join(self, other: Self) -> Self {
+        if self >= other { self } else { other }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CounterexampleMinimization {
     None,
@@ -489,22 +504,33 @@ pub struct Counterexample<S, A> {
     pub kind: CounterexampleKind,
     pub name: String,
     pub trace: Trace<S, A>,
+    pub soundness_tier: SoundnessTier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCheckResult<S, A> {
     violations: Vec<Counterexample<S, A>>,
+    soundness_tier: SoundnessTier,
 }
 
 impl<S, A> ModelCheckResult<S, A> {
     pub fn ok() -> Self {
         Self {
             violations: Vec::new(),
+            soundness_tier: SoundnessTier::Exact,
+        }
+    }
+
+    pub fn with_tier(soundness_tier: SoundnessTier) -> Self {
+        Self {
+            violations: Vec::new(),
+            soundness_tier,
         }
     }
 
     pub fn with_violation(violation: Counterexample<S, A>) -> Self {
         Self {
+            soundness_tier: violation.soundness_tier,
             violations: vec![violation],
         }
     }
@@ -517,11 +543,17 @@ impl<S, A> ModelCheckResult<S, A> {
         &self.violations
     }
 
+    pub const fn soundness_tier(&self) -> SoundnessTier {
+        self.soundness_tier
+    }
+
     pub fn push(&mut self, violation: Counterexample<S, A>) {
+        self.soundness_tier = self.soundness_tier.join(violation.soundness_tier);
         self.violations.push(violation);
     }
 
     pub fn extend(&mut self, other: Self) {
+        self.soundness_tier = self.soundness_tier.join(other.soundness_tier);
         self.violations.extend(other.violations);
     }
 }

@@ -8,9 +8,9 @@
 - [x] Phase 1C: code witness / macro harness を relation API に追従させる
 - [x] Phase 2: `trace_refines` を explicit backend で実装する
 - [x] Phase 3: `ExplicitModelChecker` / `SymbolicModelChecker` へ checker front door を分離する
-- [ ] Phase 4: sound reduction と heuristic reduction の API を分離する
-- [ ] Phase 5: Rust 検証アダプタ (`proptest-state-machine` / `Kani` / `loom`) を追加する
-- [ ] Phase 6: proof export を pretty / sound に分離する
+- [x] Phase 4: sound reduction と heuristic reduction の API を分離する
+- [x] Phase 5: Rust 検証アダプタ (`proptest-state-machine` / `Kani` / `loom`) を追加する
+- [x] Phase 6: proof export を pretty / sound に分離する
 - [ ] Phase 7: `Verus` / `RefinedRust` bridge の最小例を追加する
 
 - Status: Draft
@@ -514,20 +514,20 @@ fn output_refines(
 
 ### Phase 4
 
-- sound / heuristic reduction の API 分離
-- `ModelCheckResult` に soundness tier を追加
+- [x] sound / heuristic reduction の API 分離
+- [x] `ModelCheckResult` に soundness tier を追加
 
 ### Phase 5
 
-- `proptest-state-machine` adapter を追加
-- `Kani` harness helper を追加
-- `loom` trace adapter を追加
+- [x] `proptest-state-machine` adapter を追加
+- [x] `Kani` harness helper を追加
+- [x] `loom` trace adapter を追加
 
 ### Phase 6
 
-- `PrettySpecExporter` と `SoundProofExporter` を分離
-- obligation fragment を明文化
-- unsupported fragment を fail-closed
+- [x] `PrettySpecExporter` と `SoundProofExporter` を分離
+- [x] obligation fragment を明文化
+- [x] unsupported fragment を fail-closed
 
 ### Phase 7
 

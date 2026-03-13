@@ -1155,6 +1155,78 @@ where
     })
 }
 
+pub mod proptest_adapter {
+    use super::{
+        ObservedTrace, ProtocolConformanceSpec, TraceRefinementError, TraceRefinementWitness,
+        trace_refines,
+    };
+    use nirvash_lower::{ModelInstance, ProofObligation, TemporalSpec};
+
+    pub fn assert_input_sequence_refines<Spec>(
+        spec: &Spec,
+        model_case: ModelInstance<Spec::State, Spec::Action>,
+        observed: &ObservedTrace<Spec::SummaryState, Spec::Action, Spec::SummaryOutput>,
+    ) -> Result<
+        TraceRefinementWitness<Spec::State, Spec::Action>,
+        TraceRefinementError<Spec::State, Spec::Action>,
+    >
+    where
+        Spec: ProtocolConformanceSpec + TemporalSpec,
+        Spec::State: PartialEq + nirvash_lower::FiniteModelDomain + Send + Sync,
+        Spec::Action: PartialEq + Send + Sync,
+    {
+        trace_refines(spec, model_case, observed)
+    }
+
+    pub fn expected_obligations<S, A>(model_case: &ModelInstance<S, A>) -> Vec<ProofObligation> {
+        model_case.reduction_obligations()
+    }
+}
+
+pub mod loom_adapter {
+    use super::{
+        ObservedTrace, ProtocolConformanceSpec, TraceRefinementError, TraceRefinementWitness,
+        trace_refines,
+    };
+    use nirvash_lower::{ModelInstance, ProofObligation, TemporalSpec};
+
+    pub fn assert_schedule_refines<Spec>(
+        spec: &Spec,
+        model_case: ModelInstance<Spec::State, Spec::Action>,
+        observed: &ObservedTrace<Spec::SummaryState, Spec::Action, Spec::SummaryOutput>,
+    ) -> Result<
+        TraceRefinementWitness<Spec::State, Spec::Action>,
+        TraceRefinementError<Spec::State, Spec::Action>,
+    >
+    where
+        Spec: ProtocolConformanceSpec + TemporalSpec,
+        Spec::State: PartialEq + nirvash_lower::FiniteModelDomain + Send + Sync,
+        Spec::Action: PartialEq + Send + Sync,
+    {
+        trace_refines(spec, model_case, observed)
+    }
+
+    pub fn expected_obligations<S, A>(model_case: &ModelInstance<S, A>) -> Vec<ProofObligation> {
+        model_case.reduction_obligations()
+    }
+}
+
+#[cfg(kani)]
+pub fn kani_assert_step_refines<Spec>(
+    spec: &Spec,
+    before_summary: &Spec::SummaryState,
+    action: &Spec::Action,
+    after_summary: &Spec::SummaryState,
+) -> Result<
+    StepRefinementWitness<Spec::State, Spec::Action>,
+    StepRefinementError<Spec::State, Spec::Action>,
+>
+where
+    Spec: ProtocolConformanceSpec,
+{
+    step_refines_summary(spec, before_summary, action, after_summary)
+}
+
 pub fn assert_declared_state_projection<Summary, State>(
     summary: &Summary,
     expected_summary: &Summary,
@@ -1335,7 +1407,9 @@ pub fn run_registered_code_witness_tests() {
 mod tests {
     use super::*;
     use nirvash::StepExpr;
-    use nirvash_lower::TemporalSpec;
+    use nirvash_lower::{
+        ProofObligation, ProofObligationKind, SoundReduction, TemporalSpec, VerifiedStateQuotient,
+    };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum DemoAction {
@@ -1638,6 +1712,22 @@ mod tests {
                 TraceStep::Action(TraceDemoAction::Reset),
             ],
             0,
+        )
+    }
+
+    fn trace_demo_model_case_with_obligation() -> ModelInstance<TraceDemoState, TraceDemoAction> {
+        ModelInstance::new("trace_demo").with_sound_reduction(
+            SoundReduction::new().with_quotient(
+                VerifiedStateQuotient::new("identity_quotient", |state: &TraceDemoState| {
+                    format!("{state:?}")
+                })
+                .with_obligation(ProofObligation::new(
+                    "identity_quotient_sound".to_owned(),
+                    ProofObligationKind::VerifiedStateQuotient,
+                    "THEOREM identity_quotient_sound == QuotientSound".to_owned(),
+                    "(assert QuotientSound)".to_owned(),
+                )),
+            ),
         )
     }
 
@@ -1998,6 +2088,88 @@ mod tests {
                     TraceRefinementError::StepMismatch { index, .. } if index == 1
                 )
         ));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(8))]
+        #[test]
+        fn proptest_adapter_smoke(branch_right in proptest::bool::ANY) {
+            let observed = if branch_right {
+                ObservedTrace::terminal(
+                    vec![
+                        TraceDemoState::Start,
+                        TraceDemoState::Right,
+                        TraceDemoState::Other,
+                    ],
+                    vec![
+                        (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                        (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                    ],
+                )
+            } else {
+                ObservedTrace::terminal(
+                    vec![
+                        TraceDemoState::Start,
+                        TraceDemoState::Left,
+                        TraceDemoState::Done,
+                    ],
+                    vec![
+                        (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                        (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                    ],
+                )
+            };
+            let model_case = trace_demo_model_case_with_obligation();
+
+            let witness = proptest_adapter::assert_input_sequence_refines(
+                &TraceDemoSpec,
+                model_case.clone(),
+                &observed,
+            )
+            .expect("proptest adapter should refine observed trace");
+
+            proptest::prop_assert_eq!(witness.model_case_label, "trace_demo");
+            proptest::prop_assert_eq!(
+                proptest_adapter::expected_obligations(&model_case)
+                    .into_iter()
+                    .map(|obligation| obligation.kind)
+                    .collect::<Vec<_>>(),
+                vec![ProofObligationKind::VerifiedStateQuotient]
+            );
+        }
+    }
+
+    #[test]
+    fn loom_adapter_smoke() {
+        loom::model(|| {
+            let observed = ObservedTrace::terminal(
+                vec![
+                    TraceDemoState::Start,
+                    TraceDemoState::Left,
+                    TraceDemoState::Done,
+                ],
+                vec![
+                    (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                    (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                ],
+            );
+            let model_case = trace_demo_model_case_with_obligation();
+            let witness = loom_adapter::assert_schedule_refines(
+                &TraceDemoSpec,
+                model_case.clone(),
+                &observed,
+            )
+            .expect("loom adapter should refine observed schedule");
+
+            assert_eq!(witness.model_case_label, "trace_demo");
+            assert_eq!(
+                loom_adapter::expected_obligations(&model_case)
+                    .into_iter()
+                    .map(|obligation| obligation.kind)
+                    .collect::<Vec<_>>(),
+                vec![ProofObligationKind::VerifiedStateQuotient]
+            );
+        });
     }
 
     #[test]

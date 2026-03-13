@@ -305,13 +305,15 @@ mod tests {
         BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
         ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
         ExplicitSimulationOptions, ExplicitStateCompression, ExplicitStateStorage, ExplorationMode,
-        ExprDomain, GuardExpr, Ltl, StepExpr, SymbolicKInductionOptions, SymbolicModelCheckOptions,
-        SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicTemporalEngine, TraceStep,
-        TransitionProgram, TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst,
+        ExprDomain, GuardExpr, Ltl, SoundnessTier, StepExpr, SymbolicKInductionOptions,
+        SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine,
+        SymbolicTemporalEngine, TraceStep, TransitionProgram, TransitionRule, UpdateOp,
+        UpdateProgram, UpdateValueExprAst,
     };
     use nirvash_lower::{
-        FrontendSpec, LoweringCx, ModelBackend, ModelCheckConfig, ModelInstance, PorHints,
-        StateAbstraction, TemporalSpec,
+        FrontendSpec, HeuristicActionPruning, HeuristicReduction, HeuristicStateProjection,
+        LoweringCx, ModelBackend, ModelCheckConfig, ModelInstance, ProofObligation,
+        ProofObligationKind, SoundReduction, TemporalSpec, VerifiedPor, VerifiedStateQuotient,
     };
     use nirvash_macros::{
         FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
@@ -1327,24 +1329,28 @@ mod tests {
             .expect("exact storage snapshot");
         let reduced = ModelChecker::for_case(
             &lowered,
-            ModelInstance::new("collapse_pending").with_state_abstraction(StateAbstraction::new(
-                "collapse_pending",
-                |state: &SimulationState| match state {
-                    SimulationState::Left | SimulationState::Right => "pending".to_owned(),
-                    SimulationState::Done => "done".to_owned(),
-                },
-            )),
+            ModelInstance::new("collapse_pending").with_heuristic_reduction(
+                HeuristicReduction::new().with_state_projection(HeuristicStateProjection::new(
+                    "collapse_pending",
+                    |state: &SimulationState| match state {
+                        SimulationState::Left | SimulationState::Right => "pending".to_owned(),
+                        SimulationState::Done => "done".to_owned(),
+                    },
+                )),
+            ),
         )
         .full_reachable_graph_snapshot()
         .expect("view-abstracted snapshot");
 
         assert_eq!(exact.states.len(), 3);
+        assert_eq!(exact.soundness_tier, SoundnessTier::Exact);
         assert_eq!(reduced.states.len(), 2);
         assert_eq!(reduced.initial_indices, vec![0]);
         assert_eq!(reduced.edges.len(), 2);
         assert_eq!(reduced.edges[0].len(), 1);
         assert_eq!(reduced.edges[0][0].action, SimulationAction::Finish);
         assert_eq!(reduced.edges[0][0].target, 1);
+        assert_eq!(reduced.soundness_tier, SoundnessTier::Heuristic);
     }
 
     #[test]
@@ -1356,21 +1362,23 @@ mod tests {
             .expect("exact storage snapshot");
         let reduced = ModelChecker::for_case(
             &lowered,
-            ModelInstance::new("prefer_short_path").with_por(PorHints::new(
-                "prefer_short_path",
-                |state: &CounterexampleState, action: &CounterexampleAction| match state {
-                    CounterexampleState::Start => {
-                        matches!(action, CounterexampleAction::TakeShort)
-                    }
-                    CounterexampleState::Long1 => {
-                        matches!(action, CounterexampleAction::Advance)
-                    }
-                    CounterexampleState::Long2 => {
-                        matches!(action, CounterexampleAction::Finish)
-                    }
-                    CounterexampleState::Done => false,
-                },
-            )),
+            ModelInstance::new("prefer_short_path").with_heuristic_reduction(
+                HeuristicReduction::new().with_action_pruning(HeuristicActionPruning::new(
+                    "prefer_short_path",
+                    |state: &CounterexampleState, action: &CounterexampleAction| match state {
+                        CounterexampleState::Start => {
+                            matches!(action, CounterexampleAction::TakeShort)
+                        }
+                        CounterexampleState::Long1 => {
+                            matches!(action, CounterexampleAction::Advance)
+                        }
+                        CounterexampleState::Long2 => {
+                            matches!(action, CounterexampleAction::Finish)
+                        }
+                        CounterexampleState::Done => false,
+                    },
+                )),
+            ),
         )
         .full_reachable_graph_snapshot()
         .expect("partial-order reduced snapshot");
@@ -1384,6 +1392,36 @@ mod tests {
         assert_eq!(reduced.edges[0].len(), 1);
         assert_eq!(reduced.edges[0][0].action, CounterexampleAction::TakeShort);
         assert_eq!(reduced.edges[0][0].target, 1);
+        assert_eq!(reduced.soundness_tier, SoundnessTier::Heuristic);
+    }
+
+    #[test]
+    fn explicit_sound_reduction_marks_snapshot_and_result_tier() {
+        let spec = SimulationSpec;
+        let lowered = lower_spec(&spec);
+        let model_case = ModelInstance::new("identity_quotient").with_sound_reduction(
+            SoundReduction::new().with_quotient(
+                VerifiedStateQuotient::new("identity_quotient", |state: &SimulationState| {
+                    format!("{state:?}")
+                })
+                .with_obligation(ProofObligation::new(
+                    "identity_quotient_sound".to_owned(),
+                    ProofObligationKind::VerifiedStateQuotient,
+                    "THEOREM identity_quotient_sound == QuotientSound".to_owned(),
+                    "(assert QuotientSound)".to_owned(),
+                )),
+            ),
+        );
+
+        let snapshot = ModelChecker::for_case(&lowered, model_case.clone())
+            .full_reachable_graph_snapshot()
+            .expect("sound-reduced snapshot");
+        let result = ModelChecker::for_case(&lowered, model_case)
+            .check_all()
+            .expect("sound-reduced check");
+
+        assert_eq!(snapshot.soundness_tier, SoundnessTier::SoundReduced);
+        assert_eq!(result.soundness_tier(), SoundnessTier::SoundReduced);
     }
 
     #[test]
@@ -1426,9 +1464,10 @@ mod tests {
                     exploration: ExplorationMode::ReachableGraph,
                     ..ModelCheckConfig::default()
                 })
-                .with_state_abstraction(StateAbstraction::new(
-                    "ready_only",
-                    |state: &QuantState| format!("ready={}", state.ready),
+                .with_heuristic_reduction(HeuristicReduction::new().with_state_projection(
+                    HeuristicStateProjection::new("ready_only", |state: &QuantState| {
+                        format!("ready={}", state.ready)
+                    }),
                 )),
         )
         .full_reachable_graph_snapshot()
@@ -1437,7 +1476,7 @@ mod tests {
         assert!(matches!(
             err,
             nirvash::ModelCheckError::UnsupportedConfiguration(message)
-                if message.contains("view abstraction")
+                if message.contains("heuristic state projection")
         ));
     }
 
@@ -1453,11 +1492,13 @@ mod tests {
                     exploration: ExplorationMode::ReachableGraph,
                     ..ModelCheckConfig::default()
                 })
-                .with_por(PorHints::new(
-                    "advance_only",
-                    |_state: &QuantState, action: &QuantAction| {
-                        matches!(action, QuantAction::Advance)
-                    },
+                .with_heuristic_reduction(HeuristicReduction::new().with_action_pruning(
+                    HeuristicActionPruning::new(
+                        "advance_only",
+                        |_state: &QuantState, action: &QuantAction| {
+                            matches!(action, QuantAction::Advance)
+                        },
+                    ),
                 )),
         )
         .full_reachable_graph_snapshot()
@@ -1466,7 +1507,46 @@ mod tests {
         assert!(matches!(
             err,
             nirvash::ModelCheckError::UnsupportedConfiguration(message)
-                if message.contains("partial-order reduction")
+                if message.contains("heuristic action pruning")
+        ));
+    }
+
+    #[test]
+    fn symbolic_backend_rejects_sound_reduction() {
+        let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
+        let err = ModelChecker::for_case(
+            &lowered,
+            ModelInstance::new("symbolic_sound_reduction")
+                .with_checker_config(ModelCheckConfig {
+                    backend: Some(ModelBackend::Symbolic),
+                    exploration: ExplorationMode::ReachableGraph,
+                    ..ModelCheckConfig::default()
+                })
+                .with_sound_reduction(
+                    SoundReduction::new().with_por(
+                        VerifiedPor::new(
+                            "advance_only",
+                            |_state: &QuantState, action: &QuantAction| {
+                                matches!(action, QuantAction::Advance)
+                            },
+                        )
+                        .with_obligation(ProofObligation::new(
+                            "verified_por_sound".to_owned(),
+                            ProofObligationKind::VerifiedPor,
+                            "THEOREM verified_por_sound == PORSound".to_owned(),
+                            "(assert PORSound)".to_owned(),
+                        )),
+                    ),
+                ),
+        )
+        .full_reachable_graph_snapshot()
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("sound reductions")
         ));
     }
 

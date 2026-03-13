@@ -34,7 +34,7 @@ pub use model::{
     ExplicitParallelOptions, ExplicitReachabilityStrategy, ExplicitSimulationOptions,
     ExplicitStateCompression, ExplicitStateStorage, ExplorationMode, ModelBackend,
     ModelCheckConfig, ModelCheckError, ModelCheckResult, RelationalBridgeOptions,
-    RelationalBridgeStrategy, SymbolicKInductionOptions, SymbolicModelCheckOptions,
+    RelationalBridgeStrategy, SoundnessTier, SymbolicKInductionOptions, SymbolicModelCheckOptions,
     SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicTemporalEngine,
 };
 pub use nirvash_foundation::{

@@ -1,5 +1,38 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProofObligationKind {
+    InitImpliesInvariant,
+    StepPreservesInvariant,
+    VerifiedSymmetry,
+    VerifiedStateQuotient,
+    VerifiedPor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofObligation {
+    pub label: String,
+    pub kind: ProofObligationKind,
+    pub tla_theorem: String,
+    pub smtlib: String,
+}
+
+impl ProofObligation {
+    pub fn new(
+        label: impl Into<String>,
+        kind: ProofObligationKind,
+        tla_theorem: impl Into<String>,
+        smtlib: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            kind,
+            tla_theorem: tla_theorem.into(),
+            smtlib: smtlib.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct VarDecl {
     pub name: String,

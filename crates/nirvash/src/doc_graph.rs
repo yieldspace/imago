@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, fmt::Debug};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BoolExpr, ModelBackend, RelationFieldSchema, RelationFieldSummary,
+    BoolExpr, ModelBackend, RelationFieldSchema, RelationFieldSummary, SoundnessTier,
     collect_relational_state_schema, collect_relational_state_summary,
     registry::{lookup_action_doc_label, lookup_action_doc_presentation},
 };
@@ -22,6 +22,7 @@ pub struct ReachableGraphSnapshot<S, A> {
     pub deadlocks: Vec<usize>,
     pub truncated: bool,
     pub stutter_omitted: bool,
+    pub soundness_tier: SoundnessTier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +378,7 @@ pub struct DocGraphSnapshot {
 pub struct DocGraphCase {
     pub label: String,
     pub backend: ModelBackend,
+    pub soundness_tier: SoundnessTier,
     pub graph: DocGraphSnapshot,
 }
 
@@ -712,6 +714,7 @@ impl SpecVizCase {
         let DocGraphCase {
             label,
             backend,
+            soundness_tier: _,
             graph,
         } = case;
         let reduced_graph = reduce_doc_graph(&graph);

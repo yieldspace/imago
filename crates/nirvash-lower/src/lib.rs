@@ -9,12 +9,12 @@ pub use nirvash::{
     ExplicitParallelOptions, ExplicitReachabilityStrategy, ExplicitSimulationOptions,
     ExplicitStateCompression, ExplicitStateStorage, ExplorationMode, Fairness, Ltl, ModelBackend,
     ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
-    ReachableGraphSnapshot, RelationalBridgeOptions, RelationalBridgeStrategy, SpecVizBundle,
-    SpecVizRegistrationSet, StateExpr, StepExpr, StepExprAst, SymbolicKInductionOptions,
-    SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicTemporalEngine,
-    Trace, TraceStep, TransitionProgram, TransitionProgramError, TransitionRule,
-    TransitionSuccessor, UpdateAst, UpdateOp, UpdateProgram, UpdateValueExprAst, VizPolicy,
-    collect_relational_state_schema, collect_relational_state_summary,
+    ReachableGraphSnapshot, RelationalBridgeOptions, RelationalBridgeStrategy, SoundnessTier,
+    SpecVizBundle, SpecVizRegistrationSet, StateExpr, StepExpr, StepExprAst,
+    SymbolicKInductionOptions, SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine,
+    SymbolicTemporalEngine, Trace, TraceStep, TransitionProgram, TransitionProgramError,
+    TransitionRule, TransitionSuccessor, UpdateAst, UpdateOp, UpdateProgram, UpdateValueExprAst,
+    VizPolicy, collect_relational_state_schema, collect_relational_state_summary,
     registry::RegisteredSymbolicStateSchema,
 };
 pub use nirvash_foundation::{
@@ -26,18 +26,18 @@ pub use nirvash_foundation::{
 };
 pub use nirvash_ir::{
     ActionExpr, BuiltinPredicateOp as IrBuiltinPredicateOp, ComparisonOp as IrComparisonOp,
-    FairnessDecl, QuantifierKind as IrQuantifierKind, SpecCore, StateExpr as IrStateExpr,
-    TemporalExpr, UpdateExpr as IrUpdateExpr, UpdateOpDecl as IrUpdateOpDecl,
-    ValueExpr as IrValueExpr, ViewExpr,
+    FairnessDecl, ProofObligation, ProofObligationKind, QuantifierKind as IrQuantifierKind,
+    SpecCore, StateExpr as IrStateExpr, TemporalExpr, UpdateExpr as IrUpdateExpr,
+    UpdateOpDecl as IrUpdateOpDecl, ValueExpr as IrValueExpr, ViewExpr,
 };
 
 #[derive(Debug)]
-pub struct StateAbstraction<S> {
+pub struct HeuristicStateProjection<S> {
     name: &'static str,
     project: fn(&S) -> String,
 }
 
-impl<S> StateAbstraction<S> {
+impl<S> HeuristicStateProjection<S> {
     pub const fn new(name: &'static str, project: fn(&S) -> String) -> Self {
         Self { name, project }
     }
@@ -51,21 +51,29 @@ impl<S> StateAbstraction<S> {
     }
 }
 
-impl<S> Clone for StateAbstraction<S> {
+impl<S> Clone for HeuristicStateProjection<S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S> Copy for StateAbstraction<S> {}
+impl<S> Copy for HeuristicStateProjection<S> {}
+
+impl<S> PartialEq for HeuristicStateProjection<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl<S> Eq for HeuristicStateProjection<S> {}
 
 #[derive(Debug)]
-pub struct PorHints<S, A> {
+pub struct HeuristicActionPruning<S, A> {
     name: &'static str,
     allow_action: fn(&S, &A) -> bool,
 }
 
-impl<S, A> PorHints<S, A> {
+impl<S, A> HeuristicActionPruning<S, A> {
     pub const fn new(name: &'static str, allow_action: fn(&S, &A) -> bool) -> Self {
         Self { name, allow_action }
     }
@@ -79,31 +87,36 @@ impl<S, A> PorHints<S, A> {
     }
 }
 
-impl<S, A> Clone for PorHints<S, A> {
+impl<S, A> Clone for HeuristicActionPruning<S, A> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S, A> Copy for PorHints<S, A> {}
+impl<S, A> Copy for HeuristicActionPruning<S, A> {}
 
-#[derive(Debug)]
-pub struct SymmetrySpec<S> {
+impl<S, A> PartialEq for HeuristicActionPruning<S, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl<S, A> Eq for HeuristicActionPruning<S, A> {}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedSymmetry<S> {
     name: &'static str,
     canonicalize: fn(&S) -> S,
+    obligations: Vec<ProofObligation>,
 }
 
-impl<S> Clone for SymmetrySpec<S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<S> Copy for SymmetrySpec<S> {}
-
-impl<S> SymmetrySpec<S> {
+impl<S> VerifiedSymmetry<S> {
     pub const fn new(name: &'static str, canonicalize: fn(&S) -> S) -> Self {
-        Self { name, canonicalize }
+        Self {
+            name,
+            canonicalize,
+            obligations: Vec::new(),
+        }
     }
 
     pub const fn name(&self) -> &'static str {
@@ -112,6 +125,233 @@ impl<S> SymmetrySpec<S> {
 
     pub fn canonicalize(&self, state: &S) -> S {
         (self.canonicalize)(state)
+    }
+
+    pub fn obligations(&self) -> &[ProofObligation] {
+        &self.obligations
+    }
+
+    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
+        self.obligations.push(obligation);
+        self
+    }
+
+    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
+        self.obligations.extend(obligations);
+        self
+    }
+}
+
+impl<S> PartialEq for VerifiedSymmetry<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.obligations == other.obligations
+    }
+}
+
+impl<S> Eq for VerifiedSymmetry<S> {}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedStateQuotient<S> {
+    name: &'static str,
+    quotient_key: fn(&S) -> String,
+    obligations: Vec<ProofObligation>,
+}
+
+impl<S> VerifiedStateQuotient<S> {
+    pub const fn new(name: &'static str, quotient_key: fn(&S) -> String) -> Self {
+        Self {
+            name,
+            quotient_key,
+            obligations: Vec::new(),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn quotient_key(&self, state: &S) -> String {
+        (self.quotient_key)(state)
+    }
+
+    pub fn obligations(&self) -> &[ProofObligation] {
+        &self.obligations
+    }
+
+    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
+        self.obligations.push(obligation);
+        self
+    }
+
+    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
+        self.obligations.extend(obligations);
+        self
+    }
+}
+
+impl<S> PartialEq for VerifiedStateQuotient<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.obligations == other.obligations
+    }
+}
+
+impl<S> Eq for VerifiedStateQuotient<S> {}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedPor<S, A> {
+    name: &'static str,
+    allow_action: fn(&S, &A) -> bool,
+    obligations: Vec<ProofObligation>,
+}
+
+impl<S, A> VerifiedPor<S, A> {
+    pub const fn new(name: &'static str, allow_action: fn(&S, &A) -> bool) -> Self {
+        Self {
+            name,
+            allow_action,
+            obligations: Vec::new(),
+        }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn allow_action(&self, state: &S, action: &A) -> bool {
+        (self.allow_action)(state, action)
+    }
+
+    pub fn obligations(&self) -> &[ProofObligation] {
+        &self.obligations
+    }
+
+    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
+        self.obligations.push(obligation);
+        self
+    }
+
+    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
+        self.obligations.extend(obligations);
+        self
+    }
+}
+
+impl<S, A> PartialEq for VerifiedPor<S, A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.obligations == other.obligations
+    }
+}
+
+impl<S, A> Eq for VerifiedPor<S, A> {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoundReduction<S, A> {
+    symmetry: Option<VerifiedSymmetry<S>>,
+    quotient: Option<VerifiedStateQuotient<S>>,
+    por: Option<VerifiedPor<S, A>>,
+}
+
+impl<S, A> Default for SoundReduction<S, A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S, A> SoundReduction<S, A> {
+    pub const fn new() -> Self {
+        Self {
+            symmetry: None,
+            quotient: None,
+            por: None,
+        }
+    }
+
+    pub fn with_symmetry(mut self, symmetry: VerifiedSymmetry<S>) -> Self {
+        self.symmetry = Some(symmetry);
+        self
+    }
+
+    pub fn with_quotient(mut self, quotient: VerifiedStateQuotient<S>) -> Self {
+        self.quotient = Some(quotient);
+        self
+    }
+
+    pub fn with_por(mut self, por: VerifiedPor<S, A>) -> Self {
+        self.por = Some(por);
+        self
+    }
+
+    pub fn symmetry(&self) -> Option<&VerifiedSymmetry<S>> {
+        self.symmetry.as_ref()
+    }
+
+    pub fn quotient(&self) -> Option<&VerifiedStateQuotient<S>> {
+        self.quotient.as_ref()
+    }
+
+    pub fn por(&self) -> Option<&VerifiedPor<S, A>> {
+        self.por.as_ref()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.symmetry.is_none() && self.quotient.is_none() && self.por.is_none()
+    }
+
+    pub fn obligations(&self) -> Vec<ProofObligation> {
+        let mut obligations = Vec::new();
+        if let Some(symmetry) = &self.symmetry {
+            obligations.extend(symmetry.obligations().iter().cloned());
+        }
+        if let Some(quotient) = &self.quotient {
+            obligations.extend(quotient.obligations().iter().cloned());
+        }
+        if let Some(por) = &self.por {
+            obligations.extend(por.obligations().iter().cloned());
+        }
+        obligations
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeuristicReduction<S, A> {
+    state_projection: Option<HeuristicStateProjection<S>>,
+    action_pruning: Option<HeuristicActionPruning<S, A>>,
+}
+
+impl<S, A> Default for HeuristicReduction<S, A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S, A> HeuristicReduction<S, A> {
+    pub const fn new() -> Self {
+        Self {
+            state_projection: None,
+            action_pruning: None,
+        }
+    }
+
+    pub fn with_state_projection(mut self, state_projection: HeuristicStateProjection<S>) -> Self {
+        self.state_projection = Some(state_projection);
+        self
+    }
+
+    pub fn with_action_pruning(mut self, action_pruning: HeuristicActionPruning<S, A>) -> Self {
+        self.action_pruning = Some(action_pruning);
+        self
+    }
+
+    pub fn state_projection(&self) -> Option<HeuristicStateProjection<S>> {
+        self.state_projection.clone()
+    }
+
+    pub fn action_pruning(&self) -> Option<HeuristicActionPruning<S, A>> {
+        self.action_pruning.clone()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.state_projection.is_none() && self.action_pruning.is_none()
     }
 }
 
@@ -137,9 +377,8 @@ pub struct ModelInstance<S, A> {
     label: &'static str,
     state_constraints: Vec<BoolExpr<S>>,
     action_constraints: Vec<StepExpr<S, A>>,
-    symmetry: Option<SymmetrySpec<S>>,
-    state_abstraction: Option<StateAbstraction<S>>,
-    por_hints: Option<PorHints<S, A>>,
+    sound_reduction: Option<SoundReduction<S, A>>,
+    heuristic_reduction: Option<HeuristicReduction<S, A>>,
     checker_config: ModelCheckConfig,
     check_deadlocks: bool,
     presentation: ModelPresentationConfig<S>,
@@ -151,9 +390,8 @@ impl<S, A> ModelInstance<S, A> {
             label,
             state_constraints: Vec::new(),
             action_constraints: Vec::new(),
-            symmetry: None,
-            state_abstraction: None,
-            por_hints: None,
+            sound_reduction: None,
+            heuristic_reduction: None,
             checker_config: ModelCheckConfig::default(),
             check_deadlocks: true,
             presentation: ModelPresentationConfig::default(),
@@ -179,18 +417,13 @@ impl<S, A> ModelInstance<S, A> {
         self
     }
 
-    pub fn with_symmetry(mut self, symmetry: SymmetrySpec<S>) -> Self {
-        self.symmetry = Some(symmetry);
+    pub fn with_sound_reduction(mut self, reduction: SoundReduction<S, A>) -> Self {
+        self.sound_reduction = (!reduction.is_empty()).then_some(reduction);
         self
     }
 
-    pub fn with_state_abstraction(mut self, state_abstraction: StateAbstraction<S>) -> Self {
-        self.state_abstraction = Some(state_abstraction);
-        self
-    }
-
-    pub fn with_por(mut self, por: PorHints<S, A>) -> Self {
-        self.por_hints = Some(por);
+    pub fn with_heuristic_reduction(mut self, reduction: HeuristicReduction<S, A>) -> Self {
+        self.heuristic_reduction = (!reduction.is_empty()).then_some(reduction);
         self
     }
 
@@ -236,16 +469,28 @@ impl<S, A> ModelInstance<S, A> {
         &self.action_constraints
     }
 
-    pub fn symmetry(&self) -> Option<SymmetrySpec<S>> {
-        self.symmetry
+    pub fn sound_reduction(&self) -> Option<&SoundReduction<S, A>> {
+        self.sound_reduction.as_ref()
     }
 
-    pub fn state_abstraction(&self) -> Option<StateAbstraction<S>> {
-        self.state_abstraction
+    pub fn heuristic_reduction(&self) -> Option<&HeuristicReduction<S, A>> {
+        self.heuristic_reduction.as_ref()
     }
 
-    pub fn por(&self) -> Option<PorHints<S, A>> {
-        self.por_hints
+    pub fn reduction_obligations(&self) -> Vec<ProofObligation> {
+        self.sound_reduction()
+            .map(SoundReduction::obligations)
+            .unwrap_or_default()
+    }
+
+    pub fn soundness_tier(&self) -> SoundnessTier {
+        if self.heuristic_reduction().is_some() {
+            SoundnessTier::Heuristic
+        } else if self.sound_reduction().is_some() {
+            SoundnessTier::SoundReduced
+        } else {
+            SoundnessTier::Exact
+        }
     }
 
     pub fn checker_config(&self) -> ModelCheckConfig {
@@ -2040,7 +2285,7 @@ pub mod registry {
         collections::BTreeSet,
     };
 
-    use super::{FrontendSpec, ModelInstance, SymmetrySpec};
+    use super::{FrontendSpec, ModelInstance, SoundReduction, VerifiedSymmetry};
     use nirvash::{
         BoolExpr, Fairness, Ltl, SpecVizRegistrationSet, StepExpr,
         registry::{
@@ -2322,7 +2567,7 @@ pub mod registry {
         }
     }
 
-    pub fn collect_symmetry_for<Spec, State>() -> Option<SymmetrySpec<State>>
+    pub fn collect_symmetry_for<Spec, State>() -> Option<VerifiedSymmetry<State>>
     where
         Spec: 'static,
         State: 'static,
@@ -2339,7 +2584,7 @@ pub mod registry {
             "multiple symmetry registrations for spec `{spec_name}` are not supported"
         );
         matched.into_iter().next().map(|(name, build)| {
-            downcast_registered::<SymmetrySpec<State>>(build(), spec_name, "symmetry", name)
+            downcast_registered::<VerifiedSymmetry<State>>(build(), spec_name, "symmetry", name)
         })
     }
 
@@ -2405,10 +2650,14 @@ pub mod registry {
                         next_model_instance.with_action_constraint(constraint.constraint().clone());
                 }
             }
-            if next_model_instance.symmetry().is_none()
-                && let Some(symmetry) = symmetry
+            if next_model_instance
+                .sound_reduction()
+                .and_then(SoundReduction::symmetry)
+                .is_none()
+                && let Some(symmetry) = &symmetry
             {
-                next_model_instance = next_model_instance.with_symmetry(symmetry);
+                next_model_instance = next_model_instance
+                    .with_sound_reduction(SoundReduction::new().with_symmetry(symmetry.clone()));
             }
             *model_instance = next_model_instance;
         }
@@ -2475,11 +2724,13 @@ pub mod registry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionExpr, BoolExpr, Fairness, FairnessDecl, FiniteModelDomain, FrontendSpec, IrStateExpr,
-        LoweringCx, Ltl, ModelInstance, StateAbstraction, StepExpr, TemporalExpr, TemporalSpec,
-        TransitionProgram, TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst, ViewExpr,
+        ActionExpr, BoolExpr, Fairness, FairnessDecl, FiniteModelDomain, FrontendSpec,
+        HeuristicReduction, HeuristicStateProjection, IrStateExpr, LoweringCx, Ltl, ModelInstance,
+        ProofObligation, ProofObligationKind, SoundReduction, StepExpr, TemporalExpr, TemporalSpec,
+        TransitionProgram, TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst,
+        VerifiedStateQuotient, ViewExpr,
     };
-    use nirvash::GuardExpr;
+    use nirvash::{GuardExpr, SoundnessTier};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DemoState {
@@ -2654,15 +2905,38 @@ mod tests {
     #[test]
     fn model_instance_keeps_owned_reduction_metadata() {
         let model: ModelInstance<DemoState, DemoAction> = ModelInstance::new("demo")
-            .with_state_abstraction(StateAbstraction::new("phase", |state: &DemoState| {
-                format!("{state:?}")
-            }));
+            .with_sound_reduction(
+                SoundReduction::new().with_quotient(
+                    VerifiedStateQuotient::new("busy_partition", |state: &DemoState| {
+                        format!("{state:?}")
+                    })
+                    .with_obligation(ProofObligation::new(
+                        "busy_partition_sound".to_owned(),
+                        ProofObligationKind::VerifiedStateQuotient,
+                        "THEOREM busy_partition_sound == QuotientSound".to_owned(),
+                        "(assert QuotientSound)".to_owned(),
+                    )),
+                ),
+            )
+            .with_heuristic_reduction(HeuristicReduction::new().with_state_projection(
+                HeuristicStateProjection::new("phase", |state: &DemoState| format!("{state:?}")),
+            ));
         assert_eq!(model.label(), "demo");
         assert_eq!(
             model
-                .state_abstraction()
-                .map(|abstraction| abstraction.name()),
+                .heuristic_reduction()
+                .and_then(|reduction| reduction.state_projection())
+                .map(|projection| projection.name()),
             Some("phase")
+        );
+        assert_eq!(model.soundness_tier(), SoundnessTier::Heuristic);
+        assert_eq!(
+            model
+                .reduction_obligations()
+                .into_iter()
+                .map(|obligation| obligation.kind)
+                .collect::<Vec<_>>(),
+            vec![ProofObligationKind::VerifiedStateQuotient]
         );
     }
 

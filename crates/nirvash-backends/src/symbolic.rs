@@ -278,7 +278,7 @@ where
     ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
         self.ensure_no_explicit_only_reducers()?;
         if !self.config.check_deadlocks {
-            return Ok(ModelCheckResult::ok());
+            return Ok(self.empty_result());
         }
         match self.config.exploration {
             ExplorationMode::ReachableGraph => self.check_deadlocks_bmc(),
@@ -292,15 +292,7 @@ where
         self.ensure_no_explicit_only_reducers()?;
         self.ensure_symbolic_properties_ast_native()?;
         if self.direct_properties().is_empty() {
-            return Ok(ModelCheckResult::ok());
-        }
-
-        if self.model_case.symmetry().is_some()
-            && (!self.direct_properties().is_empty() || !self.direct_fairness().is_empty())
-        {
-            return Err(ModelCheckError::UnsupportedConfiguration(
-                "symmetry reduction cannot be combined with temporal properties or fairness",
-            ));
+            return Ok(self.empty_result());
         }
         match self.config.symbolic.temporal {
             nirvash::SymbolicTemporalEngine::BoundedLasso => self.check_properties_lasso(),
@@ -311,7 +303,7 @@ where
     }
 
     pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        let mut result = ModelCheckResult::ok();
+        let mut result = self.empty_result();
 
         let invariants = self.check_invariants()?;
         if self.config.stop_on_first_violation && !invariants.is_ok() {
@@ -342,6 +334,10 @@ where
         ModelBackend::Symbolic
     }
 
+    fn empty_result(&self) -> ModelCheckResult<T::State, T::Action> {
+        ModelCheckResult::with_tier(self.model_case.soundness_tier())
+    }
+
     fn build_bridge_reachable_graph(
         &self,
         config: ModelCheckConfig,
@@ -351,9 +347,9 @@ where
         let schema = self.direct_state_schema()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
         self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
-        if self.model_case.symmetry().is_some() {
+        if self.model_case.sound_reduction().is_some() {
             return Err(self.symbolic_ast_required_error(format!(
-                "symbolic reachable-graph backend does not support symmetry reduction for spec `{}`",
+                "symbolic reachable-graph backend does not support sound reductions for spec `{}`",
                 self.spec.frontend_name(),
             )));
         }
@@ -458,11 +454,12 @@ where
                     kind: CounterexampleKind::Invariant,
                     name: predicate.name().to_owned(),
                     trace,
+                    soundness_tier: self.model_case.soundness_tier(),
                 }));
             }
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     fn check_invariants_kinduction(
@@ -485,6 +482,7 @@ where
                     kind: CounterexampleKind::Invariant,
                     name: predicate.name().to_owned(),
                     trace,
+                    soundness_tier: self.model_case.soundness_tier(),
                 }));
             }
             if self.invariant_is_kinductive(&schema, &program, &actions, &predicate, max_depth)? {
@@ -498,7 +496,7 @@ where
             )));
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     fn check_invariants_pdr(
@@ -537,6 +535,7 @@ where
                             kind: CounterexampleKind::Invariant,
                             name: predicate.name().to_owned(),
                             trace: self.terminal_trace(states, steps),
+                            soundness_tier: self.model_case.soundness_tier(),
                         }));
                     }
                 }
@@ -561,7 +560,7 @@ where
             }
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     #[allow(dead_code)]
@@ -579,12 +578,13 @@ where
                         kind: CounterexampleKind::Invariant,
                         name: predicate.name().to_owned(),
                         trace: self.trace_to_state(&graph, index),
+                        soundness_tier: self.model_case.soundness_tier(),
                     }));
                 }
             }
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     fn check_deadlocks_bmc(
@@ -605,10 +605,11 @@ where
                 kind: CounterexampleKind::Deadlock,
                 name: "deadlock".to_owned(),
                 trace,
+                soundness_tier: self.model_case.soundness_tier(),
             }));
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     #[allow(dead_code)]
@@ -622,10 +623,11 @@ where
                 kind: CounterexampleKind::Deadlock,
                 name: "deadlock".to_owned(),
                 trace: self.trace_to_state(&graph, *deadlock),
+                soundness_tier: self.model_case.soundness_tier(),
             }));
         }
 
-        Ok(ModelCheckResult::ok())
+        Ok(self.empty_result())
     }
 
     #[allow(dead_code)]
@@ -652,13 +654,14 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
+                            soundness_tier: self.model_case.soundness_tier(),
                         },
                     );
                 }
             }
         }
 
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn check_deadlocks_lasso(
@@ -686,10 +689,11 @@ where
                         trace.states().to_vec(),
                         trace.steps()[..trace.len() - 1].to_vec(),
                     ),
+                    soundness_tier: self.model_case.soundness_tier(),
                 },
             );
         }
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn check_properties_lasso(
@@ -713,13 +717,14 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
+                            soundness_tier: self.model_case.soundness_tier(),
                         },
                     );
                 }
             }
         }
 
-        Ok(best.map_or_else(ModelCheckResult::ok, ModelCheckResult::with_violation))
+        Ok(best.map_or_else(|| self.empty_result(), ModelCheckResult::with_violation))
     }
 
     fn check_properties_liveness_to_safety(
@@ -814,6 +819,7 @@ where
             deadlocks: graph.deadlocks.clone(),
             truncated: graph.truncated,
             stutter_omitted: false,
+            soundness_tier: self.model_case.soundness_tier(),
         }
     }
 
@@ -1986,16 +1992,33 @@ where
     }
 
     fn ensure_no_explicit_only_reducers(&self) -> Result<(), ModelCheckError> {
-        if self.model_case.state_abstraction().is_some() {
+        if self
+            .model_case
+            .heuristic_reduction()
+            .and_then(|reduction| reduction.state_projection())
+            .is_some()
+        {
             return Err(self.symbolic_ast_required_error(format!(
-                "symbolic backend does not support view abstraction for model case `{}` in spec `{}`",
+                "symbolic backend does not support heuristic state projection for model case `{}` in spec `{}`",
                 self.model_case.label(),
                 self.spec.frontend_name(),
             )));
         }
-        if self.model_case.por().is_some() {
+        if self
+            .model_case
+            .heuristic_reduction()
+            .and_then(|reduction| reduction.action_pruning())
+            .is_some()
+        {
             return Err(self.symbolic_ast_required_error(format!(
-                "symbolic backend does not support partial-order reduction for model case `{}` in spec `{}`",
+                "symbolic backend does not support heuristic action pruning for model case `{}` in spec `{}`",
+                self.model_case.label(),
+                self.spec.frontend_name(),
+            )));
+        }
+        if self.model_case.sound_reduction().is_some() {
+            return Err(self.symbolic_ast_required_error(format!(
+                "symbolic backend does not support sound reductions for model case `{}` in spec `{}`",
                 self.model_case.label(),
                 self.spec.frontend_name(),
             )));
@@ -2009,7 +2032,8 @@ where
 
     fn canonicalize_state(&self, state: &T::State) -> T::State {
         self.model_case
-            .symmetry()
+            .sound_reduction()
+            .and_then(|reduction| reduction.symmetry())
             .map(|symmetry| symmetry.canonicalize(state))
             .unwrap_or_else(|| state.clone())
     }

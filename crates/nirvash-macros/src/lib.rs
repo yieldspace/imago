@@ -2546,7 +2546,7 @@ impl RegistrationKind {
                 quote! { ::nirvash::StepExpr<<#spec as ::nirvash_lower::FrontendSpec>::State, <#spec as ::nirvash_lower::FrontendSpec>::Action> }
             }
             Self::Symmetry => {
-                quote! { ::nirvash_lower::SymmetrySpec<<#spec as ::nirvash_lower::FrontendSpec>::State> }
+                quote! { ::nirvash_lower::VerifiedSymmetry<<#spec as ::nirvash_lower::FrontendSpec>::State> }
             }
         }
     }
@@ -4564,7 +4564,16 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                             actual.action_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>(),
                             expected.action_constraints().iter().map(|constraint| constraint.name()).collect::<::std::vec::Vec<_>>()
                         );
-                        assert_eq!(actual.symmetry().map(|symmetry| symmetry.name()), expected.symmetry().map(|symmetry| symmetry.name()));
+                        assert_eq!(
+                            actual
+                                .sound_reduction()
+                                .and_then(|reduction| reduction.symmetry())
+                                .map(|symmetry| symmetry.name()),
+                            expected
+                                .sound_reduction()
+                                .and_then(|reduction| reduction.symmetry())
+                                .map(|symmetry| symmetry.name())
+                        );
                         assert_eq!(actual.effective_checker_config(), expected.effective_checker_config());
                         assert_eq!(actual.doc_checker_config(), expected.doc_checker_config());
                         assert_eq!(actual.doc_graph_policy().reduction, expected.doc_graph_policy().reduction);
@@ -4656,6 +4665,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                 ::nirvash::DocGraphCase {
                                     label,
                                     backend,
+                                    soundness_tier: snapshot.soundness_tier,
                                     graph: ::nirvash::DocGraphSnapshot {
                                         states: states
                                             .into_iter()
