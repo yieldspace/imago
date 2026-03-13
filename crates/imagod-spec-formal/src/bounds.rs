@@ -1,49 +1,5 @@
 use nirvash_macros::FiniteModelDomain as FormalFiniteModelDomain;
 
-use crate::{CommandErrorKind, CommandKind, CommandLifecycleState, PluginKind, RunnerAppType};
-
-pub const MAX_SERVICES: u8 = 2;
-pub const MAX_SESSIONS: u8 = 2;
-pub const MAX_RUNNERS: u8 = 2;
-pub const MAX_ARTIFACT_CHUNKS: u8 = 2;
-pub const MAX_PLUGIN_DEPENDENCIES: u8 = 3;
-pub const MAX_HTTP_QUEUE_DEPTH: u8 = 2;
-pub const MAX_EPOCH_TICKS: u8 = 3;
-pub const MAX_TIME_STEPS: u8 = 4;
-
-pub const SPEC_COMMAND_TYPES: [CommandKind; 3] =
-    [CommandKind::Deploy, CommandKind::Run, CommandKind::Stop];
-pub const SPEC_COMMAND_STATES: [CommandLifecycleState; 5] = [
-    CommandLifecycleState::Accepted,
-    CommandLifecycleState::Running,
-    CommandLifecycleState::Succeeded,
-    CommandLifecycleState::Failed,
-    CommandLifecycleState::Canceled,
-];
-pub const SPEC_ERROR_CODES: [CommandErrorKind; 14] = [
-    CommandErrorKind::Unauthorized,
-    CommandErrorKind::BadRequest,
-    CommandErrorKind::BadManifest,
-    CommandErrorKind::Busy,
-    CommandErrorKind::NotFound,
-    CommandErrorKind::Internal,
-    CommandErrorKind::IdempotencyConflict,
-    CommandErrorKind::RangeInvalid,
-    CommandErrorKind::ChunkHashMismatch,
-    CommandErrorKind::ArtifactIncomplete,
-    CommandErrorKind::PreconditionFailed,
-    CommandErrorKind::OperationTimeout,
-    CommandErrorKind::RollbackFailed,
-    CommandErrorKind::StorageQuota,
-];
-pub const SPEC_RUNNER_APP_TYPES: [RunnerAppType; 4] = [
-    RunnerAppType::Cli,
-    RunnerAppType::Rpc,
-    RunnerAppType::Http,
-    RunnerAppType::Socket,
-];
-pub const SPEC_PLUGIN_KINDS: [PluginKind; 2] = [PluginKind::Native, PluginKind::Wasm];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FormalFiniteModelDomain)]
 #[finite_model_domain(range = "0..=MAX")]
 pub struct BoundedU8<const MAX: u8>(u8);
@@ -84,14 +40,32 @@ impl<const MAX: u8> nirvash_lower::SymbolicEncoding for BoundedU8<MAX> {
     }
 }
 
-pub type ServiceSlots = BoundedU8<MAX_SERVICES>;
-pub type SessionSlots = BoundedU8<MAX_SESSIONS>;
-pub type RunnerSlots = BoundedU8<MAX_RUNNERS>;
-pub type ArtifactChunks = BoundedU8<MAX_ARTIFACT_CHUNKS>;
-pub type PluginDependencySlots = BoundedU8<MAX_PLUGIN_DEPENDENCIES>;
-pub type HttpQueueDepth = BoundedU8<MAX_HTTP_QUEUE_DEPTH>;
-pub type EpochTicks = BoundedU8<MAX_EPOCH_TICKS>;
-pub type TimeSteps = BoundedU8<MAX_TIME_STEPS>;
+pub const MAX_MAINTENANCE_TICKS: u8 = 2;
+pub const MAX_LASSO_DEPTH: usize = 8;
+pub const DOC_CAP_FOCUS: (usize, usize) = (64, 256);
+pub const DOC_CAP_SURFACE: (usize, usize) = (128, 512);
+
+pub type MaintenanceTicks = BoundedU8<MAX_MAINTENANCE_TICKS>;
+
+pub fn doc_explicit_cap(max_states: usize, max_transitions: usize) -> nirvash::ModelCheckConfig {
+    nirvash::ModelCheckConfig {
+        backend: Some(nirvash::ModelBackend::Explicit),
+        max_states: Some(max_states),
+        max_transitions: Some(max_transitions),
+        stop_on_first_violation: false,
+        ..nirvash::ModelCheckConfig::reachable_graph()
+    }
+}
+
+pub fn doc_cap_focus() -> nirvash::ModelCheckConfig {
+    let (max_states, max_transitions) = DOC_CAP_FOCUS;
+    doc_explicit_cap(max_states, max_transitions)
+}
+
+pub fn doc_cap_surface() -> nirvash::ModelCheckConfig {
+    let (max_states, max_transitions) = DOC_CAP_SURFACE;
+    doc_explicit_cap(max_states, max_transitions)
+}
 
 #[cfg(test)]
 mod tests {
@@ -100,20 +74,22 @@ mod tests {
 
     #[test]
     fn bounded_u8_domain_matches_declared_max() {
-        let values = HttpQueueDepth::bounded_domain().into_vec();
-        assert_eq!(values.len(), usize::from(MAX_HTTP_QUEUE_DEPTH) + 1);
+        let values = MaintenanceTicks::bounded_domain().into_vec();
+        assert_eq!(values.len(), usize::from(MAX_MAINTENANCE_TICKS) + 1);
         assert_eq!(
             values.last().map(|value| value.get()),
-            Some(MAX_HTTP_QUEUE_DEPTH)
+            Some(MAX_MAINTENANCE_TICKS)
         );
     }
 
     #[test]
-    fn public_case_tables_cover_current_public_variants() {
-        assert_eq!(SPEC_COMMAND_TYPES.len(), 3);
-        assert_eq!(SPEC_COMMAND_STATES.len(), 5);
-        assert_eq!(SPEC_RUNNER_APP_TYPES.len(), 4);
-        assert_eq!(SPEC_ERROR_CODES.len(), 14);
-        assert_eq!(SPEC_PLUGIN_KINDS.len(), 2);
+    fn doc_explicit_cap_sets_explicit_reachable_graph_limits() {
+        let config = doc_cap_focus();
+
+        assert_eq!(config.backend, Some(nirvash::ModelBackend::Explicit));
+        assert_eq!(config.max_states, Some(DOC_CAP_FOCUS.0));
+        assert_eq!(config.max_transitions, Some(DOC_CAP_FOCUS.1));
+        assert!(!config.stop_on_first_violation);
+        assert_eq!(config.exploration, nirvash::ExplorationMode::ReachableGraph);
     }
 }

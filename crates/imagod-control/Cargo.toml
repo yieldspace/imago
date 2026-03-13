@@ -36,15 +36,7 @@ web-transport-quinn = { workspace = true }
 wasmparser = { workspace = true }
 
 [dev-dependencies]
-imagod-spec-formal = { workspace = true }
-nirvash-check = { workspace = true }
-nirvash-macros = { workspace = true }
 wat = { workspace = true }
-
-[[test]]
-name = "command_protocol_conformance"
-path = "tests/command_protocol_conformance.rs"
-harness = false
 
 [[bench]]
 name = "log_buffer"

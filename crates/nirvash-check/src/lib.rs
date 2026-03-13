@@ -101,6 +101,7 @@ mod tests {
     };
     use nirvash_macros::{
         FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
+        nirvash_transition_program,
     };
 
     macro_rules! frontend_name {
@@ -148,6 +149,73 @@ mod tests {
     struct QuantState {
         ready: bool,
         slot: Slot,
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        FormalFiniteModelDomain,
+        FormalSymbolicEncoding,
+    )]
+    enum OptionPhase {
+        Busy,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
+    enum OptionAction {
+        Start,
+        Clear,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
+    struct OptionState {
+        phase: Option<OptionPhase>,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct OptionAstNativeSpec;
+
+    impl FrontendSpec for OptionAstNativeSpec {
+        type State = OptionState;
+        type Action = OptionAction;
+
+        frontend_name!();
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![OptionState { phase: None }]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![OptionAction::Start, OptionAction::Clear]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            Some(nirvash_transition_program! {
+                rule activate when prev.phase.is_none() && matches!(action, OptionAction::Start) => {
+                    set phase <= Some(OptionPhase::Busy);
+                }
+
+                rule clear when prev.phase == Some(OptionPhase::Busy)
+                    && matches!(action, OptionAction::Clear) => {
+                    set phase <= None;
+                }
+            })
+        }
+
+        fn default_model_backend(&self) -> Option<ModelBackend> {
+            Some(ModelBackend::Symbolic)
+        }
+    }
+
+    impl TemporalSpec for OptionAstNativeSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            vec![]
+        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -357,6 +425,61 @@ mod tests {
         assert!(!snapshot.truncated);
         assert_eq!(snapshot.states.len(), 3);
         assert!(invariants.is_ok());
+    }
+
+    #[test]
+    fn symbolic_backend_accepts_option_ast_native_transition_program() {
+        let spec = OptionAstNativeSpec;
+        let program = spec
+            .transition_program()
+            .expect("option spec should expose a transition program");
+        let lowered = lower_spec(&spec);
+        let checker = ModelChecker::with_config(
+            &lowered,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                exploration: ExplorationMode::ReachableGraph,
+                ..ModelCheckConfig::default()
+            },
+        );
+
+        let snapshot = checker
+            .full_reachable_graph_snapshot()
+            .expect("symbolic backend should encode Option AST-native transition programs");
+        let result = checker
+            .check_all()
+            .expect("symbolic backend should check Option AST-native specs");
+
+        assert!(program.is_ast_native());
+        assert_eq!(program.first_unencodable_symbolic_node(), None);
+        assert_eq!(checker.backend(), ModelBackend::Symbolic);
+        assert!(!snapshot.truncated);
+        assert_eq!(
+            snapshot.states,
+            vec![
+                OptionState { phase: None },
+                OptionState {
+                    phase: Some(OptionPhase::Busy),
+                },
+            ]
+        );
+        assert_eq!(snapshot.initial_indices, vec![0]);
+        assert_eq!(
+            snapshot.edges[0],
+            vec![nirvash::ReachableGraphEdge {
+                action: OptionAction::Start,
+                target: 1,
+            }]
+        );
+        assert_eq!(
+            snapshot.edges[1],
+            vec![nirvash::ReachableGraphEdge {
+                action: OptionAction::Clear,
+                target: 0,
+            }]
+        );
+        assert!(snapshot.deadlocks.is_empty());
+        assert!(result.is_ok());
     }
 
     #[test]

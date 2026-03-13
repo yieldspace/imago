@@ -2,9 +2,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
     error::Error,
-    fmt, fs,
+    fmt,
+    fs::{self, File},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use quote::ToTokens;
@@ -552,17 +554,7 @@ impl SourceCollector {
             .collect::<BTreeMap<_, _>>();
         for bundle in &mut runtime_bundles {
             if let Some(spec) = specs_by_tail.get(&bundle.spec_name) {
-                bundle.metadata.spec_id = path_key(&spec.full_path);
-                bundle.metadata.subsystems = spec.subsystems.clone();
-                if bundle.metadata.model_cases.is_none() {
-                    bundle.metadata.model_cases = spec.model_cases.clone();
-                }
-                if bundle.metadata.kind.is_none() {
-                    bundle.metadata.kind = spec.kind.map(|kind| match kind {
-                        SpecKind::Subsystem => nirvash::SpecVizKind::Subsystem,
-                        SpecKind::System => nirvash::SpecVizKind::System,
-                    });
-                }
+                overlay_spec_doc_metadata(bundle, spec);
             }
         }
         runtime_bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
@@ -622,6 +614,56 @@ impl SourceCollector {
             fragments,
             rerun_if_changed: self.rerun_if_changed.into_iter().collect(),
         })
+    }
+}
+
+fn overlay_spec_doc_metadata(bundle: &mut nirvash::SpecVizBundle, spec: &SpecDoc) {
+    bundle.metadata.spec_id = path_key(&spec.full_path);
+    bundle.metadata.subsystems = spec.subsystems.clone();
+    if bundle.metadata.model_cases.is_none() {
+        bundle.metadata.model_cases = spec.model_cases.clone();
+    }
+    if bundle.metadata.kind.is_none() {
+        bundle.metadata.kind = spec.kind.map(|kind| match kind {
+            SpecKind::Subsystem => nirvash::SpecVizKind::Subsystem,
+            SpecKind::System => nirvash::SpecVizKind::System,
+        });
+    }
+
+    merge_registration_names(
+        &mut bundle.metadata.registrations.invariants,
+        spec.registrations.get(&RegistrationKind::Invariant),
+    );
+    merge_registration_names(
+        &mut bundle.metadata.registrations.properties,
+        spec.registrations.get(&RegistrationKind::Property),
+    );
+    merge_registration_names(
+        &mut bundle.metadata.registrations.fairness,
+        spec.registrations.get(&RegistrationKind::Fairness),
+    );
+    merge_registration_names(
+        &mut bundle.metadata.registrations.state_constraints,
+        spec.registrations.get(&RegistrationKind::StateConstraint),
+    );
+    merge_registration_names(
+        &mut bundle.metadata.registrations.action_constraints,
+        spec.registrations.get(&RegistrationKind::ActionConstraint),
+    );
+    merge_registration_names(
+        &mut bundle.metadata.registrations.symmetries,
+        spec.registrations.get(&RegistrationKind::Symmetry),
+    );
+}
+
+fn merge_registration_names(target: &mut Vec<String>, source: Option<&Vec<String>>) {
+    let Some(source) = source else {
+        return;
+    };
+    for name in source {
+        if !target.contains(name) {
+            target.push(name.clone());
+        }
     }
 }
 
@@ -761,16 +803,31 @@ fn collect_runtime_graphs(
     })?;
 
     let runner_target_dir = out_dir.join("nirvash-doc-runner-target");
-    if runner_target_dir.exists() {
-        fs::remove_dir_all(&runner_target_dir).map_err(|error| {
-            err(format!(
-                "failed to clear runtime graph runner target dir {}: {error}",
-                runner_target_dir.display()
-            ))
-        })?;
+    let runner_stdout = out_dir.join("nirvash-doc-runner.stdout.ndjson");
+    let runner_stderr = out_dir.join("nirvash-doc-runner.stderr.log");
+    let progress_enabled = env::var_os("NIRVASH_DOCGEN_PROGRESS").is_some();
+    let stdout_file = File::create(&runner_stdout).map_err(|error| {
+        err(format!(
+            "failed to create runtime graph runner stdout {}: {error}",
+            runner_stdout.display()
+        ))
+    })?;
+    let stderr_file = File::create(&runner_stderr).map_err(|error| {
+        err(format!(
+            "failed to create runtime graph runner stderr {}: {error}",
+            runner_stderr.display()
+        ))
+    })?;
+    if progress_enabled {
+        println!(
+            "cargo:warning=nirvash-docgen progress log: {}",
+            runner_stderr.display()
+        );
     }
+    let runner_stderr_for_thread = runner_stderr.clone();
 
-    let output = Command::new(cargo_binary())
+    let mut command = Command::new(cargo_binary());
+    command
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
@@ -778,28 +835,117 @@ fn collect_runtime_graphs(
         .arg("--target-dir")
         .arg(&runner_target_dir)
         .env("NIRVASH_DOCGEN_SKIP", "1")
-        .output()
-        .map_err(|error| {
-            err(format!(
-                "failed to execute runtime graph runner {}: {error}",
-                runner_manifest.display()
-            ))
-        })?;
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::piped());
+    if progress_enabled {
+        command.env("NIRVASH_DOCGEN_PROGRESS", "1");
+    }
+    let mut child = command.spawn().map_err(|error| {
+        err(format!(
+            "failed to execute runtime graph runner {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
+    let child_stderr = child.stderr.take().ok_or_else(|| {
+        err(format!(
+            "failed to capture runtime graph runner stderr for {}",
+            runner_manifest.display()
+        ))
+    })?;
+    let stderr_forwarder = std::thread::spawn(move || -> Result<(), String> {
+        let reader = BufReader::new(child_stderr);
+        let mut log_file = stderr_file;
+        for line in reader.lines() {
+            let line = line.map_err(|error| {
+                format!(
+                    "failed to read runtime graph runner stderr {}: {error}",
+                    runner_stderr_for_thread.display()
+                )
+            })?;
+            writeln!(log_file, "{line}").map_err(|error| {
+                format!(
+                    "failed to write runtime graph runner stderr log {}: {error}",
+                    runner_stderr_for_thread.display()
+                )
+            })?;
+            if progress_enabled {
+                eprintln!("{line}");
+            }
+        }
+        log_file.flush().map_err(|error| {
+            format!(
+                "failed to flush runtime graph runner stderr log {}: {error}",
+                runner_stderr_for_thread.display()
+            )
+        })
+    });
+    let status = child.wait().map_err(|error| {
+        err(format!(
+            "failed to wait for runtime graph runner {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
+    stderr_forwarder
+        .join()
+        .map_err(|_| err("runtime graph runner stderr forwarder panicked"))?
+        .map_err(err)?;
 
-    if !output.status.success() {
+    if !status.success() {
+        let stderr = fs::read_to_string(&runner_stderr).unwrap_or_else(|error| {
+            format!(
+                "failed to read runtime graph runner stderr {}: {error}",
+                runner_stderr.display()
+            )
+        });
         return Err(err(format!(
             "runtime graph runner failed for {}:\n{}",
             runner_manifest.display(),
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         )));
     }
 
-    serde_json::from_slice(&output.stdout).map_err(|error| {
+    read_runtime_graph_bundles(&runner_stdout, &runner_manifest)
+}
+
+fn read_runtime_graph_bundles(
+    runner_stdout: &Path,
+    runner_manifest: &Path,
+) -> Result<Vec<nirvash::SpecVizBundle>, DynError> {
+    let stdout_file = File::open(runner_stdout).map_err(|error| {
         err(format!(
-            "failed to parse runtime graph output from {}: {error}",
-            runner_manifest.display()
+            "failed to open runtime graph output {}: {error}",
+            runner_stdout.display()
         ))
-    })
+    })?;
+    let reader = BufReader::new(stdout_file);
+    let mut bundles_by_name = BTreeMap::<String, nirvash::SpecVizBundle>::new();
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| {
+            err(format!(
+                "failed to read runtime graph output line {} from {}: {error}",
+                line_index + 1,
+                runner_stdout.display()
+            ))
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bundle = serde_json::from_str::<nirvash::SpecVizBundle>(line).map_err(|error| {
+            err(format!(
+                "failed to parse runtime graph output line {} from {} (runner {}): {error}",
+                line_index + 1,
+                runner_stdout.display(),
+                runner_manifest.display()
+            ))
+        })?;
+        nirvash::upsert_spec_viz_bundle(&mut bundles_by_name, bundle);
+    }
+
+    let mut bundles = bundles_by_name.into_values().collect::<Vec<_>>();
+    bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
+    Ok(bundles)
 }
 
 fn read_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, DynError> {
@@ -851,14 +997,16 @@ fn render_runner_manifest(
 }
 
 fn render_runner_main(spec_paths: &[Vec<String>]) -> String {
-    let mut output = String::from("extern crate doc_target;\n\nfn main() {\n");
+    let mut output = String::from(
+        "extern crate doc_target;\n\nuse std::{collections::VecDeque, io::{self, Write}, sync::{mpsc, Arc, Mutex}, thread};\n\nfn main() {\n",
+    );
     for path in spec_paths {
         output.push_str("    ");
         output.push_str(&render_link_call(path));
         output.push('\n');
     }
     output.push_str(
-        "    let specs = nirvash::collect_spec_viz_bundles();\n    println!(\"{}\", serde_json::to_string(&specs).expect(\"serialize doc graphs\"));\n}\n",
+        "    let registrations = nirvash::collect_primary_spec_viz_provider_registrations();\n    let total_specs = registrations.len();\n    let progress_enabled = std::env::var_os(\"NIRVASH_DOCGEN_PROGRESS\").is_some();\n    let worker_count = std::env::var(\"NIRVASH_DOCGEN_JOBS\")\n        .ok()\n        .and_then(|value| value.parse::<usize>().ok())\n        .filter(|value| *value > 0)\n        .unwrap_or_else(|| thread::available_parallelism().map(|value| value.get()).unwrap_or(1))\n        .min(total_specs.max(1))\n        .min(4);\n    if progress_enabled {\n        eprintln!(\"nirvash-docgen starting {total_specs} spec(s) with {worker_count} worker(s)\");\n    }\n    let queue = Arc::new(Mutex::new(VecDeque::from(registrations)));\n    let (tx, rx) = mpsc::channel();\n    let mut workers = Vec::new();\n    for _ in 0..worker_count {\n        let queue = Arc::clone(&queue);\n        let tx = tx.clone();\n        workers.push(thread::spawn(move || {\n            loop {\n                let registration = {\n                    let mut queue = queue.lock().expect(\"lock doc graph queue\");\n                    queue.pop_front()\n                };\n                let Some(registration) = registration else {\n                    break;\n                };\n                let spec_name = registration.spec_name.to_owned();\n                let bundle = (registration.build)().bundle();\n                tx.send((spec_name, bundle)).expect(\"send doc graph bundle\");\n            }\n        }));\n    }\n    drop(tx);\n    let started_at = std::time::Instant::now();\n    let stdout = io::stdout();\n    let mut writer = io::BufWriter::new(stdout.lock());\n    let mut completed = 0usize;\n    for (spec_name, bundle) in rx {\n        completed += 1;\n        if progress_enabled {\n            eprintln!(\n                \"nirvash-docgen spec progress {completed}/{total_specs} after {:?}: {}\",\n                started_at.elapsed(),\n                spec_name,\n            );\n        }\n        serde_json::to_writer(&mut writer, &bundle).expect(\"serialize doc graph bundle\");\n        writer.write_all(b\"\\n\").expect(\"write doc graph bundle separator\");\n    }\n    for worker in workers {\n        worker.join().expect(\"join doc graph worker\");\n    }\n    writer.flush().expect(\"flush doc graph bundles\");\n}\n",
     );
     output
 }
@@ -2752,6 +2900,7 @@ fn sanitize_state_diagram_edge_label(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tempfile::tempdir;
 
     fn demo_edge(label: &str, target: usize) -> nirvash::DocGraphEdge {
@@ -2768,13 +2917,155 @@ mod tests {
         }
     }
 
+    fn demo_graph_case(label: &str) -> nirvash::DocGraphCase {
+        nirvash::DocGraphCase {
+            label: label.to_owned(),
+            backend: nirvash::ModelBackend::Explicit,
+            graph: nirvash::DocGraphSnapshot {
+                states: vec![nirvash::DocGraphState {
+                    summary: format!("{label}State"),
+                    full: format!("{label}State"),
+                    relation_fields: Vec::new(),
+                    relation_schema: Vec::new(),
+                }],
+                edges: vec![Vec::new()],
+                initial_indices: vec![0],
+                deadlocks: vec![0],
+                truncated: false,
+                stutter_omitted: false,
+                focus_indices: Vec::new(),
+                reduction: nirvash::DocGraphReductionMode::BoundaryPaths,
+                max_edge_actions_in_label: 2,
+            },
+        }
+    }
+
+    fn demo_bundle(
+        spec_name: &str,
+        spec_id: &str,
+        kind: Option<nirvash::SpecVizKind>,
+        cases: Vec<nirvash::DocGraphCase>,
+    ) -> nirvash::SpecVizBundle {
+        nirvash::SpecVizBundle::from_doc_graph_spec(
+            spec_name,
+            nirvash::SpecVizMetadata {
+                spec_id: spec_id.to_owned(),
+                kind,
+                state_ty: format!("{spec_name}State"),
+                action_ty: format!("{spec_name}Action"),
+                model_cases: Some(format!("{spec_name}_model_cases")),
+                subsystems: Vec::new(),
+                registrations: nirvash::SpecVizRegistrationSet::default(),
+                policy: nirvash::VizPolicy::default(),
+            },
+            cases,
+        )
+    }
+
+    #[test]
+    fn render_runner_main_uses_parallel_bundle_workers() {
+        let main = render_runner_main(&[
+            vec![
+                "crate".to_owned(),
+                "system".to_owned(),
+                "SystemSpec".to_owned(),
+            ],
+            vec![
+                "crate".to_owned(),
+                "manager".to_owned(),
+                "ManagerSpec".to_owned(),
+            ],
+        ]);
+
+        assert!(main.contains("collect_primary_spec_viz_provider_registrations"));
+        assert!(main.contains("thread::available_parallelism"));
+        assert!(main.contains("NIRVASH_DOCGEN_JOBS"));
+        assert!(main.contains("NIRVASH_DOCGEN_PROGRESS"));
+        assert!(main.contains("thread::spawn"));
+        assert!(main.contains("VecDeque::from(registrations)"));
+        assert!(main.contains("nirvash-docgen spec progress"));
+        assert!(main.contains("serde_json::to_writer"));
+        assert!(!main.contains("collect_spec_viz_bundles()"));
+    }
+
+    #[test]
+    fn read_runtime_graph_bundles_merges_ndjson_stream() {
+        let dir = tempdir().expect("tempdir");
+        let output_path = dir.path().join("bundles.ndjson");
+        let duplicate_stub = nirvash::SpecVizBundle {
+            spec_name: "AlphaSpec".to_owned(),
+            metadata: nirvash::SpecVizMetadata {
+                spec_id: String::new(),
+                kind: None,
+                state_ty: "AlphaState".to_owned(),
+                action_ty: "AlphaAction".to_owned(),
+                model_cases: None,
+                subsystems: Vec::new(),
+                registrations: nirvash::SpecVizRegistrationSet::default(),
+                policy: nirvash::VizPolicy::default(),
+            },
+            action_vocabulary: Vec::new(),
+            relation_schema: Vec::new(),
+            cases: Vec::new(),
+        };
+        let duplicate_full = demo_bundle(
+            "AlphaSpec",
+            "crate::alpha::AlphaSpec",
+            Some(nirvash::SpecVizKind::Subsystem),
+            vec![demo_graph_case("alpha")],
+        );
+        let beta = demo_bundle(
+            "BetaSpec",
+            "crate::beta::BetaSpec",
+            Some(nirvash::SpecVizKind::System),
+            vec![demo_graph_case("beta")],
+        );
+
+        let mut file = File::create(&output_path).expect("output file");
+        for bundle in [&beta, &duplicate_stub, &duplicate_full] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(bundle).expect("bundle json")
+            )
+            .expect("write ndjson");
+        }
+        drop(file);
+
+        let bundles = read_runtime_graph_bundles(&output_path, Path::new("runner/Cargo.toml"))
+            .expect("parse ndjson");
+        let mut expected_map = BTreeMap::new();
+        for bundle in [beta.clone(), duplicate_stub, duplicate_full] {
+            nirvash::upsert_spec_viz_bundle(&mut expected_map, bundle);
+        }
+        let mut expected = expected_map.into_values().collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
+
+        assert_eq!(bundles, expected);
+    }
+
     #[test]
     fn generate_collects_supported_module_tree_and_renders_mermaid() {
         let dir = tempdir().expect("tempdir");
         let manifest_dir = dir.path();
         let src_dir = manifest_dir.join("src");
         let out_dir = manifest_dir.join("out");
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
         fs::create_dir_all(&src_dir).expect("src");
+        fs::write(
+            manifest_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"demo-doc-target\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\nnirvash = {{ path = \"{}\" }}\nnirvash-lower = {{ path = \"{}\" }}\nnirvash-macros = {{ path = \"{}\" }}\n",
+                workspace_root.join("crates/nirvash").display(),
+                workspace_root.join("crates/nirvash-lower").display(),
+                workspace_root.join("crates/nirvash-macros").display(),
+            ),
+        )
+        .expect("Cargo.toml");
 
         fs::write(
             src_dir.join("lib.rs"),
@@ -2782,12 +3073,14 @@ mod tests {
 pub mod child;
 pub mod system;
 
-mod inline_parent {
+pub mod inline_parent {
     use nirvash::{BoolExpr, Ltl, TransitionProgram};
     use nirvash_lower::FrontendSpec;
     use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct InlineState;
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct InlineAction;
     pub struct InlineSpec;
 
@@ -2828,7 +3121,9 @@ mod inline_parent {
         }
     }
 
-    fn inline_model_cases() {}
+    fn inline_model_cases() -> Vec<nirvash_lower::ModelInstance<InlineState, InlineAction>> {
+        Vec::new()
+    }
 }
 "#,
         )
@@ -2841,7 +3136,9 @@ use nirvash::{BoolExpr, Fairness, Ltl, StepExpr, TransitionProgram};
 use nirvash_lower::FrontendSpec;
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, subsystem_spec};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildState;
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildAction;
 pub struct ChildSpec;
 
@@ -2899,7 +3196,9 @@ use nirvash::{BoolExpr, Ltl, TransitionProgram};
 use nirvash_lower::FrontendSpec;
 use nirvash_macros::{invariant, nirvash_expr, nirvash_transition_program, property, system_spec};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemState;
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemAction;
 pub struct RootSystemSpec;
 
@@ -2932,7 +3231,9 @@ fn system_property() -> Ltl<SystemState, SystemAction> {
     Ltl::pred(nirvash_expr! { system_property_state(_state) => true })
 }
 
-fn system_model_cases() {}
+fn system_model_cases() -> Vec<nirvash_lower::ModelInstance<SystemState, SystemAction>> {
+    Vec::new()
+}
 "#,
         )
         .expect("system.rs");
@@ -3004,6 +3305,28 @@ fn system_model_cases() {}
                 src_dir.join("system.rs"),
             ]
         );
+
+        let runner_target_dir = out_dir.join("nirvash-doc-runner-target");
+        assert!(runner_target_dir.exists());
+
+        let second_output =
+            generate_at(manifest_dir, &out_dir).expect("docgen succeeds with reused runner target");
+        let second_env_keys = second_output
+            .fragments
+            .iter()
+            .map(|fragment| fragment.env_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(second_env_keys, env_keys);
+        assert!(runner_target_dir.exists());
+
+        let second_inline_fragment = second_output
+            .fragments
+            .iter()
+            .find(|fragment| fragment.env_key == "NIRVASH_DOC_FRAGMENT_INLINE_SPEC")
+            .expect("second inline fragment");
+        let second_inline_doc =
+            fs::read_to_string(&second_inline_fragment.path).expect("second inline doc");
+        assert_eq!(second_inline_doc, inline_doc);
     }
 
     #[test]

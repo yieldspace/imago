@@ -34,11 +34,3 @@ imagod-server = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 web-transport-quinn = { workspace = true }
-
-[dev-dependencies]
-imagod-spec-formal = { workspace = true }
-nirvash = { workspace = true }
-nirvash-conformance = { workspace = true }
-nirvash-check = { workspace = true }
-nirvash-lower = { workspace = true }
-nirvash-macros = { workspace = true }

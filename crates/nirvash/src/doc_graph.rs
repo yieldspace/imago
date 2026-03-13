@@ -403,9 +403,17 @@ pub trait SpecVizProvider {
     fn bundle(&self) -> SpecVizBundle;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SpecVizProviderKind {
+    MetadataOnly,
+    RuntimeGraph,
+}
+
+#[derive(Clone, Copy)]
 pub struct RegisteredSpecVizProvider {
     pub spec_name: &'static str,
     pub build: fn() -> Box<dyn SpecVizProvider>,
+    pub kind: SpecVizProviderKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,23 +570,54 @@ pub fn collect_doc_graph_specs() -> Vec<DocGraphSpec> {
     specs
 }
 
-pub fn collect_spec_viz_bundles() -> Vec<SpecVizBundle> {
-    let mut bundles_by_name = BTreeMap::<String, SpecVizBundle>::new();
+pub fn visit_spec_viz_bundles(mut visitor: impl FnMut(SpecVizBundle)) {
     for entry in inventory::iter::<RegisteredSpecVizProvider> {
         let provider = (entry.build)();
-        let candidate = provider.bundle();
-        if let Some(existing) = bundles_by_name.get_mut(&candidate.spec_name) {
-            merge_spec_viz_bundle(existing, candidate);
-        } else {
-            bundles_by_name.insert(candidate.spec_name.clone(), candidate);
+        visitor(provider.bundle());
+    }
+}
+
+pub fn collect_spec_viz_provider_registrations() -> Vec<RegisteredSpecVizProvider> {
+    inventory::iter::<RegisteredSpecVizProvider>
+        .into_iter()
+        .copied()
+        .collect()
+}
+
+pub fn collect_primary_spec_viz_provider_registrations() -> Vec<RegisteredSpecVizProvider> {
+    let mut registrations_by_name = BTreeMap::<&'static str, RegisteredSpecVizProvider>::new();
+    for registration in collect_spec_viz_provider_registrations() {
+        match registrations_by_name.get_mut(registration.spec_name) {
+            Some(existing) if registration.kind > existing.kind => *existing = registration,
+            Some(_) => {}
+            None => {
+                registrations_by_name.insert(registration.spec_name, registration);
+            }
         }
     }
+    registrations_by_name.into_values().collect()
+}
+
+pub fn collect_spec_viz_bundles() -> Vec<SpecVizBundle> {
+    let mut bundles_by_name = BTreeMap::<String, SpecVizBundle>::new();
+    visit_spec_viz_bundles(|candidate| upsert_spec_viz_bundle(&mut bundles_by_name, candidate));
     let mut bundles = bundles_by_name.into_values().collect::<Vec<_>>();
     bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
     bundles
 }
 
-fn merge_spec_viz_bundle(target: &mut SpecVizBundle, candidate: SpecVizBundle) {
+pub fn upsert_spec_viz_bundle(
+    bundles_by_name: &mut BTreeMap<String, SpecVizBundle>,
+    candidate: SpecVizBundle,
+) {
+    if let Some(existing) = bundles_by_name.get_mut(&candidate.spec_name) {
+        merge_spec_viz_bundle(existing, candidate);
+    } else {
+        bundles_by_name.insert(candidate.spec_name.clone(), candidate);
+    }
+}
+
+pub fn merge_spec_viz_bundle(target: &mut SpecVizBundle, candidate: SpecVizBundle) {
     if target.cases.len() < candidate.cases.len() {
         target.cases = candidate.cases;
     }
@@ -1424,6 +1463,111 @@ mod tests {
 
     fn relational_demo_type_id() -> TypeId {
         TypeId::of::<RelationalDemoState>()
+    }
+
+    #[test]
+    fn primary_provider_prefers_runtime_graph_registration() {
+        fn metadata_build() -> Box<dyn SpecVizProvider> {
+            struct MetadataOnlyProvider;
+            impl SpecVizProvider for MetadataOnlyProvider {
+                fn spec_name(&self) -> &'static str {
+                    "DemoSpec"
+                }
+
+                fn bundle(&self) -> SpecVizBundle {
+                    SpecVizBundle {
+                        spec_name: "DemoSpec".to_owned(),
+                        metadata: SpecVizMetadata::default(),
+                        action_vocabulary: Vec::new(),
+                        relation_schema: Vec::new(),
+                        cases: Vec::new(),
+                    }
+                }
+            }
+
+            Box::new(MetadataOnlyProvider)
+        }
+
+        fn runtime_build() -> Box<dyn SpecVizProvider> {
+            struct RuntimeProvider;
+            impl SpecVizProvider for RuntimeProvider {
+                fn spec_name(&self) -> &'static str {
+                    "DemoSpec"
+                }
+
+                fn bundle(&self) -> SpecVizBundle {
+                    SpecVizBundle {
+                        spec_name: "DemoSpec".to_owned(),
+                        metadata: SpecVizMetadata::default(),
+                        action_vocabulary: Vec::new(),
+                        relation_schema: Vec::new(),
+                        cases: vec![SpecVizCase {
+                            label: "default".to_owned(),
+                            backend: ModelBackend::Explicit,
+                            graph: DocGraphSnapshot {
+                                states: Vec::new(),
+                                edges: Vec::new(),
+                                initial_indices: Vec::new(),
+                                deadlocks: Vec::new(),
+                                truncated: false,
+                                stutter_omitted: false,
+                                focus_indices: Vec::new(),
+                                reduction: DocGraphReductionMode::BoundaryPaths,
+                                max_edge_actions_in_label: 2,
+                            },
+                            reduced_graph: ReducedDocGraph {
+                                states: Vec::new(),
+                                edges: Vec::new(),
+                                truncated: false,
+                                stutter_omitted: false,
+                            },
+                            focus_graph: None,
+                            scenarios: Vec::new(),
+                            actors: Vec::new(),
+                            loop_groups: Vec::new(),
+                            stats: SpecVizCaseStats {
+                                full_state_count: 0,
+                                full_edge_count: 0,
+                                reduced_state_count: 0,
+                                reduced_edge_count: 0,
+                                focus_state_count: 0,
+                                large_graph_fallback: false,
+                            },
+                        }],
+                    }
+                }
+            }
+
+            Box::new(RuntimeProvider)
+        }
+
+        let mut registrations_by_name = BTreeMap::new();
+        for registration in [
+            RegisteredSpecVizProvider {
+                spec_name: "DemoSpec",
+                build: metadata_build,
+                kind: SpecVizProviderKind::MetadataOnly,
+            },
+            RegisteredSpecVizProvider {
+                spec_name: "DemoSpec",
+                build: runtime_build,
+                kind: SpecVizProviderKind::RuntimeGraph,
+            },
+        ] {
+            match registrations_by_name.get_mut(registration.spec_name) {
+                Some(existing) if registration.kind > existing.kind => *existing = registration,
+                Some(_) => {}
+                None => {
+                    registrations_by_name.insert(registration.spec_name, registration);
+                }
+            }
+        }
+
+        let selected = registrations_by_name
+            .remove("DemoSpec")
+            .expect("primary registration");
+        assert_eq!(selected.kind, SpecVizProviderKind::RuntimeGraph);
+        assert_eq!(selected.build().bundle().cases.len(), 1);
     }
 
     fn relational_demo_schema() -> Vec<crate::RelationFieldSchema> {

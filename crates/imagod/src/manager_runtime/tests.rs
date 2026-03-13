@@ -1,168 +1,8 @@
 use super::*;
-use imagod_spec::{
-    ContractEffectSummary, ManagerRuntimeOutputSummary, ManagerRuntimeProbeOutput,
-    ManagerRuntimeProbeState, SummaryManagerRuntimePhase, SummaryShutdownPhase, SummaryTaskKind,
-    SummaryTaskState,
-};
-use imagod_spec_formal::{ManagerRuntimeProjectionAction, ManagerRuntimeProjectionSpec};
-use nirvash_macros::nirvash_runtime_contract;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-
-async fn observe_manager_runtime_probe_state(
-    runtime: &ManagerRuntimeProjectionRuntime,
-    _context: &(),
-) -> ManagerRuntimeProbeState {
-    let snapshot = runtime.observation.snapshot();
-    ManagerRuntimeProbeState {
-        config_loaded: snapshot.config_loaded,
-        created_default: snapshot.created_default,
-        manager_phase: snapshot.manager_phase,
-        listening: snapshot.listening,
-        manager_shutdown_started: matches!(
-            snapshot.manager_phase,
-            SummaryManagerRuntimePhase::ShutdownRequested | SummaryManagerRuntimePhase::Stopped
-        ),
-        manager_stopped: matches!(snapshot.manager_phase, SummaryManagerRuntimePhase::Stopped),
-        session_shutdown_requested: snapshot.session_shutdown_requested,
-        shutdown: snapshot.shutdown,
-    }
-}
-
-fn observe_manager_runtime_probe_output(
-    runtime: &ManagerRuntimeProjectionRuntime,
-    _context: &(),
-    _action: &ManagerRuntimeProjectionAction,
-    _result: &(),
-) -> ManagerRuntimeProbeOutput {
-    let effects = runtime
-        .observation
-        .drain_effects()
-        .into_iter()
-        .map(|effect| match effect {
-            ManagerRuntimeEffect::TaskMilestone(kind, state) => {
-                ContractEffectSummary::TaskMilestone(kind, state)
-            }
-            ManagerRuntimeEffect::ShutdownComplete => ContractEffectSummary::ShutdownComplete,
-        })
-        .collect();
-    ManagerRuntimeProbeOutput {
-        output: ManagerRuntimeOutputSummary { effects },
-    }
-}
-
-#[derive(Debug)]
-struct ManagerRuntimeProjectionRuntime {
-    observation: ManagerRuntimeObservation,
-}
-
-impl ManagerRuntimeProjectionRuntime {
-    fn new() -> Self {
-        Self {
-            observation: ManagerRuntimeObservation::default(),
-        }
-    }
-}
-
-#[nirvash_runtime_contract(
-    spec = ManagerRuntimeProjectionSpec,
-    binding = ManagerRuntimeProjectionBinding,
-    context = (),
-    context_expr = (),
-    probe_state = ManagerRuntimeProbeState,
-    probe_output = ManagerRuntimeProbeOutput,
-    observe_state = observe_manager_runtime_probe_state,
-    output = observe_manager_runtime_probe_output,
-    fresh_runtime = ManagerRuntimeProjectionRuntime::new(),
-    tests(grouped)
-)]
-impl ManagerRuntimeProjectionRuntime {
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::LoadExistingConfig)]
-    async fn contract_load_existing_config(&self) {
-        self.observation.note_config_loaded(false);
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::CreateDefaultConfig)]
-    async fn contract_create_default_config(&self) {
-        self.observation.note_config_loaded(true);
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::RunPluginGcSucceeded)]
-    async fn contract_run_plugin_gc_succeeded(&self) {
-        self.observation
-            .note_plugin_gc(ManagerRuntimeTaskState::Succeeded);
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::RunPluginGcFailed)]
-    async fn contract_run_plugin_gc_failed(&self) {
-        self.observation
-            .note_plugin_gc(ManagerRuntimeTaskState::Failed);
-    }
-
-    #[nirvash_macros::contract_case(
-        action = ManagerRuntimeProjectionAction::RunBootRestoreSucceeded
-    )]
-    async fn contract_run_boot_restore_succeeded(&self) {
-        self.observation
-            .note_boot_restore(ManagerRuntimeTaskState::Succeeded);
-        self.observation.note_listening();
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::RunBootRestoreFailed)]
-    async fn contract_run_boot_restore_failed(&self) {
-        self.observation
-            .note_boot_restore(ManagerRuntimeTaskState::Failed);
-        self.observation.note_listening();
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::BeginShutdown)]
-    async fn contract_begin_shutdown(&self) {
-        self.observation.note_shutdown_started();
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::StopServicesGraceful)]
-    async fn contract_stop_services_graceful(&self) {
-        stop_managed_services(
-            |_| async { Vec::new() },
-            || async { false },
-            &self.observation,
-        )
-        .await;
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::StopServicesForced)]
-    async fn contract_stop_services_forced(&self) {
-        stop_managed_services(
-            |_| async { Vec::new() },
-            || async { true },
-            &self.observation,
-        )
-        .await;
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::StopMaintenance)]
-    async fn contract_stop_maintenance(&self) {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let observation = self.observation.clone();
-        let task = tokio::spawn(maintenance_loop(
-            shutdown_rx,
-            Duration::from_millis(1),
-            Duration::from_millis(1),
-            observation,
-            || async {},
-            || async { false },
-        ));
-        let _ = shutdown_tx.send(true);
-        task.await.expect("maintenance loop should join");
-    }
-
-    #[nirvash_macros::contract_case(action = ManagerRuntimeProjectionAction::FinishShutdown)]
-    async fn contract_finish_shutdown(&self) {
-        self.observation.note_shutdown_completed();
-    }
-}
 
 #[test]
 fn manager_runtime_observation_records_snapshot_and_effects() {
@@ -183,11 +23,11 @@ fn manager_runtime_observation_records_snapshot_and_effects() {
         ManagerRuntimeSnapshot {
             config_loaded: true,
             created_default: true,
-            manager_phase: SummaryManagerRuntimePhase::Stopped,
+            manager_phase: ManagerRuntimePhase::Stopped,
             listening: false,
             session_shutdown_requested: true,
-            shutdown: imagod_spec::ShutdownStateSummary {
-                phase: SummaryShutdownPhase::Completed,
+            shutdown: ManagerRuntimeShutdownState {
+                phase: ManagerRuntimeShutdownPhase::Completed,
                 accepts_stopped: true,
                 sessions_drained: true,
                 services_stopped: true,
@@ -200,12 +40,12 @@ fn manager_runtime_observation_records_snapshot_and_effects() {
         observation.drain_effects(),
         vec![
             ManagerRuntimeEffect::TaskMilestone(
-                SummaryTaskKind::PluginGc,
-                SummaryTaskState::Succeeded,
+                ManagerRuntimeTaskKind::PluginGc,
+                ManagerRuntimeTaskState::Succeeded,
             ),
             ManagerRuntimeEffect::TaskMilestone(
-                SummaryTaskKind::BootRestore,
-                SummaryTaskState::Failed,
+                ManagerRuntimeTaskKind::BootRestore,
+                ManagerRuntimeTaskState::Failed,
             ),
             ManagerRuntimeEffect::ShutdownComplete,
         ]

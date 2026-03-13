@@ -12,7 +12,6 @@ doctest = false
 imagod-spec = { workspace = true }
 nirvash = { workspace = true }
 nirvash-check = { workspace = true }
-nirvash-conformance = { workspace = true }
 nirvash-lower = { workspace = true }
 nirvash-macros = { workspace = true }
 

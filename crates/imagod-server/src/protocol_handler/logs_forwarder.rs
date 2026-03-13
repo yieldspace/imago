@@ -591,7 +591,7 @@ mod tests {
         collections::VecDeque,
         sync::{
             Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -599,22 +599,11 @@ mod tests {
     use bytes::Bytes;
     use imago_protocol::from_cbor;
     use imagod_control::{ServiceLogEvent, ServiceLogStream, ServiceLogSubscription};
-    use imagod_spec::{
-        ContractEffectSummary, ErrorCode, LogsOutputSummary, LogsProbeOutput, LogsProbeState,
-        SummaryLogChunk, SummaryRequestKind, SummaryStreamId,
-    };
-    use imagod_spec_formal::{LogsProjectionAction, LogsProjectionSpec};
-    use nirvash_macros::nirvash_runtime_contract;
+    use imagod_spec::ErrorCode;
     use tokio::sync::{Notify, broadcast};
 
     use super::*;
     use crate::protocol_handler::session_loop::ProtocolSession;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum RecordedDatagramKind {
-        Chunk,
-        End,
-    }
 
     struct FakeProtocolSession {
         max_datagram_size: usize,
@@ -712,152 +701,6 @@ mod tests {
             service_name: name.to_string(),
             snapshot: ServiceLogSnapshot::Bytes(snapshot_bytes.to_vec()),
             receiver: None,
-        }
-    }
-
-    fn decode_datagram_kinds(datagrams: &[Vec<u8>]) -> VecDeque<RecordedDatagramKind> {
-        datagrams
-            .iter()
-            .map(|bytes| {
-                if let Ok(chunk) = from_cbor::<ProtocolEnvelope<LogChunk>>(bytes)
-                    && chunk.message_type == MessageType::LogsChunk
-                {
-                    return RecordedDatagramKind::Chunk;
-                }
-
-                let end = from_cbor::<ProtocolEnvelope<LogEnd>>(bytes)
-                    .expect("logs projection datagram should decode as logs.end");
-                assert_eq!(end.message_type, MessageType::LogsEnd);
-                RecordedDatagramKind::End
-            })
-            .collect()
-    }
-
-    #[derive(Debug)]
-    struct LogsProjectionRuntime {
-        pending: tokio::sync::Mutex<VecDeque<RecordedDatagramKind>>,
-        started: AtomicBool,
-    }
-
-    impl LogsProjectionRuntime {
-        fn new() -> Self {
-            Self {
-                pending: tokio::sync::Mutex::new(VecDeque::new()),
-                started: AtomicBool::new(false),
-            }
-        }
-    }
-
-    async fn observe_logs_probe_state(
-        runtime: &LogsProjectionRuntime,
-        _context: &(),
-    ) -> LogsProbeState {
-        let started = runtime.started.load(Ordering::SeqCst);
-        let pending = runtime.pending.lock().await;
-        LogsProbeState {
-            service_running: true,
-            logs_authorized: true,
-            stream_open: started && !pending.is_empty(),
-            chunk_pending: pending
-                .iter()
-                .any(|kind| matches!(kind, RecordedDatagramKind::Chunk)),
-            completed: started && pending.is_empty(),
-        }
-    }
-
-    fn observe_logs_probe_output(
-        _runtime: &LogsProjectionRuntime,
-        _context: &(),
-        action: &LogsProjectionAction,
-        _result: &(),
-    ) -> LogsProbeOutput {
-        let effects = match action {
-            LogsProjectionAction::LogsRequest => vec![
-                ContractEffectSummary::RequestObserved(
-                    SummaryStreamId::Stream1,
-                    SummaryRequestKind::LogsRequest,
-                ),
-                ContractEffectSummary::Response(
-                    SummaryStreamId::Stream1,
-                    SummaryRequestKind::LogsRequest,
-                ),
-            ],
-            LogsProjectionAction::LogsChunk => vec![ContractEffectSummary::LogChunk(
-                SummaryStreamId::Stream1,
-                SummaryLogChunk::Chunk0,
-            )],
-            LogsProjectionAction::LogsEnd => {
-                vec![ContractEffectSummary::LogsEnd(SummaryStreamId::Stream1)]
-            }
-        };
-
-        LogsProbeOutput {
-            output: LogsOutputSummary { effects },
-        }
-    }
-
-    #[nirvash_runtime_contract(
-        spec = LogsProjectionSpec,
-        binding = LogsProjectionBinding,
-        context = (),
-        context_expr = (),
-        probe_state = LogsProbeState,
-        probe_output = LogsProbeOutput,
-        observe_state = observe_logs_probe_state,
-        output = observe_logs_probe_output,
-        fresh_runtime = LogsProjectionRuntime::new(),
-        tests(grouped)
-    )]
-    impl LogsProjectionRuntime {
-        #[nirvash_macros::contract_case(action = LogsProjectionAction::LogsRequest)]
-        async fn contract_logs_request(&self) {
-            let session = Arc::new(FakeProtocolSession::new(2048, vec![Ok(()), Ok(()), Ok(())]));
-            run_logs_forwarder(
-                session.clone(),
-                Uuid::from_u128(17),
-                Uuid::from_u128(18),
-                vec![sample_subscription("svc-a", b"hello-log")],
-                false,
-            )
-            .await;
-            self.started.store(true, Ordering::SeqCst);
-            *self.pending.lock().await = decode_datagram_kinds(&session.sent_datagrams());
-        }
-
-        #[nirvash_macros::contract_case(action = LogsProjectionAction::LogsChunk)]
-        async fn contract_logs_chunk(&self) {
-            let mut pending = self.pending.lock().await;
-            let mut saw_chunk = false;
-            while let Some(kind) = pending.front().copied() {
-                match kind {
-                    RecordedDatagramKind::Chunk => {
-                        saw_chunk = true;
-                        pending.pop_front();
-                    }
-                    RecordedDatagramKind::End => break,
-                }
-            }
-            assert!(
-                saw_chunk,
-                "logs forwarder should emit at least one logs.chunk"
-            );
-        }
-
-        #[nirvash_macros::contract_case(action = LogsProjectionAction::LogsEnd)]
-        async fn contract_logs_end(&self) {
-            let mut pending = self.pending.lock().await;
-            while matches!(pending.front(), Some(RecordedDatagramKind::Chunk)) {
-                pending.pop_front();
-            }
-            assert_eq!(
-                pending.pop_front(),
-                Some(RecordedDatagramKind::End),
-                "logs forwarder should terminate with logs.end",
-            );
-            assert!(
-                pending.is_empty(),
-                "logs projection should consume all forwarded datagrams",
-            );
         }
     }
 

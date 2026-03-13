@@ -9,9 +9,6 @@ use imagod_common::ImagodError;
 use imagod_config::{ImagodConfig, load_or_create_default, resolve_config_path};
 use imagod_control::{ArtifactStore, OperationManager, Orchestrator, ServiceSupervisor};
 use imagod_server::{ProtocolHandler, build_server};
-use imagod_spec::{
-    ShutdownStateSummary, SummaryManagerRuntimePhase, SummaryTaskKind, SummaryTaskState,
-};
 use web_transport_quinn::http::StatusCode;
 
 use crate::shutdown::{
@@ -29,15 +26,47 @@ pub(crate) enum ManagerRuntimeTaskState {
     Failed,
 }
 
-impl ManagerRuntimeTaskState {
-    #[allow(dead_code)]
-    const fn summary(self) -> SummaryTaskState {
-        match self {
-            Self::NotStarted => SummaryTaskState::NotStarted,
-            Self::Succeeded => SummaryTaskState::Succeeded,
-            Self::Failed => SummaryTaskState::Failed,
-        }
-    }
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ManagerRuntimeTaskKind {
+    #[default]
+    PluginGc,
+    BootRestore,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ManagerRuntimeShutdownPhase {
+    #[default]
+    Idle,
+    SignalReceived,
+    DrainingSessions,
+    StoppingServices,
+    StoppingMaintenance,
+    Completed,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ManagerRuntimePhase {
+    #[default]
+    Booting,
+    ConfigReady,
+    Restoring,
+    Listening,
+    ShutdownRequested,
+    Stopped,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ManagerRuntimeShutdownState {
+    pub phase: ManagerRuntimeShutdownPhase,
+    pub accepts_stopped: bool,
+    pub sessions_drained: bool,
+    pub services_stopped: bool,
+    pub maintenance_stopped: bool,
+    pub forced_stop_attempted: bool,
 }
 
 #[allow(dead_code)]
@@ -45,10 +74,10 @@ impl ManagerRuntimeTaskState {
 pub(crate) struct ManagerRuntimeSnapshot {
     pub config_loaded: bool,
     pub created_default: bool,
-    pub manager_phase: SummaryManagerRuntimePhase,
+    pub manager_phase: ManagerRuntimePhase,
     pub listening: bool,
     pub session_shutdown_requested: bool,
-    pub shutdown: ShutdownStateSummary,
+    pub shutdown: ManagerRuntimeShutdownState,
 }
 
 impl Default for ManagerRuntimeSnapshot {
@@ -56,10 +85,10 @@ impl Default for ManagerRuntimeSnapshot {
         Self {
             config_loaded: false,
             created_default: false,
-            manager_phase: SummaryManagerRuntimePhase::Booting,
+            manager_phase: ManagerRuntimePhase::Booting,
             listening: false,
             session_shutdown_requested: false,
-            shutdown: ShutdownStateSummary::default(),
+            shutdown: ManagerRuntimeShutdownState::default(),
         }
     }
 }
@@ -67,7 +96,7 @@ impl Default for ManagerRuntimeSnapshot {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManagerRuntimeEffect {
-    TaskMilestone(SummaryTaskKind, SummaryTaskState),
+    TaskMilestone(ManagerRuntimeTaskKind, ManagerRuntimeTaskState),
     ShutdownComplete,
 }
 
@@ -148,34 +177,34 @@ impl ManagerRuntimeObserver for ManagerRuntimeObservation {
         self.update_snapshot(|snapshot| {
             snapshot.config_loaded = true;
             snapshot.created_default = created_default;
-            snapshot.manager_phase = SummaryManagerRuntimePhase::ConfigReady;
+            snapshot.manager_phase = ManagerRuntimePhase::ConfigReady;
         });
     }
 
     fn note_plugin_gc(&self, state: ManagerRuntimeTaskState) {
         self.update_snapshot(|snapshot| {
-            snapshot.manager_phase = SummaryManagerRuntimePhase::Restoring;
+            snapshot.manager_phase = ManagerRuntimePhase::Restoring;
         });
         self.push_effect(ManagerRuntimeEffect::TaskMilestone(
-            SummaryTaskKind::PluginGc,
-            state.summary(),
+            ManagerRuntimeTaskKind::PluginGc,
+            state,
         ));
     }
 
     fn note_boot_restore(&self, state: ManagerRuntimeTaskState) {
         self.update_snapshot(|snapshot| {
-            snapshot.manager_phase = SummaryManagerRuntimePhase::Listening;
+            snapshot.manager_phase = ManagerRuntimePhase::Listening;
         });
         self.push_effect(ManagerRuntimeEffect::TaskMilestone(
-            SummaryTaskKind::BootRestore,
-            state.summary(),
+            ManagerRuntimeTaskKind::BootRestore,
+            state,
         ));
     }
 
     fn note_listening(&self) {
         self.update_snapshot(|snapshot| {
             snapshot.listening = true;
-            snapshot.manager_phase = SummaryManagerRuntimePhase::Listening;
+            snapshot.manager_phase = ManagerRuntimePhase::Listening;
         });
     }
 
@@ -183,15 +212,15 @@ impl ManagerRuntimeObserver for ManagerRuntimeObservation {
         self.update_snapshot(|snapshot| {
             snapshot.listening = false;
             snapshot.session_shutdown_requested = true;
-            snapshot.manager_phase = SummaryManagerRuntimePhase::ShutdownRequested;
-            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::DrainingSessions;
+            snapshot.manager_phase = ManagerRuntimePhase::ShutdownRequested;
+            snapshot.shutdown.phase = ManagerRuntimeShutdownPhase::DrainingSessions;
             snapshot.shutdown.accepts_stopped = true;
         });
     }
 
     fn note_services_stopped(&self, forced: bool) {
         self.update_snapshot(|snapshot| {
-            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::StoppingMaintenance;
+            snapshot.shutdown.phase = ManagerRuntimeShutdownPhase::StoppingMaintenance;
             snapshot.shutdown.sessions_drained = true;
             snapshot.shutdown.services_stopped = true;
             snapshot.shutdown.forced_stop_attempted |= forced;
@@ -206,16 +235,16 @@ impl ManagerRuntimeObserver for ManagerRuntimeObservation {
 
     fn note_maintenance_stopped(&self) {
         self.update_snapshot(|snapshot| {
-            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::StoppingMaintenance;
+            snapshot.shutdown.phase = ManagerRuntimeShutdownPhase::StoppingMaintenance;
             snapshot.shutdown.maintenance_stopped = true;
         });
     }
 
     fn note_shutdown_completed(&self) {
         self.update_snapshot(|snapshot| {
-            snapshot.manager_phase = SummaryManagerRuntimePhase::Stopped;
+            snapshot.manager_phase = ManagerRuntimePhase::Stopped;
             snapshot.listening = false;
-            snapshot.shutdown.phase = imagod_spec::SummaryShutdownPhase::Completed;
+            snapshot.shutdown.phase = ManagerRuntimeShutdownPhase::Completed;
         });
         self.push_effect(ManagerRuntimeEffect::ShutdownComplete);
     }

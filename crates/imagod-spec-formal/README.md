@@ -1,14 +1,19 @@
 # imagod-spec-formal
 
-`imagod-spec` が持つ shared contract を基底に、`imagod` の formal spec と runtime conformance を表す crate です。
+`imagod-spec-formal` は `imagod-spec` の shared contract を基底に、`imagod` の formal semantics を記述する crate です。
 
-主な公開面は次のとおりです。
+公開面は次の module に限定します。
 
-- `system`: daemon-visible contract を束ねる unified top-level spec
-- `deploy`, `supervision`, `rpc`, `plugin_platform`, `manager_runtime`, `session_auth`, `wire_protocol`
-- `command_projection`, `router_projection`, `session_auth_projection`, `logs_projection`, `runtime_projection`, `manager_runtime_projection`
+- `atoms`: bounded model で使う service/session/stream/authority の atom
+- `bounds`: explicit / symbolic の両 backend で共有する有限境界
+- `manager_plane`: boot/config/listening/shutdown/maintenance の manager semantics
+- `control_plane`: session accept/auth/request-response/log-follow/authority upload の control semantics
+- `service_plane`: artifact upload/commit/promote/rollback と service lifecycle の semantics
+- `operation_plane`: command lifecycle、binding、local/remote RPC の semantics
+- `system`: 4 plane を合成した top-level system semantics
 
-`nirvash` / `nirvash-check` / `nirvash-macros` / `nirvash-docgen` への依存はこの crate に閉じ込めます。  
-runtime crate は通常依存では `imagod-spec` の contract だけを使い、dev/test で formal な期待値が必要な境界だけ `imagod-spec-formal` に依存します。
+`SystemState` / `SystemAction` はこの crate の正本です。  
+`ModelInstance` は同一 spec 上で `explicit_*` と `symbolic_*` の 2 lane を持ち、explicit では広い scenario、symbolic では AST-native に安全な focused case を検証します。
 
-projection spec は `nirvash_projection_contract` で `ProbeState/ProbeOutput -> SummaryState/SummaryOutput -> AbstractState/ExpectedOutput` の写像を宣言し、runtime 側は concrete probe を観測するだけで grouped conformance を回せる形を正本にしています。
+projection、probe/summary surface、runtime conformance trait はこの crate に含めません。  
+実コード検証は後続の別 boundary として扱い、この crate は formal semantics、model checking、docgen に責務を限定します。

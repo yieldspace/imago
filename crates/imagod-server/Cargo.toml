@@ -28,14 +28,6 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 web-transport-quinn = { workspace = true }
 
-[dev-dependencies]
-imagod-spec-formal = { workspace = true }
-nirvash = { workspace = true }
-nirvash-check = { workspace = true }
-nirvash-conformance = { workspace = true }
-nirvash-lower = { workspace = true }
-nirvash-macros = { workspace = true }
-
 [[bench]]
 name = "logs_forwarder"
 harness = false

@@ -18,10 +18,12 @@ pub use doc_graph::{
     ReachableGraphSnapshot, ReducedDocGraph, ReducedDocGraphEdge, ReducedDocGraphNode,
     RegisteredDocGraphProvider, RegisteredSpecVizProvider, RegisteredSubsystemSpec,
     SpecVizActionDescriptor, SpecVizBundle, SpecVizCase, SpecVizCaseStats, SpecVizKind,
-    SpecVizMetadata, SpecVizProvider, SpecVizRegistrationSet, SpecVizSubsystem, VizPolicy,
-    VizScenario, VizScenarioKind, VizScenarioStep, collect_doc_graph_specs,
-    collect_spec_viz_bundles, describe_doc_graph_action, format_doc_graph_action, reduce_doc_graph,
-    summarize_doc_graph_state, summarize_doc_graph_text,
+    SpecVizMetadata, SpecVizProvider, SpecVizProviderKind, SpecVizRegistrationSet,
+    SpecVizSubsystem, VizPolicy, VizScenario, VizScenarioKind, VizScenarioStep,
+    collect_doc_graph_specs, collect_primary_spec_viz_provider_registrations,
+    collect_spec_viz_bundles, collect_spec_viz_provider_registrations, describe_doc_graph_action,
+    format_doc_graph_action, merge_spec_viz_bundle, reduce_doc_graph, summarize_doc_graph_state,
+    summarize_doc_graph_text, upsert_spec_viz_bundle, visit_spec_viz_bundles,
 };
 pub use fairness::Fairness;
 pub use inventory;

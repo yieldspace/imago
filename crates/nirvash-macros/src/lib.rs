@@ -485,7 +485,10 @@ fn is_builtin_pure_method(name: &str) -> bool {
             | "domain"
             | "expect"
             | "intersection"
+            | "is_none"
+            | "is_max"
             | "is_some"
+            | "is_some_and"
             | "join"
             | "lone"
             | "no"
@@ -499,6 +502,17 @@ fn is_builtin_pure_method(name: &str) -> bool {
     )
 }
 
+fn is_builtin_pure_function(func: &Expr) -> bool {
+    match strip_expr_wrappers(func) {
+        Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Some"),
+        _ => false,
+    }
+}
+
 fn pure_call_kind(expr: &Expr) -> Option<PureCallKind> {
     match expr {
         Expr::MethodCall(ExprMethodCall { method, .. }) => {
@@ -509,7 +523,13 @@ fn pure_call_kind(expr: &Expr) -> Option<PureCallKind> {
                 Some(PureCallKind::Registered(LitStr::new(&name, method.span())))
             }
         }
-        Expr::Call(ExprCall { func, .. }) => Some(PureCallKind::Registered(expr_source_lit(func))),
+        Expr::Call(ExprCall { func, .. }) => {
+            if is_builtin_pure_function(func) {
+                Some(PureCallKind::Builtin)
+            } else {
+                Some(PureCallKind::Registered(expr_source_lit(func)))
+            }
+        }
         _ => None,
     }
 }
@@ -4440,6 +4460,7 @@ fn expand_temporal_spec(
             ::nirvash::RegisteredSpecVizProvider {
                 spec_name: #spec_name,
                 build: #spec_viz_provider_build_ident,
+                kind: ::nirvash::SpecVizProviderKind::MetadataOnly,
             }
         }
 
@@ -4712,6 +4733,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
             ::nirvash::RegisteredSpecVizProvider {
                 spec_name: #spec_name,
                 build: #spec_viz_provider_build_ident,
+                kind: ::nirvash::SpecVizProviderKind::RuntimeGraph,
             }
         }
 

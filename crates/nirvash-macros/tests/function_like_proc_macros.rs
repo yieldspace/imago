@@ -26,6 +26,11 @@ struct State {
     config: Config,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OptionalState {
+    phase: Option<Phase>,
+}
+
 impl State {
     fn is_idle(&self) -> bool {
         matches!(self.phase, Phase::Idle)
@@ -109,6 +114,18 @@ fn pure_call_path_program() -> nirvash::TransitionProgram<State, Action> {
     nirvash_transition_program! {
         rule activate when prev.ready == true && target_phase(action).is_some() => {
             set phase <= prev.phase;
+        }
+    }
+}
+
+fn option_program() -> nirvash::TransitionProgram<OptionalState, Action> {
+    nirvash_transition_program! {
+        rule activate when prev.phase.is_none() && matches!(action, Action::Start) => {
+            set phase <= Some(Phase::Busy);
+        }
+
+        rule clear when prev.phase == Some(Phase::Busy) && matches!(action, Action::Remove(_)) => {
+            set phase <= None;
         }
     }
 }
@@ -308,4 +325,29 @@ fn transition_program_macro_tracks_pure_call_read_paths() {
     let program = pure_call_path_program();
 
     assert_eq!(program.symbolic_state_paths(), vec!["phase", "ready"]);
+}
+
+#[test]
+fn transition_program_macro_treats_option_surface_as_builtin() {
+    let program = option_program();
+    let initial = OptionalState { phase: None };
+
+    assert_eq!(program.first_unencodable_symbolic_node(), None);
+
+    let activated = program
+        .evaluate(&initial, &Action::Start)
+        .expect("option activate evaluation")
+        .expect("option activate rule");
+    assert_eq!(
+        activated,
+        OptionalState {
+            phase: Some(Phase::Busy)
+        }
+    );
+
+    let cleared = program
+        .evaluate(&activated, &Action::Remove(0))
+        .expect("option clear evaluation")
+        .expect("option clear rule");
+    assert_eq!(cleared, OptionalState { phase: None });
 }
