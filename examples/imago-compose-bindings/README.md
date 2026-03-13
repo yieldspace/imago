@@ -7,8 +7,8 @@
 
 ## ローカル 1 ノード手順
 
-`stack deploy` / `stack logs` は `ssh://localhost?...` 経由で `imagod proxy-stdio` を呼びます。
-事前に `ssh localhost true` が対話なしで成功し、SSH ログインシェルの `PATH` から `imagod` を実行できる状態にしてください。
+`stack deploy` / `stack logs` は、`ssh://localhost?...` かつ user/port 未指定のとき `control_socket_path` に直接接続します。
+`imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-compose-bindings.sock"` と `imagod.toml` の `control_socket_path` を一致させ、同じユーザーからその socket に接続できる状態にしてください。
 
 1. ターミナル A で build/sync と `imagod` 起動を行います。
 
@@ -92,5 +92,5 @@ Docker compose 例の SSH 制御鍵と `known_hosts` は、起動時に compose 
 
 ## Troubleshooting
 
-- ローカル 1 ノードで失敗する場合は `ssh localhost true` と `imagod proxy-stdio --socket /tmp/imagod-compose-bindings.sock` を同じユーザーで確認してください。
+- ローカル 1 ノードで失敗する場合は `imago.toml` と `imagod.toml` の socket path 一致、および `imagod` を起動したユーザーからその socket に接続できることを確認してください。
 - Docker cross-imagod では `imago-deployer` から `ssh imagod-alice true` / `ssh imagod-bob true` が通ることを先に確認してください。

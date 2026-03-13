@@ -44,6 +44,20 @@ impl TargetConnector for SshTargetConnector {
         &self,
         target: &build::DeployTargetConfig,
     ) -> anyhow::Result<super::ConnectedTargetSession> {
+        super::connect_ssh_target_only(target).await
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+#[doc(hidden)]
+pub struct LoopbackAwareTargetConnector;
+
+#[async_trait]
+impl TargetConnector for LoopbackAwareTargetConnector {
+    async fn connect(
+        &self,
+        target: &build::DeployTargetConfig,
+    ) -> anyhow::Result<super::ConnectedTargetSession> {
         super::connect_target(target).await
     }
 }
@@ -72,8 +86,9 @@ impl TargetConnector for LocalProxyTargetConnector {
 
 #[cfg(test)]
 mod tests {
-    use super::LocalProxyTargetConnector;
+    use super::{LocalProxyTargetConnector, LoopbackAwareTargetConnector, SshTargetConnector};
     use crate::commands::build;
+    use crate::commands::deploy::DefaultTargetTransportKind;
     use std::path::PathBuf;
 
     #[test]
@@ -108,5 +123,60 @@ mod tests {
     fn local_proxy_connector_keeps_binary_path() {
         let connector = LocalProxyTargetConnector::new(PathBuf::from("/tmp/imagod"));
         assert_eq!(connector.imagod_binary, PathBuf::from("/tmp/imagod"));
+    }
+
+    #[test]
+    fn loopback_aware_connector_uses_direct_socket_only_for_plain_loopback_targets() {
+        let direct = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let with_user = build::SshTargetRemote {
+            user: Some("root".to_string()),
+            host: "localhost".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let with_port = build::SshTargetRemote {
+            user: None,
+            host: "localhost".to_string(),
+            port: Some(2222),
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+        let remote_host = build::SshTargetRemote {
+            user: None,
+            host: "edge.example.com".to_string(),
+            port: None,
+            socket_path: Some("/tmp/imagod.sock".to_string()),
+        };
+
+        #[cfg(unix)]
+        assert_eq!(
+            super::super::default_target_transport_kind(&direct),
+            DefaultTargetTransportKind::DirectSocket
+        );
+        #[cfg(not(unix))]
+        assert_eq!(
+            super::super::default_target_transport_kind(&direct),
+            DefaultTargetTransportKind::Ssh
+        );
+
+        assert_eq!(
+            super::super::default_target_transport_kind(&with_user),
+            DefaultTargetTransportKind::Ssh
+        );
+        assert_eq!(
+            super::super::default_target_transport_kind(&with_port),
+            DefaultTargetTransportKind::Ssh
+        );
+        assert_eq!(
+            super::super::default_target_transport_kind(&remote_host),
+            DefaultTargetTransportKind::Ssh
+        );
+
+        let _ = LoopbackAwareTargetConnector;
+        let _ = SshTargetConnector;
     }
 }

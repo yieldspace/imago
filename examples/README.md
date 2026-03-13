@@ -13,3 +13,4 @@
 | `examples/local-imagod-plugin-native-experimental-gpio` | experimental-gpio native plugin 依存の実行例 | `examples/local-imagod-plugin-native-experimental-gpio/README.md` |
 | `examples/local-imagod-plugin-native-experimental-i2c` | experimental-i2c native plugin 依存の実行例 | `examples/local-imagod-plugin-native-experimental-i2c/README.md` |
 | `examples/imago-compose-bindings` | stack/trust cert の実行例 | `examples/imago-compose-bindings/README.md` |
+| `examples/imago-with-componentize-js-hono` | `componentize-js` + Hono で `type=http` を実行する例 | `examples/imago-with-componentize-js-hono/README.md` |

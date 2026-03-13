@@ -16,7 +16,9 @@ use crate::commands::{
 };
 
 #[doc(hidden)]
-pub use crate::commands::deploy::network::{LocalProxyTargetConnector, SshTargetConnector};
+pub use crate::commands::deploy::network::{
+    LocalProxyTargetConnector, LoopbackAwareTargetConnector, SshTargetConnector,
+};
 
 #[doc(hidden)]
 pub trait OutputSink: Send + Sync {
@@ -138,7 +140,7 @@ impl CliRuntime {
         Self::new(
             project_root.as_ref(),
             detect_mode(),
-            Arc::new(network::SshTargetConnector),
+            Arc::new(network::LoopbackAwareTargetConnector),
             Arc::new(StdioOutputSink),
         )
     }
@@ -194,14 +196,14 @@ pub(crate) async fn connect_target(
 ) -> anyhow::Result<deploy::ConnectedTargetSession> {
     match current() {
         Some(runtime) => runtime.target_connector.connect(target).await,
-        None => network::SshTargetConnector.connect(target).await,
+        None => network::LoopbackAwareTargetConnector.connect(target).await,
     }
 }
 
 pub(crate) fn target_connector() -> Arc<dyn network::TargetConnector> {
     current()
         .map(|runtime| runtime.target_connector.clone())
-        .unwrap_or_else(|| Arc::new(network::SshTargetConnector))
+        .unwrap_or_else(|| Arc::new(network::LoopbackAwareTargetConnector))
 }
 
 pub(crate) fn write_stdout(bytes: &[u8]) -> anyhow::Result<()> {
@@ -230,6 +232,18 @@ pub(crate) fn write_stderr_line(line: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::commands::deploy::network;
+
+    fn loopback_target(socket_path: &str) -> build::DeployTargetConfig {
+        build::DeployTargetConfig {
+            remote: format!("ssh://localhost?socket={socket_path}"),
+            ssh_remote: build::SshTargetRemote {
+                user: None,
+                host: "localhost".to_string(),
+                port: None,
+                socket_path: Some(socket_path.to_string()),
+            },
+        }
+    }
 
     fn plain_runtime(output_sink: Arc<dyn OutputSink>) -> Arc<CliRuntime> {
         Arc::new(CliRuntime::plain(
@@ -291,5 +305,38 @@ mod tests {
         let output = output_sink.snapshot();
         assert_eq!(output.stdout, "あ");
         assert_eq!(output.stderr, "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_target_without_runtime_uses_loopback_aware_default_connector() {
+        let session = connect_target(&loopback_target("/tmp/imagod-runtime-default.sock"))
+            .await
+            .expect("loopback target should use direct socket connector");
+
+        assert_eq!(
+            session.authority, "ssh://localhost",
+            "authority should remain ssh-based for config display",
+        );
+        assert_eq!(
+            session.resolved_addr,
+            "local-socket:/tmp/imagod-runtime-default.sock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_runtime_uses_loopback_aware_default_connector() {
+        let runtime = Arc::new(CliRuntime::production(Path::new(".")));
+
+        run_in_runtime(runtime, async {
+            let session = connect_target(&loopback_target("/tmp/imagod-runtime-production.sock"))
+                .await
+                .expect("production runtime should use loopback-aware connector");
+            assert_eq!(
+                session.resolved_addr,
+                "local-socket:/tmp/imagod-runtime-production.sock"
+            );
+        });
     }
 }

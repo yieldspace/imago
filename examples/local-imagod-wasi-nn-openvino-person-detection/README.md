@@ -7,7 +7,7 @@
 ## 前提
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
-あわせて OpenSSH client/server を用意し、`ssh localhost true` が対話なしで成功し、`imagod proxy-stdio --socket /tmp/imagod-local-wasi-nn-openvino-person-detection.sock` を SSH ログインシェルから実行できる状態にしてください。
+`imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-local-wasi-nn-openvino-person-detection.sock"` と `imagod.toml` の `control_socket_path` を一致させ、同じユーザーからその socket に接続できる状態にしてください。
 
 `imagod` は `wasi-nn-openvino` feature 付きで起動してください。
 ネイティブの `imagod` 実行には OpenVINO runtime の共有ライブラリ解決が必要です。OpenVINO のインストールと動的ライブラリパス設定を先に済ませてください。

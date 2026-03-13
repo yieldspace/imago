@@ -41,7 +41,7 @@ listen_addr = "[::]:4443"
 
 - Type: `string` (absolute path)
 - Required/Optional: Optional.
-- Accepted values / Constraints: must be an absolute path; used by `imagod proxy-stdio` and the SSH transport bridge.
+- Accepted values / Constraints: must be an absolute path; used for local CLI admin access and as the destination socket for SSH transport bridging.
 - Default: `"/run/imago/imagod.sock"`.
 - Example:
 
@@ -88,7 +88,7 @@ server_version = "imagod/0.1.0"
 ## The [tls] section
 
 This section configures server key material and public-key allowlists.
-QUIC/WebTransport listeners configured by `listen_addr` are reserved for node-to-node RPC; CLI admin traffic uses the local control socket via SSH and `imagod proxy-stdio`.
+QUIC/WebTransport listeners configured by `listen_addr` are reserved for node-to-node RPC. CLI admin traffic uses `control_socket_path` directly for loopback targets without user/port overrides, and uses SSH plus `imagod proxy-stdio` for other targets.
 
 ### The `server_key` field
 
@@ -135,7 +135,7 @@ client_public_keys = []
 known_public_keys = { "rpc://node-a:4443" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
 ```
 
-Local admin access is granted by peer credentials on `control_socket_path`, and SSH endpoints should bridge to that socket with `imagod proxy-stdio`.
+Local admin access is granted by peer credentials on `control_socket_path`. Loopback CLI targets without user/port connect directly to that socket; SSH endpoints should bridge to the same socket with `imagod proxy-stdio`.
 
 - Validation error notes: empty authority names or invalid key values fail validation.
 

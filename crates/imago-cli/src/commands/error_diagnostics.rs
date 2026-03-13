@@ -1,14 +1,13 @@
 use anyhow::Error;
 use std::borrow::Cow;
 
-const HINT_UNAUTHORIZED: &str =
-    "Verify the ssh:// target, SSH access, and target-side admin authorization, then retry.";
+const HINT_UNAUTHORIZED: &str = "Verify the ssh:// target. Loopback targets without user/port use local control socket permissions; other targets require SSH access and target-side admin authorization.";
 const HINT_BUILD_FAILED: &str =
     "Run `imago artifact build` first and fix build.command errors before retrying service deploy.";
-const HINT_TARGET_CONFIG: &str = "Check `imago.toml` target settings. Targets must use only remote=ssh://[user@]host[:port][?socket=/abs/path].";
+const HINT_TARGET_CONFIG: &str = "Check `imago.toml` target settings. Targets must use only remote=ssh://[user@]host[:port][?socket=/abs/path]. Loopback targets without user/port connect directly to the local control socket; other targets use SSH.";
 const HINT_REMOTE_PARSE: &str =
     "Fix the target remote format. Use ssh://[user@]host[:port][?socket=/abs/path].";
-const HINT_TRANSPORT_CONNECT: &str = "Check SSH reachability, ssh configuration, and remote imagod proxy-stdio availability, then retry.";
+const HINT_TRANSPORT_CONNECT: &str = "For loopback targets without user/port, check the local control socket path and permissions. For other targets, check SSH reachability, ssh configuration, and remote imagod proxy-stdio availability, then retry.";
 const HINT_BUSY: &str = "The target is busy. Wait for in-flight operations to finish and retry.";
 const HINT_COMMAND_START_STREAM_INTERRUPTED: &str = "The command.start stream was interrupted. The command may still be running on target; inspect target state/logs before retrying service deploy/service start/service stop.";
 const HINT_STORAGE_QUOTA: &str =
@@ -90,6 +89,7 @@ pub fn summarize_command_failure(_command: &str, err: &Error) -> String {
 
     if combined_lower.contains("failed to spawn ssh transport")
         || combined_lower.contains("ssh transport")
+        || combined_lower.contains("local socket transport")
         || combined_lower.contains("connect failed")
     {
         return "connect stage failed".to_string();
@@ -153,6 +153,7 @@ fn append_hints(err: &Error, hints: &mut Vec<String>) {
 
     if combined_lower.contains("failed to spawn ssh transport")
         || combined_lower.contains("ssh transport")
+        || combined_lower.contains("local socket transport")
     {
         push_unique(hints, HINT_TRANSPORT_CONNECT);
     }
@@ -236,6 +237,7 @@ mod tests {
 
         let formatted = format_command_error("service.start", &err);
         assert!(formatted.contains("ssh://"));
+        assert!(formatted.contains("local control socket"));
         assert!(formatted.contains("SSH access"));
     }
 
@@ -245,7 +247,17 @@ mod tests {
 
         let formatted = format_command_error("service.start", &err);
         assert!(formatted.contains("ssh://"));
+        assert!(formatted.contains("local control socket"));
         assert!(formatted.contains("SSH access"));
+    }
+
+    #[test]
+    fn includes_transport_hint_for_local_socket_errors() {
+        let err = anyhow!("local socket transport connect failed for /tmp/imagod.sock");
+
+        let formatted = format_command_error("service.logs", &err);
+        assert!(formatted.contains("local control socket path"));
+        assert!(formatted.contains("SSH reachability"));
     }
 
     #[test]
@@ -300,6 +312,15 @@ mod tests {
         assert_eq!(
             summarize_command_failure("service.start", &err),
             "hello stage failed"
+        );
+    }
+
+    #[test]
+    fn summarize_command_failure_reports_connect_stage_for_local_socket_transport() {
+        let err = anyhow!("local socket transport connect failed for /tmp/imagod.sock");
+        assert_eq!(
+            summarize_command_failure("service.logs", &err),
+            "connect stage failed"
         );
     }
 

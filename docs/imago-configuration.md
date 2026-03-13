@@ -137,8 +137,9 @@ remote = "ssh://root@edge-box?socket=/run/imago/imagod.sock"
 
 - Validation error notes: missing selected target, non-SSH endpoints such as `host:port`, invalid SSH URIs, or unsupported SSH query parameters cause validation/deploy failure.
 
-When an SSH target uses `?socket=...`, that path must match the remote daemon's `control_socket_path`.
-CLI admin commands (`service deploy`, `service stop`, `service logs`, `service ls`, `trust cert ...`) always use SSH plus `imagod proxy-stdio`.
+When an SSH target uses `?socket=...`, that path must match the target daemon's `control_socket_path`.
+Loopback targets without `user@` or `:port` (`ssh://localhost?...`, `ssh://127.0.0.1?...`, `ssh://[::1]?...`) connect directly to that local control socket.
+Other targets still use SSH plus `imagod proxy-stdio`.
 Host verification and authentication are delegated to OpenSSH; `~/.imago/known_hosts` is not used.
 Node-to-node RPC authorities remain separate from target remotes and are written as `rpc://host:port` in `trust cert upload` / `trust cert replicate`.
 

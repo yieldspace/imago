@@ -1,0 +1,15 @@
+name = "imago-with-componentize-js-hono"
+main = "dist/component.wasm"
+type = "http"
+
+[http]
+port = 18081
+
+[build]
+command = "pnpm run build"
+
+[capabilities]
+wasi = true
+
+[target.default]
+remote = "ssh://localhost?socket=/tmp/imagod-componentize-js-hono.sock"

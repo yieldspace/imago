@@ -7,8 +7,7 @@
 ## 前提
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
-あわせて OpenSSH client/server を用意し、`ssh localhost true` が対話なしで成功する状態にしてください。
-`imago service deploy` は `ssh://localhost?...` 経由で `imagod proxy-stdio` を呼ぶため、SSH ログインシェルの `PATH` から `imagod` バイナリを実行できる必要があります。
+`imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-local-socket.sock"` と `imagod.toml` の `control_socket_path` を一致させ、同じユーザーからその socket に接続できる状態にしてください。
 
 ## 実行
 
@@ -32,10 +31,9 @@ cargo run -p imago-cli -- service logs local-imagod-socket-app --tail 200
 
 ## Troubleshooting
 
-### SSH localhost 経由で service deploy が失敗する
+### localhost 向け service deploy が失敗する
 
 以下を確認してください。
 
-- `ssh localhost true` がパスフレーズ入力や host key 確認なしで成功する
-- SSH ログインシェルで `imagod proxy-stdio --socket /tmp/imagod-local-socket.sock` を実行できる
 - `imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-local-socket.sock"` と `imagod.toml` の `control_socket_path` が一致している
+- `imagod` を起動したユーザーと `imago service deploy` を実行したユーザーが同じか、socket file に接続権限がある

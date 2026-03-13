@@ -965,7 +965,7 @@ mod tests {
         hint::black_box,
         net::SocketAddr,
         path::{Path, PathBuf},
-        time::Instant,
+        time::{Duration, Instant},
     };
     use tempfile::{Builder as TempDirBuilder, TempDir};
     use wit_component::{ComponentEncoder, StringEncoding, dummy_module};
@@ -1151,6 +1151,10 @@ mod tests {
     }
 
     fn write_wasi_http_component(prefix: &str) -> WasiHttpFixture {
+        write_wasi_http_component_with_version(prefix, "0.2.4")
+    }
+
+    fn write_wasi_http_component_with_version(prefix: &str, version: &str) -> WasiHttpFixture {
         let temp_dir = TempDirBuilder::new()
             .prefix(&format!("imago-runtime-wasi-http-{prefix}-"))
             .tempdir()
@@ -1160,32 +1164,95 @@ mod tests {
         fs::create_dir_all(&http_deps_dir).expect("http deps directory should be created");
         fs::write(
             root.join("world.wit"),
-            r#"
+            format!(
+                r#"
 package test:wasi-http-import@0.1.0;
 
-world app {
-  import wasi:http/types@0.2.4;
-}
+world app {{
+  import wasi:http/types@{version};
+}}
 "#,
+            ),
         )
         .expect("wit source should be written");
         fs::write(
             http_deps_dir.join("package.wit"),
-            r#"
-package wasi:http@0.2.4;
+            format!(
+                r#"
+package wasi:http@{version};
 
-interface types {
+interface types {{
   type field-key = string;
   type field-name = field-key;
 
-  resource fields {
+  resource fields {{
     constructor();
     has: func(name: field-name) -> bool;
-  }
+  }}
+}}
+"#,
+            ),
+        )
+        .expect("wasi:http fixture should be written");
+
+        let mut resolve = Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        let world = resolve
+            .select_world(&[pkg], Some("app"))
+            .expect("world 'app' should exist");
+        let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
+        wit_component::embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8)
+            .expect("component metadata embedding should succeed");
+        let component = ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed");
+        let component_path = root.join("component.wasm");
+        fs::write(&component_path, component).expect("component bytes should be written");
+        WasiHttpFixture {
+            _temp_dir: temp_dir,
+            component_path,
+        }
+    }
+
+    fn write_wasi_http_incoming_handler_component(prefix: &str) -> WasiHttpFixture {
+        let temp_dir = TempDirBuilder::new()
+            .prefix(&format!("imago-runtime-wasi-http-handler-{prefix}-"))
+            .tempdir()
+            .expect("temp dir should be created");
+        let root = temp_dir.path();
+        let deps_dir = root.join("deps");
+        fs::create_dir_all(&deps_dir).expect("http deps directory should be created");
+        fs::write(
+            root.join("world.wit"),
+            r#"
+package test:wasi-http-handler@0.1.0;
+
+world app {
+  export wasi:http/incoming-handler@0.2.6;
 }
 "#,
         )
-        .expect("wasi:http fixture should be written");
+        .expect("wit source should be written");
+        let repo_deps_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/imago-with-componentize-js-hono/wit/deps");
+        for dep_dir in [
+            "wasi-cli-0.2.6",
+            "wasi-clocks-0.2.6",
+            "wasi-http-0.2.6",
+            "wasi-io-0.2.6",
+            "wasi-random-0.2.6",
+        ] {
+            let source = repo_deps_dir.join(dep_dir).join("package.wit");
+            let dest_dir = deps_dir.join(dep_dir);
+            fs::create_dir_all(&dest_dir).expect("dependency directory should be created");
+            fs::copy(&source, dest_dir.join("package.wit")).unwrap_or_else(|err| {
+                panic!("failed to copy {}: {err}", source.display());
+            });
+        }
 
         let mut resolve = Resolve::default();
         let (pkg, _) = resolve
@@ -1483,6 +1550,73 @@ interface graph {
             "unexpected message: {}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn http_type_accepts_wasi_http_incoming_handler_0_2_6_component() {
+        let fixture = write_wasi_http_incoming_handler_component("http-0-2-6");
+        let runtime = WasmRuntime::new().expect("runtime should initialize");
+        let imports = collect_component_import_names(&runtime, &fixture.component_path);
+        assert!(
+            imports.iter().any(|name| name == "wasi:http/types@0.2.6"),
+            "component should import wasi:http/types@0.2.6, got: {imports:?}"
+        );
+
+        let component_path = fixture.component_path.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let run_task = tokio::spawn(async move {
+            runtime
+                .run_component(RuntimeRunRequest {
+                    app_type: RunnerAppType::Http,
+                    runner_id: "runner-test".to_string(),
+                    service_name: "svc-test".to_string(),
+                    release_hash: "release-test".to_string(),
+                    component_path,
+                    args: Vec::new(),
+                    envs: BTreeMap::new(),
+                    wasi_mounts: Vec::new(),
+                    wasi_http_outbound: Vec::new(),
+                    resources: std::collections::BTreeMap::new(),
+                    socket: None,
+                    plugin_dependencies: Vec::new(),
+                    capabilities: allow_all_wasi_capabilities(),
+                    bindings: Vec::new(),
+                    manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+                    manager_auth_secret: "secret".to_string(),
+                    shutdown: shutdown_rx,
+                    epoch_tick_interval_ms: 50,
+                    http_worker_count: 2,
+                    http_worker_queue_capacity: 4,
+                    http_ready_tx: Some(ready_tx),
+                })
+                .await
+        });
+
+        match tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .expect("http component should register in time")
+        {
+            Ok(()) => {}
+            Err(err) => {
+                let task_result = tokio::time::timeout(Duration::from_secs(2), run_task)
+                    .await
+                    .expect("http component task should complete after ready channel failure")
+                    .expect("http component task should not panic");
+                panic!(
+                    "http ready channel should succeed: {err}; runtime returned: {:?}",
+                    task_result
+                );
+            }
+        }
+        shutdown_tx
+            .send(true)
+            .expect("shutdown sender should still be connected");
+        tokio::time::timeout(Duration::from_secs(2), run_task)
+            .await
+            .expect("http component should stop in time")
+            .expect("http component task should complete")
+            .expect("http component should stop without error");
     }
 
     #[tokio::test]
