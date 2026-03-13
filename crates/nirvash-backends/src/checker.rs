@@ -520,6 +520,22 @@ where
         }
     }
 
+    pub fn candidate_traces(&self) -> Result<TraceVec<T>, ModelCheckError> {
+        match self.resolved_backend() {
+            ModelBackend::Explicit => match self.config.exploration {
+                ExplorationMode::ReachableGraph => {
+                    let graph = self.build_reachable_graph()?;
+                    self.ensure_untruncated(&graph)?;
+                    Ok(self.graph_lasso_traces(&graph))
+                }
+                ExplorationMode::BoundedLasso => self.bounded_lasso_traces(),
+            },
+            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
+                "candidate trace enumeration is only supported by the explicit backend",
+            )),
+        }
+    }
+
     pub fn backend(&self) -> ModelBackend {
         self.resolved_backend()
     }

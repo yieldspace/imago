@@ -68,6 +68,10 @@ where
         self.0.simulate()
     }
 
+    pub fn candidate_traces(&self) -> Result<TraceVec<T>, ModelCheckError> {
+        self.0.candidate_traces()
+    }
+
     pub fn backend(&self) -> ModelBackend {
         self.0.backend()
     }
@@ -653,6 +657,20 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
+    enum CandidateTraceAction {
+        Start,
+        Tick,
+    }
+
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding,
+    )]
+    enum CandidateTraceState {
+        Idle,
+        Loop,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain)]
     enum CounterexampleAction {
         TakeLong,
         TakeShort,
@@ -772,6 +790,9 @@ mod tests {
     #[derive(Debug, Clone, Copy, Default)]
     struct SimulationSpec;
 
+    #[derive(Debug, Clone, Copy, Default)]
+    struct CandidateTraceSpec;
+
     impl FrontendSpec for SimulationSpec {
         type State = SimulationState;
         type Action = SimulationAction;
@@ -857,6 +878,39 @@ mod tests {
         }
     }
 
+    impl FrontendSpec for CandidateTraceSpec {
+        type State = CandidateTraceState;
+        type Action = CandidateTraceAction;
+
+        frontend_name!();
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![CandidateTraceState::Idle]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![CandidateTraceAction::Start, CandidateTraceAction::Tick]
+        }
+
+        fn transition(&self, state: &Self::State, action: &Self::Action) -> Option<Self::State> {
+            match (state, action) {
+                (CandidateTraceState::Idle, CandidateTraceAction::Start) => {
+                    Some(CandidateTraceState::Loop)
+                }
+                (CandidateTraceState::Loop, CandidateTraceAction::Tick) => {
+                    Some(CandidateTraceState::Loop)
+                }
+                _ => None,
+            }
+        }
+    }
+
+    impl TemporalSpec for CandidateTraceSpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
+
     fn checkpoint_path(label: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -900,6 +954,30 @@ mod tests {
             left_run[0].steps().last(),
             Some(TraceStep::Stutter)
         ));
+    }
+
+    #[test]
+    fn explicit_candidate_traces_include_terminal_and_looping_paths() {
+        let spec = CandidateTraceSpec;
+        let lowered = lower_spec(&spec);
+        let traces = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(2))
+            .candidate_traces()
+            .expect("explicit candidate traces should enumerate");
+
+        assert!(traces.iter().any(|trace| {
+            trace.states() == [CandidateTraceState::Idle]
+                && trace.steps() == [TraceStep::Stutter]
+                && trace.loop_start() == 0
+        }));
+        assert!(traces.iter().any(|trace| {
+            trace.states() == [CandidateTraceState::Idle, CandidateTraceState::Loop]
+                && trace.steps()
+                    == [
+                        TraceStep::Action(CandidateTraceAction::Start),
+                        TraceStep::Action(CandidateTraceAction::Tick),
+                    ]
+                && trace.loop_start() == 1
+        }));
     }
 
     #[test]
@@ -1233,6 +1311,27 @@ mod tests {
             err,
             nirvash::ModelCheckError::UnsupportedConfiguration(message)
                 if message.contains("simulation")
+        ));
+    }
+
+    #[test]
+    fn symbolic_backend_rejects_candidate_trace_enumeration() {
+        let spec = StructuralQuantifierSpec;
+        let lowered = lower_spec(&spec);
+        let err = ModelChecker::with_config(
+            &lowered,
+            ModelCheckConfig {
+                backend: Some(ModelBackend::Symbolic),
+                ..ModelCheckConfig::bounded_lasso(2)
+            },
+        )
+        .candidate_traces()
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("candidate trace enumeration")
         ));
     }
 }

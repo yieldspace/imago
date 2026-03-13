@@ -6,7 +6,7 @@
 - [x] Phase 1A: `nirvash-conformance` に `RefinementMap` trait と `step_refines_relation` を追加する
 - [x] Phase 1B: `assert_step_refinement` / `enabled_from_summary` を relation-aware に整理する
 - [x] Phase 1C: code witness / macro harness を relation API に追従させる
-- [ ] Phase 2: `trace_refines` を explicit backend で実装する
+- [x] Phase 2: `trace_refines` を explicit backend で実装する
 - [ ] Phase 3: `ExplicitModelChecker` / `SymbolicModelChecker` へ checker front door を分離する
 - [ ] Phase 4: sound reduction と heuristic reduction の API を分離する
 - [ ] Phase 5: Rust 検証アダプタ (`proptest-state-machine` / `Kani` / `loom`) を追加する
@@ -502,9 +502,9 @@ fn output_refines(
 
 ### Phase 2
 
-- `trace_refines` を explicit backend により実装
-- `ObservedEvent` と witness/result 型を導入
-- 反例整形を追加
+- [x] `trace_refines` を explicit backend により実装
+- [x] `ObservedEvent` と witness/result 型を導入
+- [x] 反例整形を追加
 
 ### Phase 3
 

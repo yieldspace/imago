@@ -3465,6 +3465,7 @@ name = "nirvash-conformance"
 version = "0.2.0"
 dependencies = [
  "nirvash",
+ "nirvash-check",
  "nirvash-lower",
 ]
 

@@ -2,6 +2,7 @@ use std::{fmt::Debug, panic::AssertUnwindSafe, process};
 
 use nirvash::{IntoBoundedDomain, into_bounded_domain};
 pub use nirvash::{ReachableGraphSnapshot, inventory};
+use nirvash_lower::{FiniteModelDomain, LoweringCx, ModelBackend, ModelCheckConfig, TemporalSpec};
 pub use nirvash_lower::{FrontendSpec, ModelInstance, Trace, TraceStep};
 
 #[allow(async_fn_in_trait)]
@@ -142,6 +143,19 @@ pub enum ObservedEvent<A, SummaryOutput> {
     Stutter,
 }
 
+impl<A, SummaryOutput> ObservedEvent<A, SummaryOutput> {
+    fn matches_step(&self, step: &TraceStep<A>) -> bool
+    where
+        A: PartialEq,
+    {
+        match (self, step) {
+            (Self::Action { action, .. }, TraceStep::Action(expected)) => action == expected,
+            (Self::Stutter, TraceStep::Stutter) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedTrace<SummaryState, A, SummaryOutput> {
     states: Vec<SummaryState>,
@@ -272,6 +286,47 @@ pub enum TraceRefinementError<S, A> {
 }
 
 impl<S, A> TraceRefinementError<S, A> {
+    fn matching_prefix_len(&self) -> usize {
+        match self {
+            Self::InitialStateMismatch { .. }
+            | Self::ShapeMismatch { .. }
+            | Self::SearchFailed { .. } => 0,
+            Self::StepMismatch {
+                matching_prefix_len,
+                ..
+            }
+            | Self::StutterMismatch {
+                matching_prefix_len,
+                ..
+            }
+            | Self::NoMatchingExplicitCandidate {
+                matching_prefix_len,
+                ..
+            } => *matching_prefix_len,
+        }
+    }
+
+    fn candidate_trace(&self) -> Option<&Trace<S, A>> {
+        match self {
+            Self::InitialStateMismatch {
+                candidate_trace, ..
+            }
+            | Self::ShapeMismatch {
+                candidate_trace, ..
+            }
+            | Self::StepMismatch {
+                candidate_trace, ..
+            }
+            | Self::StutterMismatch {
+                candidate_trace, ..
+            }
+            | Self::NoMatchingExplicitCandidate {
+                candidate_trace, ..
+            } => candidate_trace.as_ref(),
+            Self::SearchFailed { .. } => None,
+        }
+    }
+
     fn failing_index(&self) -> Option<usize> {
         match self {
             Self::StepMismatch { index, .. } | Self::StutterMismatch { index, .. } => Some(*index),
@@ -1013,6 +1068,93 @@ where
     trace_refines_summary_with_label(spec, observed, abstract_trace, "direct".to_owned())
 }
 
+fn observed_matches_candidate_trace<SummaryState, A, SummaryOutput, S>(
+    observed: &ObservedTrace<SummaryState, A, SummaryOutput>,
+    candidate: &Trace<S, A>,
+) -> bool
+where
+    A: PartialEq,
+{
+    observed.loop_start() == candidate.loop_start()
+        && observed.events().len() == candidate.steps().len()
+        && observed
+            .events()
+            .iter()
+            .zip(candidate.steps())
+            .all(|(event, step)| event.matches_step(step))
+}
+
+fn prefer_trace_refinement_error<S, A>(
+    current: Option<&TraceRefinementError<S, A>>,
+    next: &TraceRefinementError<S, A>,
+) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    next.matching_prefix_len() > current.matching_prefix_len()
+}
+
+pub fn trace_refines<Spec>(
+    spec: &Spec,
+    model_case: ModelInstance<Spec::State, Spec::Action>,
+    observed: &ObservedTrace<Spec::SummaryState, Spec::Action, Spec::SummaryOutput>,
+) -> Result<
+    TraceRefinementWitness<Spec::State, Spec::Action>,
+    TraceRefinementError<Spec::State, Spec::Action>,
+>
+where
+    Spec: ProtocolConformanceSpec + TemporalSpec,
+    Spec::State: PartialEq + FiniteModelDomain + Send + Sync,
+    Spec::Action: PartialEq + Send + Sync,
+{
+    let model_case_label = model_case.label().to_owned();
+    let mut lowering_cx = LoweringCx;
+    let lowered =
+        spec.lower(&mut lowering_cx)
+            .map_err(|error| TraceRefinementError::SearchFailed {
+                model_case_label: model_case_label.clone(),
+                detail: error.to_string(),
+            })?;
+    let mut config = ModelCheckConfig::bounded_lasso(observed.events().len());
+    config.backend = Some(ModelBackend::Explicit);
+    let candidate_case = model_case.clone().with_checker_config(config);
+    let candidates = nirvash_check::ModelChecker::for_case(&lowered, candidate_case)
+        .candidate_traces()
+        .map_err(|error| TraceRefinementError::SearchFailed {
+            model_case_label: model_case_label.clone(),
+            detail: format!("{error:?}"),
+        })?;
+
+    let mut best_error = None;
+    for candidate in candidates {
+        if !observed_matches_candidate_trace(observed, &candidate) {
+            continue;
+        }
+
+        match trace_refines_summary_with_label(spec, observed, &candidate, model_case_label.clone())
+        {
+            Ok(witness) => return Ok(witness),
+            Err(error) => {
+                if prefer_trace_refinement_error(best_error.as_ref(), &error) {
+                    best_error = Some(error);
+                }
+            }
+        }
+    }
+
+    let failure = best_error.unwrap_or_else(|| TraceRefinementError::ShapeMismatch {
+        model_case_label: model_case_label.clone(),
+        detail: "no explicit candidate matched observed step shape".to_owned(),
+        candidate_trace: None,
+    });
+    Err(TraceRefinementError::NoMatchingExplicitCandidate {
+        model_case_label,
+        matching_prefix_len: failure.matching_prefix_len(),
+        candidate_trace: failure.candidate_trace().cloned(),
+        failure: Box::new(failure),
+    })
+}
+
 pub fn assert_declared_state_projection<Summary, State>(
     summary: &Summary,
     expected_summary: &Summary,
@@ -1192,6 +1334,7 @@ pub fn run_registered_code_witness_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nirvash::StepExpr;
     use nirvash_lower::TemporalSpec;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1763,6 +1906,97 @@ mod tests {
             error,
             TraceRefinementError::StutterMismatch { index, detail, .. }
                 if index == 2 && detail.contains("does not match candidate stutter")
+        ));
+    }
+
+    #[test]
+    fn trace_refines_finds_matching_explicit_candidate() {
+        let observed = ObservedTrace::terminal(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+            ],
+        );
+
+        let witness = trace_refines(&TraceDemoSpec, ModelInstance::new("trace_demo"), &observed)
+            .expect("explicit search should find matching abstract trace");
+
+        assert_eq!(witness.model_case_label, "trace_demo");
+        assert_eq!(witness.abstract_trace, left_terminal_trace());
+    }
+
+    #[test]
+    fn trace_refines_respects_model_case_action_constraints() {
+        let observed = ObservedTrace::terminal(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Done,
+            ],
+            vec![
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+            ],
+        );
+        let model_case =
+            ModelInstance::new("reset_only").with_action_constraint(StepExpr::builtin_pure_call(
+                "only_reset",
+                |_prev: &TraceDemoState, action: &TraceDemoAction, _next: &TraceDemoState| {
+                    matches!(action, TraceDemoAction::Reset)
+                },
+            ));
+
+        let error = trace_refines(&TraceDemoSpec, model_case, &observed)
+            .expect_err("model case should filter out candidate actions");
+
+        assert!(matches!(
+            error,
+            TraceRefinementError::NoMatchingExplicitCandidate {
+                model_case_label,
+                failure,
+                ..
+            } if model_case_label == "reset_only"
+                && matches!(
+                    *failure,
+                    TraceRefinementError::ShapeMismatch { ref detail, .. }
+                        if detail.contains("no explicit candidate matched observed step shape")
+                )
+        ));
+    }
+
+    #[test]
+    fn trace_refines_returns_longest_matching_prefix_failure() {
+        let observed = ObservedTrace::terminal(
+            vec![
+                TraceDemoState::Start,
+                TraceDemoState::Left,
+                TraceDemoState::Bad,
+            ],
+            vec![
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+                (TraceDemoAction::Advance, TraceDemoOutput::Ack),
+            ],
+        );
+
+        let error = trace_refines(&TraceDemoSpec, ModelInstance::new("trace_demo"), &observed)
+            .expect_err("no abstract candidate should match bad suffix");
+
+        assert!(matches!(
+            error,
+            TraceRefinementError::NoMatchingExplicitCandidate {
+                matching_prefix_len,
+                failure,
+                ..
+            } if matching_prefix_len == 1
+                && matches!(
+                    *failure,
+                    TraceRefinementError::StepMismatch { index, .. } if index == 1
+                )
         ));
     }
 

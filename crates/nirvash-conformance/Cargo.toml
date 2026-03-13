@@ -10,4 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 nirvash = { workspace = true }
+nirvash-check = { workspace = true }
 nirvash-lower = { workspace = true }
