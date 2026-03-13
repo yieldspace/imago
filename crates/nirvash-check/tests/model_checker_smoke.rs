@@ -483,7 +483,7 @@ impl TemporalSpec for MissingReadPathSpec {
 impl nirvash::ModelCaseSource for MissingReadPathSpec {
     fn model_cases(&self) -> Vec<ModelCase<Self::State, Self::Action>> {
         vec![ModelCase::default().with_state_constraint(nirvash::pred!(
-            ready_is_visible(_state) => _state.ready.clone() == ReadyFlag::Yes
+            ready_is_visible(_state) => _state.ready == ReadyFlag::Yes
         ))]
     }
 }
@@ -699,7 +699,7 @@ impl TransitionSystem for MissingProgramReadPathSpec {
 
     fn transition_program(&self) -> Option<nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
-            rule flip_when_ready when matches!(action, ToggleAction::Flip) && prev.ready.clone() => {
+            rule flip_when_ready when matches!(action, ToggleAction::Flip) && prev.ready == true => {
                 set phase <= Phase::Busy;
             }
         })
@@ -841,7 +841,7 @@ impl TemporalSpec for MissingFairnessReadPathSpec {
     fn fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
         vec![nirvash::Fairness::weak(nirvash::step!(
             ready_progress(prev, action, _next) =>
-                matches!(action, ToggleAction::Flip) && prev.ready.clone()
+                matches!(action, ToggleAction::Flip) && prev.ready == true
         ))]
     }
 }

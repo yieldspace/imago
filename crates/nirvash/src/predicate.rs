@@ -107,10 +107,10 @@ const fn symbolic_quantifier_node(kind: QuantifierKind) -> &'static str {
 }
 
 fn collect_symbolic_state_path(paths: &mut BTreeSet<&'static str>, path: &'static str) {
-    if let Some(normalized) = normalize_symbolic_state_path(path) {
-        if !normalized.is_empty() {
-            paths.insert(normalized);
-        }
+    if let Some(normalized) = normalize_symbolic_state_path(path)
+        && !normalized.is_empty()
+    {
+        paths.insert(normalized);
     }
 }
 
@@ -137,6 +137,14 @@ fn collect_symbolic_full_read_paths_from_hints(
         collect_symbolic_full_read_path(paths, path);
     }
 }
+
+type StateValueEval<S, T> = dyn Fn(&S) -> T + 'static;
+type StatePredicateEval<S> = dyn Fn(&S) -> bool + 'static;
+type StepValueEval<S, A, T> = dyn Fn(&S, &A, &S) -> T + 'static;
+type StepPredicateEval<S, A> = dyn Fn(&S, &A, &S) -> bool + 'static;
+type GuardValueEval<S, A, T> = dyn Fn(&S, &A) -> T + 'static;
+type GuardPredicateEval<S, A> = dyn Fn(&S, &A) -> bool + 'static;
+type UpdateChoiceEval<S, A> = dyn Fn(&S, &A) -> Vec<S> + 'static;
 
 #[derive(Debug, Clone)]
 pub enum ErasedStateExprAst<S> {
@@ -219,6 +227,7 @@ impl<S: 'static> ErasedStateExprAst<S> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
@@ -246,6 +255,7 @@ impl<S: 'static> ErasedStateExprAst<S> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
@@ -470,7 +480,7 @@ pub enum StateExprBody<S, T> {
     RustFn(fn(&S) -> T),
     Ast {
         ast: StateExprAst<S, T>,
-        eval: Arc<dyn Fn(&S) -> T + 'static>,
+        eval: Arc<StateValueEval<S, T>>,
     },
 }
 
@@ -526,7 +536,7 @@ where
                     repr,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -539,7 +549,7 @@ where
                     path,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |state| read(state)),
+                eval: Arc::new(read),
             },
         }
     }
@@ -562,7 +572,7 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -585,7 +595,7 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -613,11 +623,12 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -645,6 +656,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -672,6 +684,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -699,6 +712,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(name: &'static str, expr: Self) -> Self
     where
         S: Clone,
@@ -739,7 +753,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -763,7 +777,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -787,7 +801,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |state| eval(state)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -936,6 +950,7 @@ where
         self.ast().map(StateExprAst::erase)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn first_unencodable(&self) -> Option<&'static str>
     where
         S: Clone,
@@ -982,7 +997,7 @@ pub struct StateComparison<S> {
     rhs: &'static str,
     lhs_ast: ErasedStateExprAst<S>,
     rhs_ast: ErasedStateExprAst<S>,
-    eval: Arc<dyn Fn(&S) -> bool + 'static>,
+    eval: Arc<StatePredicateEval<S>>,
 }
 
 impl<S: 'static> StateComparison<S> {
@@ -1047,11 +1062,13 @@ impl<S: 'static> StateComparison<S> {
             .or_else(|| self.rhs_ast.first_unencodable())
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_symbolic_pure_keys(keys);
         self.rhs_ast.collect_symbolic_pure_keys(keys);
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
@@ -1085,7 +1102,7 @@ pub struct StateBinaryPredicate<S> {
     rhs: &'static str,
     lhs_ast: ErasedStateExprAst<S>,
     rhs_ast: ErasedStateExprAst<S>,
-    eval: Arc<dyn Fn(&S) -> bool + 'static>,
+    eval: Arc<StatePredicateEval<S>>,
 }
 
 impl<S: 'static> StateBinaryPredicate<S> {
@@ -1143,11 +1160,13 @@ impl<S: 'static> StateBinaryPredicate<S> {
             .or_else(|| self.rhs_ast.first_unencodable())
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_symbolic_pure_keys(keys);
         self.rhs_ast.collect_symbolic_pure_keys(keys);
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
@@ -1246,10 +1265,12 @@ impl<S> StateBoolLeaf<S> {
         self.symbolic.first_unencodable()
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_key(keys);
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_unregistered_key(keys);
     }
@@ -1266,7 +1287,7 @@ impl<S> StateBoolLeaf<S> {
 #[derive(Clone)]
 enum StateQuantifierEval<S> {
     Legacy(fn(&S) -> bool),
-    Structural(Arc<dyn Fn(&S) -> bool + 'static>),
+    Structural(Arc<StatePredicateEval<S>>),
 }
 
 impl<S> StateQuantifierEval<S> {
@@ -1439,6 +1460,7 @@ impl<S: 'static> BoolExprAst<S> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Literal(_) | Self::Match(_) | Self::ForAll(_) | Self::Exists(_) => {}
@@ -1463,6 +1485,7 @@ impl<S: 'static> BoolExprAst<S> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Literal(_) | Self::Match(_) | Self::ForAll(_) | Self::Exists(_) => {}
@@ -2036,12 +2059,14 @@ impl<S: 'static> BoolExpr<S> {
         self.ast().and_then(BoolExprAst::first_unencodable)
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         if let Some(ast) = self.ast() {
             ast.collect_symbolic_pure_keys(keys);
         }
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         if let Some(ast) = self.ast() {
             ast.collect_unregistered_symbolic_pure_keys(keys);
@@ -2182,6 +2207,7 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
@@ -2209,6 +2235,7 @@ impl<S: 'static, A: 'static> ErasedStepValueExprAst<S, A> {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         match self {
             Self::Opaque { .. } | Self::Literal { .. } | Self::FieldRead { .. } => {}
@@ -2428,11 +2455,12 @@ impl<S: Clone, A: Clone, T> StepValueExprAst<S, A, T> {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum StepValueExprBody<S, A, T> {
     RustFn(fn(&S, &A, &S) -> T),
     Ast {
         ast: StepValueExprAst<S, A, T>,
-        eval: Arc<dyn Fn(&S, &A, &S) -> T + 'static>,
+        eval: Arc<StepValueEval<S, A, T>>,
     },
 }
 
@@ -2480,7 +2508,7 @@ where
                     repr,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -2493,7 +2521,7 @@ where
                     path,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action, next| read(prev, action, next)),
+                eval: Arc::new(read),
             },
         }
     }
@@ -2516,7 +2544,7 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -2539,7 +2567,7 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -2567,11 +2595,12 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -2608,6 +2637,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -2644,6 +2674,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -2680,6 +2711,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(name: &'static str, expr: Self) -> Self
     where
         S: Clone,
@@ -2731,7 +2763,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -2767,7 +2799,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -2803,7 +2835,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |prev, action, next| eval(prev, action, next)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -2967,7 +2999,7 @@ pub struct StepComparison<S, A> {
     rhs: &'static str,
     lhs_ast: ErasedStepValueExprAst<S, A>,
     rhs_ast: ErasedStepValueExprAst<S, A>,
-    eval: Arc<dyn Fn(&S, &A, &S) -> bool + 'static>,
+    eval: Arc<StepPredicateEval<S, A>>,
 }
 
 impl<S: 'static, A: 'static> StepComparison<S, A> {
@@ -3033,11 +3065,13 @@ impl<S: 'static, A: 'static> StepComparison<S, A> {
             .or_else(|| self.rhs_ast.first_unencodable())
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_symbolic_pure_keys(keys);
         self.rhs_ast.collect_symbolic_pure_keys(keys);
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
@@ -3071,7 +3105,7 @@ pub struct StepBinaryPredicate<S, A> {
     rhs: &'static str,
     lhs_ast: ErasedStepValueExprAst<S, A>,
     rhs_ast: ErasedStepValueExprAst<S, A>,
-    eval: Arc<dyn Fn(&S, &A, &S) -> bool + 'static>,
+    eval: Arc<StepPredicateEval<S, A>>,
 }
 
 impl<S: 'static, A: 'static> StepBinaryPredicate<S, A> {
@@ -3130,11 +3164,13 @@ impl<S: 'static, A: 'static> StepBinaryPredicate<S, A> {
             .or_else(|| self.rhs_ast.first_unencodable())
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_symbolic_pure_keys(keys);
         self.rhs_ast.collect_symbolic_pure_keys(keys);
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.lhs_ast.collect_unregistered_symbolic_pure_keys(keys);
         self.rhs_ast.collect_unregistered_symbolic_pure_keys(keys);
@@ -3237,10 +3273,12 @@ impl<S, A> StepBoolLeaf<S, A> {
         self.symbolic.first_unencodable()
     }
 
+    #[allow(dead_code)]
     fn collect_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_key(keys);
     }
 
+    #[allow(dead_code)]
     fn collect_unregistered_symbolic_pure_keys(&self, keys: &mut BTreeSet<&'static str>) {
         self.symbolic.collect_unregistered_key(keys);
     }
@@ -3257,7 +3295,7 @@ impl<S, A> StepBoolLeaf<S, A> {
 #[derive(Clone)]
 enum StepQuantifierEval<S, A> {
     Legacy(fn(&S, &A, &S) -> bool),
-    Structural(Arc<dyn Fn(&S, &A, &S) -> bool + 'static>),
+    Structural(Arc<StepPredicateEval<S, A>>),
 }
 
 impl<S, A> StepQuantifierEval<S, A> {
@@ -4483,11 +4521,12 @@ impl<S: Clone, A: Clone, T> GuardValueExprAst<S, A, T> {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum GuardValueExprBody<S, A, T> {
     RustFn(fn(&S, &A) -> T),
     Ast {
         ast: GuardValueExprAst<S, A, T>,
-        eval: Arc<dyn Fn(&S, &A) -> T + 'static>,
+        eval: Arc<GuardValueEval<S, A, T>>,
     },
 }
 
@@ -4535,7 +4574,7 @@ where
                     repr,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -4548,7 +4587,7 @@ where
                     path,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action| read(prev, action)),
+                eval: Arc::new(read),
             },
         }
     }
@@ -4571,7 +4610,7 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -4594,7 +4633,7 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -4622,11 +4661,12 @@ where
                     read_paths,
                     _marker: PhantomData,
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -4663,6 +4703,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -4699,6 +4740,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(name: &'static str, lhs: Self, rhs: Self) -> Self
     where
         S: Clone,
@@ -4735,6 +4777,7 @@ where
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(name: &'static str, expr: Self) -> Self
     where
         S: Clone,
@@ -4786,7 +4829,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -4822,7 +4865,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -4853,7 +4896,7 @@ where
                     lhs: Box::new(lhs_ast),
                     rhs: Box::new(rhs_ast),
                 },
-                eval: Arc::new(move |prev, action| eval(prev, action)),
+                eval: Arc::new(eval),
             },
         }
     }
@@ -5017,7 +5060,7 @@ pub struct GuardComparison<S, A> {
     rhs: &'static str,
     lhs_ast: ErasedGuardValueExprAst<S, A>,
     rhs_ast: ErasedGuardValueExprAst<S, A>,
-    eval: Arc<dyn Fn(&S, &A) -> bool + 'static>,
+    eval: Arc<GuardPredicateEval<S, A>>,
 }
 
 impl<S: 'static, A: 'static> GuardComparison<S, A> {
@@ -5121,7 +5164,7 @@ pub struct GuardBinaryPredicate<S, A> {
     rhs: &'static str,
     lhs_ast: ErasedGuardValueExprAst<S, A>,
     rhs_ast: ErasedGuardValueExprAst<S, A>,
-    eval: Arc<dyn Fn(&S, &A) -> bool + 'static>,
+    eval: Arc<GuardPredicateEval<S, A>>,
 }
 
 impl<S: 'static, A: 'static> GuardBinaryPredicate<S, A> {
@@ -5303,7 +5346,7 @@ impl<S, A> GuardBoolLeaf<S, A> {
 #[derive(Clone)]
 enum GuardQuantifierEval<S, A> {
     Legacy(fn(&S, &A) -> bool),
-    Structural(Arc<dyn Fn(&S, &A) -> bool + 'static>),
+    Structural(Arc<GuardPredicateEval<S, A>>),
 }
 
 impl<S, A> GuardQuantifierEval<S, A> {
@@ -6306,6 +6349,7 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(lhs: Self, rhs: Self) -> Self {
         Self::Add {
             lhs: Box::new(lhs),
@@ -6313,6 +6357,7 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(lhs: Self, rhs: Self) -> Self {
         Self::Sub {
             lhs: Box::new(lhs),
@@ -6320,6 +6365,7 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(lhs: Self, rhs: Self) -> Self {
         Self::Mul {
             lhs: Box::new(lhs),
@@ -6327,6 +6373,7 @@ impl<S: 'static, A: 'static> UpdateValueExprAst<S, A> {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(expr: Self) -> Self {
         Self::Neg {
             expr: Box::new(expr),
@@ -6810,7 +6857,7 @@ pub struct UpdateChoice<S, A> {
     body: &'static str,
     read_paths: &'static [&'static str],
     write_paths: &'static [&'static str],
-    eval: Arc<dyn Fn(&S, &A) -> Vec<S> + 'static>,
+    eval: Arc<UpdateChoiceEval<S, A>>,
 }
 
 impl<S: 'static, A: 'static> UpdateChoice<S, A> {
@@ -8659,10 +8706,12 @@ mod tests {
                 },
             ]
         );
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            update.apply(&initial, &Action::Start)
-        }))
-        .is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                update.apply(&initial, &Action::Start)
+            }))
+            .is_err()
+        );
     }
 
     #[test]

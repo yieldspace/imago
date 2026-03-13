@@ -1,6 +1,6 @@
 use imagod_spec::RunnerBootstrap;
 use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, StepExpr, TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, TransitionSystem,
 };
 use nirvash_macros::{
     ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
@@ -104,6 +104,7 @@ impl RunnerBootstrapSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn transition_state(
         &self,
         prev: &RunnerBootstrapState,
@@ -167,6 +168,7 @@ fn runner_bootstrap_model_cases() -> Vec<ModelCase<RunnerBootstrapState, RunnerB
     })]
 }
 
+#[allow(dead_code)]
 fn runner_bootstrap_state_valid(state: &RunnerBootstrapState) -> bool {
     let ready_requires_registration =
         !state.ready || (state.registered && matches!(state.auth, AuthProofState::Verified));

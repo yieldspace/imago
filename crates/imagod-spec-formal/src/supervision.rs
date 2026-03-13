@@ -431,6 +431,7 @@ where
     left.items() != right.items()
 }
 
+#[allow(dead_code)]
 fn transition_state(
     prev: &SupervisionState,
     action: &SupervisionAction,
@@ -495,6 +496,7 @@ fn transition_state(
     allowed.then_some(candidate).filter(supervision_valid)
 }
 
+#[allow(dead_code)]
 fn supervision_valid(state: &SupervisionState) -> bool {
     running_requires_ready_and_registered().eval(state)
         && reaped_services_clear_runtime_membership().eval(state)

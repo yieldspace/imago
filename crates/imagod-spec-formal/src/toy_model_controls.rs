@@ -52,6 +52,7 @@ impl ToyModelControlSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn transition_state(&self, prev: &ToyState, action: &ToyAction) -> Option<ToyState> {
         let mut candidate = *prev;
         let allowed = match action {

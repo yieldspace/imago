@@ -206,7 +206,7 @@ pub struct SpecVizRegistrationSet {
     pub symmetries: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpecVizMetadata {
     pub spec_id: String,
     pub kind: Option<SpecVizKind>,
@@ -246,21 +246,6 @@ impl SpecVizSubsystem {
 
     pub fn from_registered(value: RegisteredSubsystemSpec) -> Self {
         Self::new(value.spec_id, value.label)
-    }
-}
-
-impl Default for SpecVizMetadata {
-    fn default() -> Self {
-        Self {
-            spec_id: String::new(),
-            kind: None,
-            state_ty: String::new(),
-            action_ty: String::new(),
-            model_cases: None,
-            subsystems: Vec::new(),
-            registrations: SpecVizRegistrationSet::default(),
-            policy: VizPolicy::default(),
-        }
     }
 }
 

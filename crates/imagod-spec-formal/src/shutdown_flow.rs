@@ -1,4 +1,4 @@
-use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, Signature, fairness, invariant, nirvash_expr, nirvash_step_expr,
     nirvash_transition_program, property, subsystem_spec,
@@ -61,6 +61,7 @@ impl ShutdownFlowSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn transition_state(
         &self,
         prev: &ShutdownFlowState,
@@ -120,6 +121,7 @@ impl ShutdownFlowSpec {
     }
 }
 
+#[allow(dead_code)]
 fn shutdown_flow_state_valid(state: &ShutdownFlowState) -> bool {
     let completed_requires_all_flags = !matches!(state.phase, ShutdownPhase::Completed)
         || (state.accepts_stopped

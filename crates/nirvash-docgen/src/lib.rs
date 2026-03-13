@@ -3345,8 +3345,8 @@ impl TransitionSystem for DuplicateSpec {
             })
             .collect::<Vec<_>>();
         let mut edges = vec![Vec::new(); 51];
-        for index in 0..50 {
-            edges[index].push(demo_edge(&format!("Step{index}"), index + 1));
+        for (index, bucket) in edges.iter_mut().enumerate().take(50) {
+            bucket.push(demo_edge(&format!("Step{index}"), index + 1));
         }
         let bundle = nirvash::SpecVizBundle::from_doc_graph_spec(
             "LargeSpec",

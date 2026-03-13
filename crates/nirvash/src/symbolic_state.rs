@@ -4,6 +4,9 @@ use crate::Signature;
 
 type ReadRef<S, T> = dyn for<'a> Fn(&'a S) -> &'a T + Send + Sync + 'static;
 type WriteValue<S, T> = dyn Fn(&mut S, T) + Send + Sync + 'static;
+type ReadIndex<S> = dyn Fn(&S) -> usize + Send + Sync + 'static;
+type WriteIndex<S> = dyn Fn(&mut S, usize) + Send + Sync + 'static;
+type SeedState<S> = dyn Fn() -> S + Send + Sync + 'static;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolicSortField {
@@ -190,8 +193,8 @@ where
 pub struct SymbolicStateField<S> {
     path: String,
     sort: SymbolicSort,
-    read_index: Arc<dyn Fn(&S) -> usize + Send + Sync + 'static>,
-    write_index: Arc<dyn Fn(&mut S, usize) + Send + Sync + 'static>,
+    read_index: Arc<ReadIndex<S>>,
+    write_index: Arc<WriteIndex<S>>,
 }
 
 impl<S> SymbolicStateField<S> {
@@ -232,7 +235,7 @@ impl<S> fmt::Debug for SymbolicStateField<S> {
 #[derive(Clone)]
 pub struct SymbolicStateSchema<S> {
     fields: Vec<SymbolicStateField<S>>,
-    seed: Arc<dyn Fn() -> S + Send + Sync + 'static>,
+    seed: Arc<SeedState<S>>,
 }
 
 impl<S> SymbolicStateSchema<S> {
@@ -323,7 +326,7 @@ fn is_symbolic_path_segment(segment: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-pub fn normalize_symbolic_state_path<'a>(path: &'a str) -> Option<&'a str> {
+pub fn normalize_symbolic_state_path(path: &str) -> Option<&str> {
     if matches!(path, "self" | "state" | "prev" | "next" | "action") {
         return None;
     }

@@ -1,8 +1,10 @@
 pub use nirvash::{
     Counterexample, CounterexampleKind, ExplorationMode, ModelBackend, ModelCase, ModelCaseSource,
     ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphSnapshot, TemporalSpec,
-    Trace,
+    Trace, TransitionSystem,
 };
+
+type TraceVec<T> = Vec<Trace<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
 
 pub struct ModelChecker<'a, T: TemporalSpec + ModelCaseSource>(
     nirvash_backends::BackendModelChecker<'a, T>,
@@ -64,7 +66,7 @@ where
         self.0.check_all()
     }
 
-    pub fn simulate(&self) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+    pub fn simulate(&self) -> Result<TraceVec<T>, ModelCheckError> {
         self.0.simulate()
     }
 
@@ -276,10 +278,10 @@ mod tests {
             vec![BoolExpr::forall_in(
                 "slot_tautology",
                 ExprDomain::of_signature("slots"),
-                "state.slot == candidate || state.slot != candidate",
+                "matches!(candidate, Slot::Zero | Slot::One | Slot::Two)",
                 &["state.slot"],
-                |state: &QuantState, candidate: &Slot| {
-                    state.slot == *candidate || state.slot != *candidate
+                |_state: &QuantState, candidate: &Slot| {
+                    matches!(candidate, Slot::Zero | Slot::One | Slot::Two)
                 },
             )]
         }

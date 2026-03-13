@@ -1,5 +1,11 @@
 use nirvash::{BoundedDomain, TransitionSystem};
 
+type ActionAllowed<T> = dyn Fn(
+    &<T as TransitionSystem>::State,
+    &<T as TransitionSystem>::Action,
+    &<T as TransitionSystem>::State,
+) -> bool;
+
 pub fn reachable_state_domain<T>(spec: &T) -> BoundedDomain<T::State>
 where
     T: TransitionSystem,
@@ -10,7 +16,7 @@ where
 
 pub fn reachable_state_domain_with_action_filter<T>(
     spec: &T,
-    action_allowed: &dyn Fn(&T::State, &T::Action, &T::State) -> bool,
+    action_allowed: &ActionAllowed<T>,
 ) -> BoundedDomain<T::State>
 where
     T: TransitionSystem,

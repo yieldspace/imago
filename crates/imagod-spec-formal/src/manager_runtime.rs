@@ -254,6 +254,7 @@ impl TransitionSystem for ManagerRuntimeSpec {
 #[nirvash_macros::formal_tests(spec = ManagerRuntimeSpec)]
 const _: () = ();
 
+#[allow(dead_code)]
 fn transition_state(
     prev: &ManagerRuntimeState,
     action: &ManagerRuntimeAction,

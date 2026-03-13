@@ -47,7 +47,7 @@ pub(crate) fn block_current_model(solver: &Solver, model: &Model, values: &[Int]
         clauses.push(value.eq(int_const(index)).not());
     }
     if !clauses.is_empty() {
-        solver.assert(&bool_or(&clauses));
+        solver.assert(bool_or(&clauses));
     }
 }
 
@@ -148,6 +148,7 @@ pub(crate) fn encode_state_bool<S: Clone>(
     bool_or(&clauses)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_step_bool<S: Clone, A: Clone>(
     schema: &SymbolicStateSchema<S>,
     prev_vars: &[Int],

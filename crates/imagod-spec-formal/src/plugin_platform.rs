@@ -1,4 +1,4 @@
-use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, ModelCase, RelSet, Relation2, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
     nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
@@ -159,6 +159,7 @@ impl PluginPlatformSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn transition_state(
         &self,
         prev: &PluginPlatformState,

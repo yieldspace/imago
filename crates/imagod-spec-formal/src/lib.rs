@@ -29,6 +29,7 @@ pub mod wire_protocol;
 mod toy_model_controls;
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod symbolic_registration_tests {
     use std::collections::BTreeSet;
 

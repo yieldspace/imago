@@ -1,4 +1,4 @@
-use nirvash::{BoolExpr, Fairness, Ltl, RelSet, Signature as _, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, RelSet, Signature as _, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, RelAtom, RelationalState, Signature, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
@@ -98,6 +98,7 @@ nirvash::symbolic_state_spec!(for ServiceSupervisionState {
     phase: ServicePhase,
 });
 
+#[allow(dead_code)]
 fn service_supervision_state_valid(state: &ServiceSupervisionState) -> bool {
     let active_matches_phase = match state.phase {
         ServicePhase::Idle | ServicePhase::Reaped => state.active_services.no(),
@@ -328,6 +329,7 @@ fn first_active_service(state: &ServiceSupervisionState) -> Option<ServiceAtom> 
     state.active_services.items().into_iter().next()
 }
 
+#[allow(dead_code)]
 fn transition_state(
     prev: &ServiceSupervisionState,
     action: &ServiceSupervisionAction,

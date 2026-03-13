@@ -127,6 +127,7 @@ impl CommandProtocolSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn transition_state(
         &self,
         prev: &CommandProtocolState,
@@ -478,6 +479,7 @@ impl TransitionSystem for CommandProtocolSpec {
     }
 }
 
+#[allow(dead_code)]
 fn command_protocol_transition(
     prev: &CommandProtocolState,
     action: &CommandProtocolAction,

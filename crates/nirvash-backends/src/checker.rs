@@ -9,11 +9,20 @@ use nirvash::{
     BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelBackend,
     ModelCase, ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult,
     ReachableGraphEdge, ReachableGraphSnapshot, Signature, StepExpr, TemporalSpec, Trace,
-    TraceStep,
+    TraceStep, TransitionSystem,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::symbolic::SymbolicModelChecker;
+
+type TraceVec<T> = Vec<Trace<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
+type ReachableGraphCheckpointLoad<T> = Option<(
+    ReachableGraph<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>,
+    ExplicitStateIndex,
+    Vec<usize>,
+)>;
+type FrontierBatch<T> =
+    Vec<FrontierExpansion<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GraphEdge<A> {
@@ -495,7 +504,7 @@ where
         }
     }
 
-    pub fn simulate(&self) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+    pub fn simulate(&self) -> Result<TraceVec<T>, ModelCheckError> {
         match self.resolved_backend() {
             ModelBackend::Explicit => self.simulate_explicit(),
             ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
@@ -561,7 +570,7 @@ where
         self.symbolic_checker().check_all()
     }
 
-    fn simulate_explicit(&self) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+    fn simulate_explicit(&self) -> Result<TraceVec<T>, ModelCheckError> {
         let initial_states = self.initial_states_filtered()?;
         let simulation = self.config.explicit.simulation;
         let mut rng = SimulationRng::new(simulation.seed);
@@ -842,14 +851,7 @@ where
     fn load_reachable_graph_checkpoint(
         &self,
         config: &ModelCheckConfig,
-    ) -> Result<
-        Option<(
-            ReachableGraph<T::State, T::Action>,
-            ExplicitStateIndex,
-            Vec<usize>,
-        )>,
-        ModelCheckError,
-    > {
+    ) -> Result<ReachableGraphCheckpointLoad<T>, ModelCheckError> {
         let checkpoint = &config.explicit.checkpoint;
         let Some(path) = checkpoint.path.as_deref() else {
             return Ok(None);
@@ -939,7 +941,7 @@ where
         let Some(path) = checkpoint.path.as_deref() else {
             return Ok(());
         };
-        if completed_frontiers % checkpoint.save_every_frontiers != 0 {
+        if !completed_frontiers.is_multiple_of(checkpoint.save_every_frontiers) {
             return Ok(());
         }
 
@@ -1035,7 +1037,7 @@ where
         graph: &ReachableGraph<T::State, T::Action>,
         frontier: &[usize],
         config: &ModelCheckConfig,
-    ) -> Result<Vec<FrontierExpansion<T::State, T::Action>>, ModelCheckError> {
+    ) -> Result<FrontierBatch<T>, ModelCheckError> {
         if matches!(
             config.explicit.reachability,
             nirvash::ExplicitReachabilityStrategy::ParallelFrontier
@@ -1250,6 +1252,7 @@ where
         (fingerprint_debug(state) as usize) % shards.max(1)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_state_flat(
         &self,
         graph: &mut ReachableGraph<T::State, T::Action>,
@@ -1271,6 +1274,7 @@ where
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_state_with(
         &self,
         graph: &mut ReachableGraph<T::State, T::Action>,

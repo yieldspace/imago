@@ -458,6 +458,7 @@ fn log_chunks_with_chunk(
     chunks
 }
 
+#[allow(dead_code)]
 fn transition_wire_protocol(
     prev: &WireProtocolState,
     action: &WireProtocolAction,

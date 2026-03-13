@@ -9,7 +9,7 @@ use nirvash::{
     BoolExpr, Counterexample, CounterexampleKind, ExplorationMode, Fairness, Ltl, ModelCase,
     ModelCaseSource, ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
     ReachableGraphSnapshot, Signature, StepExpr, SymbolicStateSchema, TemporalSpec, Trace,
-    TraceStep, TransitionProgram, UpdateAst, UpdateOp,
+    TraceStep, TransitionProgram, TransitionSystem, UpdateAst, UpdateOp,
 };
 
 use crate::smt::{
@@ -42,6 +42,16 @@ struct ReachableGraph<S, A> {
 }
 
 type TraceList<S, A> = Vec<Trace<S, A>>;
+type MaybeTrace<T> = Option<Trace<<T as TransitionSystem>::State, <T as TransitionSystem>::Action>>;
+type SymbolicSuccessor<T> = (
+    TraceStep<<T as TransitionSystem>::Action>,
+    <T as TransitionSystem>::State,
+);
+type MaybePredecessor<T> = Option<(Vec<usize>, TraceStep<<T as TransitionSystem>::Action>)>;
+type MaybeBlockedPath<T> = Option<(
+    Vec<Vec<usize>>,
+    Vec<TraceStep<<T as TransitionSystem>::Action>>,
+)>;
 
 impl<S, A> ReachableGraph<S, A> {
     fn state_index(&self, state: &S) -> Option<usize>
@@ -77,7 +87,7 @@ impl StateVars {
 
     fn fix_to_state<S>(&self, solver: &Solver, schema: &SymbolicStateSchema<S>, state: &S) {
         for (value, field) in self.fields.iter().zip(schema.fields()) {
-            solver.assert(&value.eq(Int::from_u64(field.read_index(state) as u64)));
+            solver.assert(value.eq(Int::from_u64(field.read_index(state) as u64)));
         }
     }
 
@@ -796,7 +806,7 @@ where
             schema,
             &state.fields,
             predicate.symbolic_state_paths().as_slice(),
-            full_paths.iter().any(|path| *path == "state"),
+            full_paths.contains(&"state"),
             |value| predicate.eval(value),
         )
     }
@@ -914,7 +924,7 @@ where
         actions: &[T::Action],
         predicate: &BoolExpr<T::State>,
         max_depth: usize,
-    ) -> Result<Option<Trace<T::State, T::Action>>, ModelCheckError> {
+    ) -> Result<MaybeTrace<T>, ModelCheckError> {
         for depth in 0..=max_depth {
             let states = (0..=depth)
                 .map(|index| {
@@ -933,9 +943,9 @@ where
             for step in &steps {
                 assert_in_domain(&solver, step, self.step_domain_size());
             }
-            solver.assert(&self.encode_initial_state_formula(schema, &states[0])?);
+            solver.assert(self.encode_initial_state_formula(schema, &states[0])?);
             for index in 0..depth {
-                solver.assert(&self.encode_transition_formula(
+                solver.assert(self.encode_transition_formula(
                     schema,
                     &states[index],
                     &steps[index],
@@ -953,11 +963,10 @@ where
                 );
             }
             for state in states.iter().take(depth) {
-                solver.assert(&self.encode_state_predicate(schema, state, predicate));
+                solver.assert(self.encode_state_predicate(schema, state, predicate));
             }
             solver.assert(
-                &self
-                    .encode_state_predicate(schema, &states[depth], predicate)
+                self.encode_state_predicate(schema, &states[depth], predicate)
                     .not(),
             );
 
@@ -1003,7 +1012,7 @@ where
                 assert_in_domain(&solver, step, self.step_domain_size());
             }
             for index in 0..=depth {
-                solver.assert(&self.encode_transition_formula(
+                solver.assert(self.encode_transition_formula(
                     schema,
                     &states[index],
                     &steps[index],
@@ -1019,16 +1028,15 @@ where
                     &states[index + 1],
                     actions,
                 );
-                solver.assert(&self.encode_state_predicate(schema, &states[index], predicate));
+                solver.assert(self.encode_state_predicate(schema, &states[index], predicate));
             }
             solver.assert(
-                &self
-                    .encode_state_predicate(schema, &states[depth + 1], predicate)
+                self.encode_state_predicate(schema, &states[depth + 1], predicate)
                     .not(),
             );
             for lhs in 0..=depth {
                 for rhs in (lhs + 1)..=depth {
-                    solver.assert(&self.encode_states_not_equal(&states[lhs], &states[rhs]));
+                    solver.assert(self.encode_states_not_equal(&states[lhs], &states[rhs]));
                 }
             }
 
@@ -1065,10 +1073,10 @@ where
         level: usize,
     ) -> Result<(), ModelCheckError> {
         if level == 0 {
-            solver.assert(&self.encode_initial_state_formula(schema, state)?);
+            solver.assert(self.encode_initial_state_formula(schema, state)?);
         } else {
             for key in &frames[level] {
-                solver.assert(&self.encode_state_key_neq(state, key));
+                solver.assert(self.encode_state_key_neq(state, key));
             }
         }
         self.assert_state_constraints(solver, schema, state);
@@ -1086,7 +1094,7 @@ where
         let solver = Solver::new();
         state.assert_domains(&solver, schema);
         self.assert_pdr_frame(&solver, schema, &state, frames, level)?;
-        solver.assert(&self.encode_state_predicate(schema, &state, predicate).not());
+        solver.assert(self.encode_state_predicate(schema, &state, predicate).not());
         if !solver_is_sat(&solver) {
             return Ok(None);
         }
@@ -1104,7 +1112,7 @@ where
         frames: &[Vec<Vec<usize>>],
         level: usize,
         target: &[usize],
-    ) -> Result<Option<(Vec<usize>, TraceStep<T::Action>)>, ModelCheckError> {
+    ) -> Result<MaybePredecessor<T>, ModelCheckError> {
         let prev = StateVars::new(&format!("pdr_prev_{level}"), schema);
         let next = StateVars::new(&format!("pdr_next_{level}"), schema);
         let step = Int::new_const(format!("pdr_step_{level}"));
@@ -1114,10 +1122,10 @@ where
         next.assert_domains(&solver, schema);
         assert_in_domain(&solver, &step, self.step_domain_size());
         self.assert_pdr_frame(&solver, schema, &prev, frames, level)?;
-        solver.assert(&self.encode_state_key_eq(&next, target));
+        solver.assert(self.encode_state_key_eq(&next, target));
         self.assert_state_constraints(&solver, schema, &next);
         solver
-            .assert(&self.encode_transition_formula(schema, &prev, &step, &next, program, actions));
+            .assert(self.encode_transition_formula(schema, &prev, &step, &next, program, actions));
         self.assert_action_constraints(&solver, schema, &prev, &step, &next, actions);
 
         if !solver_is_sat(&solver) {
@@ -1153,7 +1161,7 @@ where
         frames: &mut [Vec<Vec<usize>>],
         level: usize,
         target: &[usize],
-    ) -> Result<Option<(Vec<Vec<usize>>, Vec<TraceStep<T::Action>>)>, ModelCheckError> {
+    ) -> Result<MaybeBlockedPath<T>, ModelCheckError> {
         if level == 0 {
             return Ok(Some((vec![target.to_vec()], Vec::new())));
         }
@@ -1260,7 +1268,7 @@ where
         state: &StateVars,
     ) {
         for constraint in self.model_case.state_constraints() {
-            solver.assert(&self.encode_state_predicate(schema, state, constraint));
+            solver.assert(self.encode_state_predicate(schema, state, constraint));
         }
     }
 
@@ -1289,7 +1297,7 @@ where
         next: &StateVars,
         actions: &[T::Action],
     ) {
-        solver.assert(&self.encode_action_constraints_formula(schema, prev, step, next, actions));
+        solver.assert(self.encode_action_constraints_formula(schema, prev, step, next, actions));
     }
 
     fn collect_symbolic_successors(
@@ -1297,7 +1305,7 @@ where
         schema: &SymbolicStateSchema<T::State>,
         state: &T::State,
         program: &TransitionProgram<T::State, T::Action>,
-    ) -> Result<Vec<(TraceStep<T::Action>, T::State)>, ModelCheckError> {
+    ) -> Result<Vec<SymbolicSuccessor<T>>, ModelCheckError> {
         let actions = self.action_domain();
         let prev = StateVars::new("prev", schema);
         let next = StateVars::new("next", schema);
@@ -1308,9 +1316,8 @@ where
         next.assert_domains(&solver, schema);
         assert_in_domain(&solver, &step, self.step_domain_size());
         prev.fix_to_state(&solver, schema, state);
-        solver.assert(
-            &self.encode_transition_formula(schema, &prev, &step, &next, program, &actions),
-        );
+        solver
+            .assert(self.encode_transition_formula(schema, &prev, &step, &next, program, &actions));
         self.assert_state_constraints(&solver, schema, &next);
         self.assert_action_constraints(&solver, schema, &prev, &step, &next, &actions);
 
@@ -1367,7 +1374,7 @@ where
     fn relation_successors(
         &self,
         state: &T::State,
-    ) -> Result<Vec<(TraceStep<T::Action>, T::State)>, ModelCheckError> {
+    ) -> Result<Vec<SymbolicSuccessor<T>>, ModelCheckError> {
         let program = self.symbolic_transition_program()?;
         let schema = self.symbolic_state_schema()?;
 
@@ -1415,14 +1422,14 @@ where
         let vars = LassoVars::new("trace", len, schema);
         let solver = Solver::new();
         vars.assert_domains(&solver, schema, self.step_domain_size());
-        solver.assert(&self.encode_initial_state_formula(schema, &vars.states[0])?);
+        solver.assert(self.encode_initial_state_formula(schema, &vars.states[0])?);
 
         for state in &vars.states {
             self.assert_state_constraints(&solver, schema, state);
         }
 
         for index in 0..len.saturating_sub(1) {
-            solver.assert(&self.encode_transition_formula(
+            solver.assert(self.encode_transition_formula(
                 schema,
                 &vars.states[index],
                 &vars.steps[index],
@@ -1430,7 +1437,7 @@ where
                 program,
                 actions,
             ));
-            solver.assert(&self.encode_action_constraints_formula(
+            solver.assert(self.encode_action_constraints_formula(
                 schema,
                 &vars.states[index],
                 &vars.steps[index],
@@ -1468,7 +1475,7 @@ where
             ]));
         }
 
-        solver.assert(&bool_or(&loop_cases));
+        solver.assert(bool_or(&loop_cases));
 
         let mut traces = Vec::new();
         while solver_is_sat(&solver) {

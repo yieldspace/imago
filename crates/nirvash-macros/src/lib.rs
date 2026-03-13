@@ -1421,12 +1421,8 @@ fn lower_builtin_update_call(whole_expr: &Expr) -> Option<syn::Result<TokenStrea
         .segments
         .iter()
         .map(|segment| segment.ident.to_string());
-    let Some(root) = segments.next() else {
-        return None;
-    };
-    let Some(name) = segments.next() else {
-        return None;
-    };
+    let root = segments.next()?;
+    let name = segments.next()?;
     if root != "nirvash" || segments.next().is_some() {
         return None;
     }

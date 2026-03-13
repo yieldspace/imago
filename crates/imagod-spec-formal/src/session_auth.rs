@@ -1,6 +1,6 @@
 use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2,
-    StepExpr, TransitionSystem,
+    Fairness, Ltl, ModelBackend, ModelCase, ModelCheckConfig, RelSet, Relation2, StepExpr,
+    TransitionSystem,
 };
 use nirvash_macros::{
     ActionVocabulary, RelationalState, Signature as FormalSignature, action_constraint, fairness,
@@ -392,6 +392,7 @@ impl TransitionSystem for SessionAuthSpec {
 #[nirvash_macros::formal_tests(spec = SessionAuthSpec)]
 const _: () = ();
 
+#[allow(dead_code)]
 fn transition_session_auth(
     prev: &SessionAuthState,
     action: &SessionAuthAction,

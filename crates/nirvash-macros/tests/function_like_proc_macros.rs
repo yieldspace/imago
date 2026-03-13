@@ -68,6 +68,7 @@ fn start_step() -> nirvash::StepExpr<State, Action> {
     nirvash_step_expr!(start_step(prev, action, next) => !prev.ready && action_is_start(action) && next.ready && prev.count < next.count)
 }
 
+#[allow(clippy::needless_update)]
 fn program() -> nirvash::TransitionProgram<State, Action> {
     nirvash_transition_program! {
         rule activate when !prev.ready && matches!(action, Action::Add(_)) => {
@@ -106,8 +107,8 @@ fn missing_helper_wrapped_program() -> nirvash::TransitionProgram<State, Action>
 
 fn pure_call_path_program() -> nirvash::TransitionProgram<State, Action> {
     nirvash_transition_program! {
-        rule activate when prev.ready.clone() && target_phase(action).is_some() => {
-            set phase <= prev.phase.clone();
+        rule activate when prev.ready == true && target_phase(action).is_some() => {
+            set phase <= prev.phase;
         }
     }
 }
@@ -172,10 +173,10 @@ fn transition_program_macro_builds_ast_rules() {
         .evaluate(&initial, &Action::Add(7))
         .expect("rule evaluation")
         .expect("matching rule");
-    assert_eq!(next.ready, true);
+    assert!(next.ready);
     assert_eq!(next.count, 1);
     assert_eq!(next.items, BTreeSet::from([1, 2]));
-    assert_eq!(next.config.ready, true);
+    assert!(next.config.ready);
     assert_eq!(next.config.items, vec![1]);
     assert_eq!(next.queue, vec![0, 1]);
     assert_eq!(next.counters, BTreeMap::from([(1, 2)]));

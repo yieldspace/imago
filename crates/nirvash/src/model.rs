@@ -28,18 +28,13 @@ pub enum ExplicitStateStorage {
 }
 
 /// Current explicit-backend state compression strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ExplicitStateCompression {
     /// Keep explicit states in memory as full values.
+    #[default]
     None,
     /// Store explicit states as stable indices into `T::State::bounded_domain()`.
     DomainIndex,
-}
-
-impl Default for ExplicitStateCompression {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Current explicit-backend reachable-graph exploration strategy.

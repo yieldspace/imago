@@ -81,6 +81,8 @@ pub use view::ViewProjector;
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use std::{
         future::Future,
         pin::pin,

@@ -1,6 +1,5 @@
 use nirvash::{
-    BoolExpr, Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, StepExpr,
-    TransitionSystem,
+    BoolExpr, Fairness, Ltl, ModelCase, RelAtom as _, RelSet, Signature as _, TransitionSystem,
 };
 use nirvash_macros::{
     ActionVocabulary, RelAtom, RelationalState, Signature as FormalSignature, fairness, invariant,
@@ -138,6 +137,7 @@ impl RunnerRuntimeSpec {
         }
     }
 
+    #[allow(dead_code)]
     fn transition_state(
         &self,
         prev: &RunnerRuntimeState,

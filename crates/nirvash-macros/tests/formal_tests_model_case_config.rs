@@ -27,7 +27,9 @@ impl TransitionSystem for ConfiguredSpec {
         vec![Action::Start]
     }
 
-    fn transition_program(&self) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_macros::nirvash_transition_program! {
             rule start when matches!(action, Action::Start) && !prev.busy => {
                 set busy <= true;
@@ -45,10 +47,12 @@ fn configured_model_cases() -> Vec<ModelCase<State, Action>> {
         backend: Some(ModelBackend::Explicit),
         ..ModelCheckConfig::default()
     };
-    vec![ModelCase::default()
-        .with_check_deadlocks(false)
-        .with_checker_config(checker_config)
-        .with_doc_checker_config(doc_checker_config)]
+    vec![
+        ModelCase::default()
+            .with_check_deadlocks(false)
+            .with_checker_config(checker_config)
+            .with_doc_checker_config(doc_checker_config),
+    ]
 }
 
 #[formal_tests(spec = ConfiguredSpec)]
@@ -63,7 +67,9 @@ fn formal_tests_accept_model_cases_with_non_copy_configs() {
         .expect("configured case");
     assert_eq!(case.checker_config().backend, Some(ModelBackend::Symbolic));
     assert_eq!(
-        case.doc_checker_config().expect("doc checker config").backend,
+        case.doc_checker_config()
+            .expect("doc checker config")
+            .backend,
         Some(ModelBackend::Explicit)
     );
 }

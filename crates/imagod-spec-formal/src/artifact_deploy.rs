@@ -1,4 +1,4 @@
-use nirvash::{BoolExpr, Fairness, Ltl, StepExpr, TransitionSystem};
+use nirvash::{BoolExpr, Fairness, Ltl, TransitionSystem};
 use nirvash_macros::{
     ActionVocabulary, Signature as FormalSignature, fairness, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, subsystem_spec,
@@ -71,6 +71,7 @@ impl ArtifactDeploySpec {
     }
 }
 
+#[allow(dead_code)]
 fn artifact_deploy_state_valid(state: &ArtifactDeployState) -> bool {
     let promoted_requires_commit = matches!(
         state.release,
@@ -249,6 +250,7 @@ impl TransitionSystem for ArtifactDeploySpec {
 #[nirvash_macros::formal_tests(spec = ArtifactDeploySpec)]
 const _: () = ();
 
+#[allow(dead_code)]
 fn transition_state(
     prev: &ArtifactDeployState,
     action: &ArtifactDeployAction,
