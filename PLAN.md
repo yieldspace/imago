@@ -4,8 +4,8 @@
 
 - [x] RFC TODO 管理の骨格を導入し、実装順で進捗を追跡できるようにする
 - [x] Phase 1A: `nirvash-conformance` に `RefinementMap` trait と `step_refines_relation` を追加する
-- [ ] Phase 1B: `assert_step_refinement` / `enabled_from_summary` を relation-aware に整理する
-- [ ] Phase 1C: code witness / macro harness を relation API に追従させる
+- [x] Phase 1B: `assert_step_refinement` / `enabled_from_summary` を relation-aware に整理する
+- [x] Phase 1C: code witness / macro harness を relation API に追従させる
 - [ ] Phase 2: `trace_refines` を explicit backend で実装する
 - [ ] Phase 3: `ExplicitModelChecker` / `SymbolicModelChecker` へ checker front door を分離する
 - [ ] Phase 4: sound reduction と heuristic reduction の API を分離する
@@ -492,13 +492,13 @@ fn output_refines(
 
 #### Phase 1B
 
-- `enabled_from_summary` を relation-aware に整理する
-- `StepRefinementWitness` / `StepRefinementError` を既存 conformance helper と整合させる
+- [x] `enabled_from_summary` を relation-aware に整理する
+- [x] `step_refines_summary` を追加し、`StepRefinementWitness` / `StepRefinementError` を既存 conformance helper と整合させる
 
 #### Phase 1C
 
-- code witness / generated macro harness の deterministic 仮定を relation API へ追従させる
-- 既存 compile-time harness が nondeterministic spec を誤って reject しない境界へ移行する
+- [x] code witness / generated macro harness の deterministic 仮定を relation API へ追従させる
+- [x] `code_tests` / `code_witness_tests` の integration test と trybuild fixture を追加し、nondeterministic spec を誤って reject しない境界へ移行する
 
 ### Phase 2
 

@@ -19,6 +19,7 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/system_spec_type_paths_ok.rs");
     t.pass("tests/fixtures/case_scoped_constraints_ok.rs");
     t.pass("tests/fixtures/code_tests_ok.rs");
+    t.pass("tests/fixtures/code_tests_nondeterministic_ok.rs");
     t.pass("tests/fixtures/code_witness_tests_ok.rs");
     t.pass("tests/fixtures/runtime_contract_grouped_ok.rs");
     t.pass("tests/fixtures/runtime_contract_binding_witness_ok.rs");

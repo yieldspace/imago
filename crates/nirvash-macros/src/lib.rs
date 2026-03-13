@@ -5038,6 +5038,12 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
             type GeneratedSummaryOutput =
                 <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::SummaryOutput;
 
+            #[derive(Clone, Debug, PartialEq, Eq)]
+            struct GeneratedPrefixStep {
+                action: GeneratedAction,
+                next_state: GeneratedState,
+            }
+
             fn generated_cases() -> ::std::vec::Vec<#spec_ty> {
                 #cases_expr
             }
@@ -5059,7 +5065,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 model_case: GeneratedModelCase,
             ) -> (
                 ::nirvash_conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
-                ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
+                ::std::vec::Vec<::std::vec::Vec<GeneratedPrefixStep>>,
             ) {
                 let lowered = generated_lowered(spec);
                 let snapshot = ::nirvash_check::ModelChecker::for_case(&lowered, model_case)
@@ -5078,7 +5084,10 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     for edge in &snapshot.edges[source] {
                         if paths[edge.target].is_none() {
                             let mut next_path = prefix.clone();
-                            next_path.push(edge.action.clone());
+                            next_path.push(GeneratedPrefixStep {
+                                action: edge.action.clone(),
+                                next_state: snapshot.states[edge.target].clone(),
+                            });
                             paths[edge.target] = ::core::option::Option::Some(next_path);
                             queue.push_back(edge.target);
                         }
@@ -5094,7 +5103,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
 
             async fn replay_prefix(
                 spec: &#spec_ty,
-                path: &[GeneratedAction],
+                path: &[GeneratedPrefixStep],
                 context: &GeneratedContext,
             ) -> GeneratedRuntime {
                 let runtime =
@@ -5104,7 +5113,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                     context,
                 )
                 .await;
-                let observed_summary =
+                let mut observed_summary =
                     <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
                         spec,
                         &observed,
@@ -5115,20 +5124,11 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         &observed_summary,
                     );
                 ::nirvash_conformance::assert_initial_refinement(spec, &observed_summary);
-                for action in path {
-                    let expected_next =
-                        <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
-                            spec,
-                            &projected,
-                            action,
-                        );
-                    let expected_output =
-                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
-                            spec,
-                            &projected,
-                            action,
-                            expected_next.as_ref(),
-                        );
+                for prefix_step in path {
+                    let action = &prefix_step.action;
+                    let expected_next = &prefix_step.next_state;
+                    let action_enabled =
+                        ::nirvash_conformance::enabled_from_summary(spec, &observed_summary, action);
                     let output = <GeneratedRuntime as ::nirvash_conformance::ActionApplier>::execute_action(
                         &runtime,
                         context,
@@ -5145,7 +5145,6 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                             spec,
                             &output_summary,
                         );
-                    assert_eq!(projected_output, expected_output);
                     let observed_after =
                         <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
                             &runtime,
@@ -5162,27 +5161,71 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                             spec,
                             &observed_after_summary,
                         );
-                    match expected_next {
-                        ::core::option::Option::Some(next) => {
-                            assert_eq!(projected_after, next);
+                    let step_refinement =
+                        ::nirvash_conformance::step_refines_summary(
+                            spec,
+                            &observed_summary,
+                            action,
+                            &observed_after_summary,
+                        );
+                    match (action_enabled, step_refinement) {
+                        (true, Ok(witness)) => {
+                            let expected_output =
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
+                                    spec,
+                                    &projected,
+                                    action,
+                                    ::core::option::Option::Some(&witness.abstract_after),
+                                );
+                            assert_eq!(projected_output, expected_output);
                             projected = projected_after;
                         }
-                        ::core::option::Option::None => {
+                        (true, Err(error)) => {
+                            panic!(
+                                "prefix replay refinement failed for {:?} from {:?} toward {:?}: {}",
+                                action,
+                                projected,
+                                expected_next,
+                                error,
+                            );
+                        }
+                        (false, Ok(witness)) => {
+                            panic!(
+                                "prefix replay unexpectedly accepted {:?} from {:?} to {:?} while replaying toward {:?}",
+                                action,
+                                witness.abstract_before,
+                                witness.abstract_after,
+                                expected_next,
+                            );
+                        }
+                        (false, Err(_)) => {
+                            let expected_output =
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
+                                    spec,
+                                    &projected,
+                                    action,
+                                    ::core::option::Option::None,
+                                );
+                            assert_eq!(projected_output, expected_output);
                             assert_eq!(projected_after, projected);
                         }
                     }
+                    observed_summary = observed_after_summary;
                 }
                 runtime
             }
 
             async fn execute_from_state(
                 spec: &#spec_ty,
-                path: &[GeneratedAction],
+                path: &[GeneratedPrefixStep],
                 expected_state: &GeneratedState,
                 action: &GeneratedAction,
                 context: &GeneratedContext,
             ) -> (
-                ::core::option::Option<GeneratedState>,
+                GeneratedState,
+                ::core::option::Option<
+                    ::nirvash_conformance::StepRefinementWitness<GeneratedState, GeneratedAction>,
+                >,
                 GeneratedExpectedOutput,
                 GeneratedState,
             ) {
@@ -5203,20 +5246,8 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         spec,
                         &observed_before_summary,
                     );
-                assert_eq!(projected_before, *expected_state);
-                let expected_next =
-                    <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
-                        spec,
-                        &projected_before,
-                        action,
-                    );
-                let expected_output =
-                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
-                        spec,
-                        &projected_before,
-                        action,
-                        expected_next.as_ref(),
-                    );
+                let action_enabled =
+                    ::nirvash_conformance::enabled_from_summary(spec, &observed_before_summary, action);
                 let output = <GeneratedRuntime as ::nirvash_conformance::ActionApplier>::execute_action(
                     &runtime,
                     context,
@@ -5249,12 +5280,69 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         spec,
                         &observed_after_summary,
                     );
-                assert_eq!(projected_output, expected_output);
-                (expected_next, projected_output, projected_after)
+                let step_refinement =
+                    ::nirvash_conformance::step_refines_summary(
+                        spec,
+                        &observed_before_summary,
+                        action,
+                        &observed_after_summary,
+                    );
+                match (action_enabled, step_refinement) {
+                    (true, Ok(witness)) => {
+                        let expected_output =
+                            <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
+                                spec,
+                                &projected_before,
+                                action,
+                                ::core::option::Option::Some(&witness.abstract_after),
+                            );
+                        assert_eq!(projected_output, expected_output);
+                        (
+                            projected_before,
+                            ::core::option::Option::Some(witness),
+                            projected_output,
+                            projected_after,
+                        )
+                    }
+                    (true, Err(error)) => {
+                        panic!(
+                            "state {:?} replayed as {:?} but step refinement failed for {:?}: {}",
+                            expected_state,
+                            projected_before,
+                            action,
+                            error,
+                        );
+                    }
+                    (false, Ok(witness)) => {
+                        panic!(
+                            "state {:?} replayed as {:?} but action {:?} unexpectedly refined to {:?}",
+                            expected_state,
+                            projected_before,
+                            action,
+                            witness.abstract_after,
+                        );
+                    }
+                    (false, Err(_)) => {
+                        let expected_output =
+                            <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
+                                spec,
+                                &projected_before,
+                                action,
+                                ::core::option::Option::None,
+                            );
+                        assert_eq!(projected_output, expected_output);
+                        (
+                            projected_before,
+                            ::core::option::Option::None,
+                            projected_output,
+                            projected_after,
+                        )
+                    }
+                }
             }
 
             #[test]
-            fn generated_spec_is_deterministic_for_code_conformance() {
+            fn generated_relation_sanity_matches_successor_projection() {
                 for spec in generated_cases() {
                     for model_case in generated_model_cases(&spec) {
                         let (snapshot, _) = generated_paths(&spec, model_case);
@@ -5268,13 +5356,13 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                     .filter(|(candidate_action, _)| *candidate_action == action)
                                     .map(|(_, next)| next)
                                     .collect::<::std::vec::Vec<_>>();
-                                assert!(
-                                    next_states.len() <= 1,
-                                    "spec is nondeterministic for state {:?} and action {:?}: {:?}",
-                                    state,
-                                    action,
-                                    next_states
-                                );
+                                let relation_next_states =
+                                    <#spec_ty as ::nirvash_lower::FrontendSpec>::transition_relation(
+                                        &spec,
+                                        state,
+                                        &action,
+                                    );
+                                assert_eq!(next_states, relation_next_states);
                                 match <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
                                     &spec,
                                     state,
@@ -5283,9 +5371,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                     ::core::option::Option::Some(next) => {
                                         assert_eq!(next_states, vec![next]);
                                     }
-                                    ::core::option::Option::None => {
-                                        assert!(next_states.is_empty());
-                                    }
+                                    ::core::option::Option::None => {}
                                 }
                             }
                         }
@@ -5301,7 +5387,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
                             for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
-                                let (expected_next, _, _) = execute_from_state(
+                                let (_, expected_step, _, _) = execute_from_state(
                                     &spec,
                                     &paths[index],
                                     state,
@@ -5309,7 +5395,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                     &context,
                                 )
                                         .await;
-                                if expected_next.is_some() {
+                                if expected_step.is_some() {
                                     // replay + dispatch already succeeded if we reached here
                                 }
                             }
@@ -5326,7 +5412,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
                             for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
-                                let (expected_next, _, observed_after) = execute_from_state(
+                                let (observed_before, expected_step, _, observed_after) = execute_from_state(
                                     &spec,
                                     &paths[index],
                                     state,
@@ -5334,8 +5420,8 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                     &context,
                                 )
                                         .await;
-                                if expected_next.is_none() {
-                                    assert_eq!(observed_after, *state);
+                                if expected_step.is_none() {
+                                    assert_eq!(observed_after, observed_before);
                                 }
                             }
                         }
@@ -5351,7 +5437,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
                             for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
-                                let (expected_next, _, observed_after) = execute_from_state(
+                                let (observed_before, expected_step, _, observed_after) = execute_from_state(
                                     &spec,
                                     &paths[index],
                                     state,
@@ -5359,12 +5445,12 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                                     &context,
                                 )
                                         .await;
-                                match expected_next {
-                                    ::core::option::Option::Some(next) => {
-                                        assert_eq!(observed_after, next);
+                                match expected_step {
+                                    ::core::option::Option::Some(witness) => {
+                                        assert_eq!(observed_after, witness.abstract_after);
                                     }
                                     ::core::option::Option::None => {
-                                        assert_eq!(observed_after, *state);
+                                        assert_eq!(observed_after, observed_before);
                                     }
                                 }
                             }
@@ -5381,22 +5467,14 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                         let (snapshot, paths) = generated_paths(&spec, model_case);
                         for (index, state) in snapshot.states.iter().enumerate() {
                             for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(&spec) {
-                                let (expected_next, output, _) = execute_from_state(
+                                let _ = execute_from_state(
                                     &spec,
                                     &paths[index],
                                     state,
                                     &action,
                                     &context,
                                 )
-                                        .await;
-                                let expected_output =
-                                    <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::expected_output(
-                                        &spec,
-                                        state,
-                                        &action,
-                                        expected_next.as_ref(),
-                                    );
-                                assert_eq!(output, expected_output);
+                                .await;
                             }
                         }
                     }
@@ -5466,7 +5544,13 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 state: GeneratedState,
                 action: GeneratedAction,
                 expected_next: ::core::option::Option<GeneratedState>,
-                path: ::std::vec::Vec<GeneratedAction>,
+                path: ::std::vec::Vec<GeneratedPrefixStep>,
+            }
+
+            #[derive(Clone, Debug, PartialEq, Eq)]
+            struct GeneratedPrefixStep {
+                action: GeneratedAction,
+                next_state: GeneratedState,
             }
 
             #[derive(Clone)]
@@ -5496,7 +5580,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 model_case: GeneratedModelCase,
             ) -> (
                 ::nirvash_conformance::ReachableGraphSnapshot<GeneratedState, GeneratedAction>,
-                ::std::vec::Vec<::std::vec::Vec<GeneratedAction>>,
+                ::std::vec::Vec<::std::vec::Vec<GeneratedPrefixStep>>,
             ) {
                 let lowered = generated_lowered(spec);
                 let snapshot = ::nirvash_check::ModelChecker::for_case(&lowered, model_case)
@@ -5515,7 +5599,10 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     for edge in &snapshot.edges[source] {
                         if paths[edge.target].is_none() {
                             let mut next_path = prefix.clone();
-                            next_path.push(edge.action.clone());
+                            next_path.push(GeneratedPrefixStep {
+                                action: edge.action.clone(),
+                                next_state: snapshot.states[edge.target].clone(),
+                            });
                             paths[edge.target] = ::core::option::Option::Some(next_path);
                             queue.push_back(edge.target);
                         }
@@ -5553,13 +5640,13 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 }
             }
 
-            fn generated_prefix_component(path: &[GeneratedAction]) -> ::std::string::String {
+            fn generated_prefix_component(path: &[GeneratedPrefixStep]) -> ::std::string::String {
                 if path.is_empty() {
                     return "from_init".to_owned();
                 }
                 let actions = path
                     .iter()
-                    .map(|action| generated_sanitize_test_component(&format!("{action:?}")))
+                    .map(|step| generated_sanitize_test_component(&format!("{:?}", step.action)))
                     .collect::<::std::vec::Vec<_>>()
                     .join("__");
                 format!("after_{actions}")
@@ -5647,34 +5734,62 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     let (snapshot, paths) = generated_paths(spec, model_case);
                     for (index, state) in snapshot.states.iter().enumerate() {
                         for action in <#spec_ty as ::nirvash_lower::FrontendSpec>::actions(spec) {
-                            let expected_next =
-                                <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
+                            let successors =
+                                <#spec_ty as ::nirvash_lower::FrontendSpec>::transition_relation(
                                     spec,
                                     state,
                                     &action,
                                 );
-                            if let ::core::option::Option::Some(existing) = cases.iter_mut().find(|existing| {
-                                existing.state == *state
-                                    && existing.action == action
-                                    && existing.expected_next == expected_next
-                                    && existing.path == paths[index]
-                            }) {
-                                generated_merge_provenance(
-                                    &mut existing.provenance,
-                                    provenance_label.clone(),
-                                );
+                            if successors.is_empty() {
+                                if let ::core::option::Option::Some(existing) = cases.iter_mut().find(|existing| {
+                                    existing.state == *state
+                                        && existing.action == action
+                                        && existing.expected_next.is_none()
+                                        && existing.path == paths[index]
+                                }) {
+                                    generated_merge_provenance(
+                                        &mut existing.provenance,
+                                        provenance_label.clone(),
+                                    );
+                                    continue;
+                                }
+                                cases.push(GeneratedSemanticCase {
+                                    spec_case_label: spec_case_label.to_owned(),
+                                    prefix_id: next_prefix_id,
+                                    provenance: vec![provenance_label.clone()],
+                                    state: state.clone(),
+                                    action: action.clone(),
+                                    expected_next: ::core::option::Option::None,
+                                    path: paths[index].clone(),
+                                });
+                                next_prefix_id += 1;
                                 continue;
                             }
-                            cases.push(GeneratedSemanticCase {
-                                spec_case_label: spec_case_label.to_owned(),
-                                prefix_id: next_prefix_id,
-                                provenance: vec![provenance_label.clone()],
-                                state: state.clone(),
-                                action: action.clone(),
-                                expected_next,
-                                path: paths[index].clone(),
-                            });
-                            next_prefix_id += 1;
+
+                            for expected_next in successors {
+                                if let ::core::option::Option::Some(existing) = cases.iter_mut().find(|existing| {
+                                    existing.state == *state
+                                        && existing.action == action
+                                        && existing.expected_next == ::core::option::Option::Some(expected_next.clone())
+                                        && existing.path == paths[index]
+                                }) {
+                                    generated_merge_provenance(
+                                        &mut existing.provenance,
+                                        provenance_label.clone(),
+                                    );
+                                    continue;
+                                }
+                                cases.push(GeneratedSemanticCase {
+                                    spec_case_label: spec_case_label.to_owned(),
+                                    prefix_id: next_prefix_id,
+                                    provenance: vec![provenance_label.clone()],
+                                    state: state.clone(),
+                                    action: action.clone(),
+                                    expected_next: ::core::option::Option::Some(expected_next),
+                                    path: paths[index].clone(),
+                                });
+                                next_prefix_id += 1;
+                            }
                         }
                     }
                 }
@@ -5764,8 +5879,9 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                         spec,
                         &initial_summary,
                     );
+                let mut current_summary = initial_summary;
                 let initial_refinement = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
-                    ::nirvash_conformance::assert_initial_refinement(spec, &initial_summary);
+                    ::nirvash_conformance::assert_initial_refinement(spec, &current_summary);
                 }));
                 if let Err(payload) = initial_refinement {
                     return Err(format!(
@@ -5775,21 +5891,9 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     ));
                 }
                 let mut projected = initial_projected;
-                for action in &semantic_case.path {
-                    let expected_next =
-                        <#spec_ty as ::nirvash_lower::FrontendSpec>::transition(
-                            spec,
-                            &projected,
-                            action,
-                        )
-                        .ok_or_else(|| {
-                            format!(
-                                "{}canonical prefix action {:?} is not allowed from {:?}",
-                                generated_failure_prelude(semantic_case, "<canonical-prefix>"),
-                                action,
-                                projected,
-                            )
-                        })?;
+                for prefix_step in &semantic_case.path {
+                    let action = &prefix_step.action;
+                    let expected_next = &prefix_step.next_state;
                     let witnesses =
                         <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::positive_witnesses(
                             spec,
@@ -5837,7 +5941,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                             spec,
                             &projected,
                             action,
-                            ::core::option::Option::Some(&expected_next),
+                            ::core::option::Option::Some(expected_next),
                         );
                     if projected_output != expected_output {
                         return Err(format!(
@@ -5849,18 +5953,64 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                             projected,
                         ));
                     }
-                    let observed_after = generated_observe_projected_state(spec, runtime, session).await;
-                    if observed_after != expected_next {
+                    let observed_after =
+                        {
+                            let probe_after_context =
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(session);
+                            <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
+                                runtime,
+                                &probe_after_context,
+                            )
+                            .await
+                        };
+                    let observed_after_summary =
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
+                            spec,
+                            &observed_after,
+                        );
+                    let observed_after_projected =
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
+                            spec,
+                            &observed_after_summary,
+                        );
+                    let step_refinement =
+                        ::nirvash_conformance::step_refines_summary(
+                            spec,
+                            &current_summary,
+                            action,
+                            &observed_after_summary,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "{}canonical prefix refinement failed for {:?} -- {:?}: {}",
+                                generated_failure_prelude(semantic_case, witness.name()),
+                                projected,
+                                action,
+                                error,
+                            )
+                        })?;
+                    if step_refinement.abstract_after != *expected_next {
                         return Err(format!(
                             "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
                             generated_failure_prelude(semantic_case, witness.name()),
                             expected_output,
                             projected_output,
                             expected_next,
-                            observed_after,
+                            step_refinement.abstract_after,
                         ));
                     }
-                    projected = expected_next;
+                    if observed_after_projected != *expected_next {
+                        return Err(format!(
+                            "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
+                            generated_failure_prelude(semantic_case, witness.name()),
+                            expected_output,
+                            projected_output,
+                            expected_next,
+                            observed_after_projected,
+                        ));
+                    }
+                    current_summary = observed_after_summary;
+                    projected = expected_next.clone();
                 }
                 Ok(())
             }
@@ -5957,8 +6107,24 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                     let mut session =
                         <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::fresh_session(spec.as_ref()).await;
                     generated_replay_canonical_prefix(spec.as_ref(), &semantic_case, &runtime, &mut session).await?;
+                    let probe_before_context =
+                        <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(&session);
+                    let observed_before_probe =
+                        <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
+                            &runtime,
+                            &probe_before_context,
+                        )
+                        .await;
+                    let observed_before_summary =
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
+                            spec.as_ref(),
+                            &observed_before_probe,
+                        );
                     let observed_before =
-                        generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
+                        <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
+                            spec.as_ref(),
+                            &observed_before_summary,
+                        );
                     if observed_before != semantic_case.state {
                         return Err(format!(
                             "{}expected output: <not-executed>\nobserved output: <not-executed>\nexpected state: {:?}\nobserved state: {:?}",
@@ -6019,8 +6185,38 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                     &semantic_case.action,
                                     ::core::option::Option::Some(next),
                                 );
+                            let probe_after_context =
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(&session);
+                            let observed_after_probe =
+                                <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
+                                    &runtime,
+                                    &probe_after_context,
+                                )
+                                .await;
+                            let observed_after_summary =
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
+                                    spec.as_ref(),
+                                    &observed_after_probe,
+                                );
                             let observed_after =
-                                generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
+                                    spec.as_ref(),
+                                    &observed_after_summary,
+                                );
+                            let step_refinement =
+                                ::nirvash_conformance::step_refines_summary(
+                                    spec.as_ref(),
+                                    &observed_before_summary,
+                                    &semantic_case.action,
+                                    &observed_after_summary,
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "{}step refinement failed: {}",
+                                        generated_failure_prelude(&semantic_case, witness.name()),
+                                        error,
+                                    )
+                                })?;
                             if projected_output != expected_output {
                                 return Err(format!(
                                     "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
@@ -6031,7 +6227,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                     observed_after,
                                 ));
                             }
-                            if observed_after != *next {
+                            if step_refinement.abstract_after != *next || observed_after != *next {
                                 return Err(format!(
                                     "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
                                     generated_failure_prelude(&semantic_case, witness.name()),
@@ -6093,8 +6289,38 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                                     &semantic_case.action,
                                     ::core::option::Option::None,
                                 );
+                            let probe_after_context =
+                                <#binding_ty as ::nirvash_conformance::ProtocolInputWitnessBinding<#spec_ty>>::probe_context(&session);
+                            let observed_after_probe =
+                                <GeneratedRuntime as ::nirvash_conformance::StateObserver>::observe_state(
+                                    &runtime,
+                                    &probe_after_context,
+                                )
+                                .await;
+                            let observed_after_summary =
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::summarize_state(
+                                    spec.as_ref(),
+                                    &observed_after_probe,
+                                );
                             let observed_after =
-                                generated_observe_projected_state(spec.as_ref(), &runtime, &session).await;
+                                <#spec_ty as ::nirvash_conformance::ProtocolConformanceSpec>::abstract_state(
+                                    spec.as_ref(),
+                                    &observed_after_summary,
+                                );
+                            if ::nirvash_conformance::step_refines_summary(
+                                spec.as_ref(),
+                                &observed_before_summary,
+                                &semantic_case.action,
+                                &observed_after_summary,
+                            )
+                            .is_ok()
+                            {
+                                return Err(format!(
+                                    "{}negative witness unexpectedly refined to {:?}",
+                                    generated_failure_prelude(&semantic_case, witness.name()),
+                                    observed_after,
+                                ));
+                            }
                             if projected_output != expected_output {
                                 return Err(format!(
                                     "{}expected output: {:?}\nobserved output: {:?}\nexpected state: {:?}\nobserved state: {:?}",
