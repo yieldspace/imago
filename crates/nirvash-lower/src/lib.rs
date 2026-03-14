@@ -2,6 +2,7 @@
 
 use std::{
     fmt::{self, Debug, Display},
+    path::PathBuf,
     sync::OnceLock,
 };
 
@@ -12,11 +13,11 @@ pub use nirvash::{
     ExplicitParallelOptions, ExplicitReachabilityStrategy, ExplicitSimulationOptions,
     ExplicitStateCompression, ExplicitStateStorage, ExplorationMode, Fairness, Ltl, ModelBackend,
     ModelCheckConfig, ModelCheckError, ModelCheckResult, ReachableGraphEdge,
-    ReachableGraphSnapshot, RelationalBridgeOptions, RelationalBridgeStrategy, SoundnessTier,
-    SpecVizBundle, SpecVizRegistrationSet, StateExpr, StepExpr, StepExprAst,
-    SymbolicKInductionOptions, SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine,
-    SymbolicTemporalEngine, Trace, TraceStep, TransitionProgram, TransitionProgramError,
-    TransitionRule, TransitionSuccessor, UpdateAst, UpdateOp, UpdateProgram, UpdateValueExprAst,
+    ReachableGraphSnapshot, RelationalBridgeOptions, RelationalBridgeStrategy, SpecVizBundle,
+    SpecVizRegistrationSet, StateExpr, StepExpr, StepExprAst, SymbolicKInductionOptions,
+    SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicTemporalEngine,
+    Trace, TraceStep, TransitionProgram, TransitionProgramError, TransitionRule,
+    TransitionSuccessor, TrustTier, UpdateAst, UpdateOp, UpdateProgram, UpdateValueExprAst,
     VizPolicy, collect_relational_state_schema, collect_relational_state_summary,
     registry::RegisteredSymbolicStateSchema,
 };
@@ -107,20 +108,90 @@ impl<S, A> PartialEq for HeuristicActionPruning<S, A> {
 
 impl<S, A> Eq for HeuristicActionPruning<S, A> {}
 
-#[derive(Debug, Clone)]
-pub struct VerifiedSymmetry<S> {
-    name: &'static str,
-    canonicalize: fn(&S) -> S,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofBackendId {
+    Tlaps,
+    Smt,
+    Kani,
+    Verus,
+    RefinedRust,
+    External(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofCertificate {
+    pub backend: ProofBackendId,
+    pub obligation_hash: String,
+    pub artifact_hash: String,
+    pub artifact_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReductionClaim<T> {
+    value: T,
     obligations: Vec<ProofObligation>,
 }
 
-impl<S> VerifiedSymmetry<S> {
-    pub const fn new(name: &'static str, canonicalize: fn(&S) -> S) -> Self {
+impl<T> ReductionClaim<T> {
+    pub fn new(value: T) -> Self {
         Self {
-            name,
-            canonicalize,
+            value,
             obligations: Vec::new(),
         }
+    }
+
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn into_value(self) -> T {
+        self.value
+    }
+
+    pub fn obligations(&self) -> &[ProofObligation] {
+        &self.obligations
+    }
+
+    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
+        self.obligations.push(obligation);
+        self
+    }
+
+    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
+        self.obligations.extend(obligations);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Certified<T> {
+    value: T,
+    certificate: ProofCertificate,
+}
+
+impl<T> Certified<T> {
+    pub fn new(value: T, certificate: ProofCertificate) -> Self {
+        Self { value, certificate }
+    }
+
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn certificate(&self) -> &ProofCertificate {
+        &self.certificate
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SymmetryReduction<S> {
+    name: &'static str,
+    canonicalize: fn(&S) -> S,
+}
+
+impl<S> SymmetryReduction<S> {
+    pub const fn new(name: &'static str, canonicalize: fn(&S) -> S) -> Self {
+        Self { name, canonicalize }
     }
 
     pub const fn name(&self) -> &'static str {
@@ -130,44 +201,25 @@ impl<S> VerifiedSymmetry<S> {
     pub fn canonicalize(&self, state: &S) -> S {
         (self.canonicalize)(state)
     }
-
-    pub fn obligations(&self) -> &[ProofObligation] {
-        &self.obligations
-    }
-
-    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
-        self.obligations.push(obligation);
-        self
-    }
-
-    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
-        self.obligations.extend(obligations);
-        self
-    }
 }
 
-impl<S> PartialEq for VerifiedSymmetry<S> {
+impl<S> PartialEq for SymmetryReduction<S> {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.obligations == other.obligations
+        self.name == other.name
     }
 }
 
-impl<S> Eq for VerifiedSymmetry<S> {}
+impl<S> Eq for SymmetryReduction<S> {}
 
-#[derive(Debug, Clone)]
-pub struct VerifiedStateQuotient<S> {
+#[derive(Debug, Clone, Copy)]
+pub struct StateQuotientReduction<S> {
     name: &'static str,
     quotient_key: fn(&S) -> String,
-    obligations: Vec<ProofObligation>,
 }
 
-impl<S> VerifiedStateQuotient<S> {
+impl<S> StateQuotientReduction<S> {
     pub const fn new(name: &'static str, quotient_key: fn(&S) -> String) -> Self {
-        Self {
-            name,
-            quotient_key,
-            obligations: Vec::new(),
-        }
+        Self { name, quotient_key }
     }
 
     pub const fn name(&self) -> &'static str {
@@ -177,44 +229,25 @@ impl<S> VerifiedStateQuotient<S> {
     pub fn quotient_key(&self, state: &S) -> String {
         (self.quotient_key)(state)
     }
-
-    pub fn obligations(&self) -> &[ProofObligation] {
-        &self.obligations
-    }
-
-    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
-        self.obligations.push(obligation);
-        self
-    }
-
-    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
-        self.obligations.extend(obligations);
-        self
-    }
 }
 
-impl<S> PartialEq for VerifiedStateQuotient<S> {
+impl<S> PartialEq for StateQuotientReduction<S> {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.obligations == other.obligations
+        self.name == other.name
     }
 }
 
-impl<S> Eq for VerifiedStateQuotient<S> {}
+impl<S> Eq for StateQuotientReduction<S> {}
 
-#[derive(Debug, Clone)]
-pub struct VerifiedPor<S, A> {
+#[derive(Debug, Clone, Copy)]
+pub struct PorReduction<S, A> {
     name: &'static str,
     allow_action: fn(&S, &A) -> bool,
-    obligations: Vec<ProofObligation>,
 }
 
-impl<S, A> VerifiedPor<S, A> {
+impl<S, A> PorReduction<S, A> {
     pub const fn new(name: &'static str, allow_action: fn(&S, &A) -> bool) -> Self {
-        Self {
-            name,
-            allow_action,
-            obligations: Vec::new(),
-        }
+        Self { name, allow_action }
     }
 
     pub const fn name(&self) -> &'static str {
@@ -224,44 +257,30 @@ impl<S, A> VerifiedPor<S, A> {
     pub fn allow_action(&self, state: &S, action: &A) -> bool {
         (self.allow_action)(state, action)
     }
-
-    pub fn obligations(&self) -> &[ProofObligation] {
-        &self.obligations
-    }
-
-    pub fn with_obligation(mut self, obligation: ProofObligation) -> Self {
-        self.obligations.push(obligation);
-        self
-    }
-
-    pub fn with_obligations(mut self, obligations: Vec<ProofObligation>) -> Self {
-        self.obligations.extend(obligations);
-        self
-    }
 }
 
-impl<S, A> PartialEq for VerifiedPor<S, A> {
+impl<S, A> PartialEq for PorReduction<S, A> {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.obligations == other.obligations
+        self.name == other.name
     }
 }
 
-impl<S, A> Eq for VerifiedPor<S, A> {}
+impl<S, A> Eq for PorReduction<S, A> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SoundReduction<S, A> {
-    symmetry: Option<VerifiedSymmetry<S>>,
-    quotient: Option<VerifiedStateQuotient<S>>,
-    por: Option<VerifiedPor<S, A>>,
+pub struct ClaimedReduction<S, A> {
+    symmetry: Option<ReductionClaim<SymmetryReduction<S>>>,
+    quotient: Option<ReductionClaim<StateQuotientReduction<S>>>,
+    por: Option<ReductionClaim<PorReduction<S, A>>>,
 }
 
-impl<S, A> Default for SoundReduction<S, A> {
+impl<S, A> Default for ClaimedReduction<S, A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S, A> SoundReduction<S, A> {
+impl<S, A> ClaimedReduction<S, A> {
     pub const fn new() -> Self {
         Self {
             symmetry: None,
@@ -270,30 +289,30 @@ impl<S, A> SoundReduction<S, A> {
         }
     }
 
-    pub fn with_symmetry(mut self, symmetry: VerifiedSymmetry<S>) -> Self {
+    pub fn with_symmetry(mut self, symmetry: ReductionClaim<SymmetryReduction<S>>) -> Self {
         self.symmetry = Some(symmetry);
         self
     }
 
-    pub fn with_quotient(mut self, quotient: VerifiedStateQuotient<S>) -> Self {
+    pub fn with_quotient(mut self, quotient: ReductionClaim<StateQuotientReduction<S>>) -> Self {
         self.quotient = Some(quotient);
         self
     }
 
-    pub fn with_por(mut self, por: VerifiedPor<S, A>) -> Self {
+    pub fn with_por(mut self, por: ReductionClaim<PorReduction<S, A>>) -> Self {
         self.por = Some(por);
         self
     }
 
-    pub fn symmetry(&self) -> Option<&VerifiedSymmetry<S>> {
+    pub fn symmetry(&self) -> Option<&ReductionClaim<SymmetryReduction<S>>> {
         self.symmetry.as_ref()
     }
 
-    pub fn quotient(&self) -> Option<&VerifiedStateQuotient<S>> {
+    pub fn quotient(&self) -> Option<&ReductionClaim<StateQuotientReduction<S>>> {
         self.quotient.as_ref()
     }
 
-    pub fn por(&self) -> Option<&VerifiedPor<S, A>> {
+    pub fn por(&self) -> Option<&ReductionClaim<PorReduction<S, A>>> {
         self.por.as_ref()
     }
 
@@ -313,6 +332,74 @@ impl<S, A> SoundReduction<S, A> {
             obligations.extend(por.obligations().iter().cloned());
         }
         obligations
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedReduction<S, A> {
+    symmetry: Option<Certified<SymmetryReduction<S>>>,
+    quotient: Option<Certified<StateQuotientReduction<S>>>,
+    por: Option<Certified<PorReduction<S, A>>>,
+}
+
+impl<S, A> Default for CertifiedReduction<S, A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S, A> CertifiedReduction<S, A> {
+    pub const fn new() -> Self {
+        Self {
+            symmetry: None,
+            quotient: None,
+            por: None,
+        }
+    }
+
+    pub fn with_symmetry(mut self, symmetry: Certified<SymmetryReduction<S>>) -> Self {
+        self.symmetry = Some(symmetry);
+        self
+    }
+
+    pub fn with_quotient(mut self, quotient: Certified<StateQuotientReduction<S>>) -> Self {
+        self.quotient = Some(quotient);
+        self
+    }
+
+    pub fn with_por(mut self, por: Certified<PorReduction<S, A>>) -> Self {
+        self.por = Some(por);
+        self
+    }
+
+    pub fn symmetry(&self) -> Option<&Certified<SymmetryReduction<S>>> {
+        self.symmetry.as_ref()
+    }
+
+    pub fn quotient(&self) -> Option<&Certified<StateQuotientReduction<S>>> {
+        self.quotient.as_ref()
+    }
+
+    pub fn por(&self) -> Option<&Certified<PorReduction<S, A>>> {
+        self.por.as_ref()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.symmetry.is_none() && self.quotient.is_none() && self.por.is_none()
+    }
+
+    pub fn certificates(&self) -> Vec<ProofCertificate> {
+        let mut certificates = Vec::new();
+        if let Some(symmetry) = &self.symmetry {
+            certificates.push(symmetry.certificate().clone());
+        }
+        if let Some(quotient) = &self.quotient {
+            certificates.push(quotient.certificate().clone());
+        }
+        if let Some(por) = &self.por {
+            certificates.push(por.certificate().clone());
+        }
+        certificates
     }
 }
 
@@ -409,7 +496,8 @@ pub struct ModelInstance<S, A> {
     label: &'static str,
     state_constraints: Vec<BoolExpr<S>>,
     action_constraints: Vec<StepExpr<S, A>>,
-    sound_reduction: Option<SoundReduction<S, A>>,
+    claimed_reduction: Option<ClaimedReduction<S, A>>,
+    certified_reduction: Option<CertifiedReduction<S, A>>,
     heuristic_reduction: Option<HeuristicReduction<S, A>>,
     checker_config: ModelCheckConfig,
     check_deadlocks: bool,
@@ -422,7 +510,8 @@ impl<S, A> ModelInstance<S, A> {
             label,
             state_constraints: Vec::new(),
             action_constraints: Vec::new(),
-            sound_reduction: None,
+            claimed_reduction: None,
+            certified_reduction: None,
             heuristic_reduction: None,
             checker_config: ModelCheckConfig::default(),
             check_deadlocks: true,
@@ -449,8 +538,13 @@ impl<S, A> ModelInstance<S, A> {
         self
     }
 
-    pub fn with_sound_reduction(mut self, reduction: SoundReduction<S, A>) -> Self {
-        self.sound_reduction = (!reduction.is_empty()).then_some(reduction);
+    pub fn with_claimed_reduction(mut self, reduction: ClaimedReduction<S, A>) -> Self {
+        self.claimed_reduction = (!reduction.is_empty()).then_some(reduction);
+        self
+    }
+
+    pub fn with_certified_reduction(mut self, reduction: CertifiedReduction<S, A>) -> Self {
+        self.certified_reduction = (!reduction.is_empty()).then_some(reduction);
         self
     }
 
@@ -514,8 +608,12 @@ impl<S, A> ModelInstance<S, A> {
         &self.action_constraints
     }
 
-    pub fn sound_reduction(&self) -> Option<&SoundReduction<S, A>> {
-        self.sound_reduction.as_ref()
+    pub fn claimed_reduction(&self) -> Option<&ClaimedReduction<S, A>> {
+        self.claimed_reduction.as_ref()
+    }
+
+    pub fn certified_reduction(&self) -> Option<&CertifiedReduction<S, A>> {
+        self.certified_reduction.as_ref()
     }
 
     pub fn heuristic_reduction(&self) -> Option<&HeuristicReduction<S, A>> {
@@ -523,18 +621,26 @@ impl<S, A> ModelInstance<S, A> {
     }
 
     pub fn reduction_obligations(&self) -> Vec<ProofObligation> {
-        self.sound_reduction()
-            .map(SoundReduction::obligations)
+        self.claimed_reduction()
+            .map(ClaimedReduction::obligations)
             .unwrap_or_default()
     }
 
-    pub fn soundness_tier(&self) -> SoundnessTier {
+    pub fn reduction_certificates(&self) -> Vec<ProofCertificate> {
+        self.certified_reduction()
+            .map(CertifiedReduction::certificates)
+            .unwrap_or_default()
+    }
+
+    pub fn trust_tier(&self) -> TrustTier {
         if self.heuristic_reduction().is_some() {
-            SoundnessTier::Heuristic
-        } else if self.sound_reduction().is_some() {
-            SoundnessTier::SoundReduced
+            TrustTier::Heuristic
+        } else if self.certified_reduction().is_some() {
+            TrustTier::CertifiedReduction
+        } else if self.claimed_reduction().is_some() {
+            TrustTier::ClaimedReduction
         } else {
-            SoundnessTier::Exact
+            TrustTier::Exact
         }
     }
 
@@ -2362,7 +2468,7 @@ pub mod registry {
         collections::BTreeSet,
     };
 
-    use super::{FrontendSpec, ModelInstance, SoundReduction, VerifiedSymmetry};
+    use super::{ClaimedReduction, FrontendSpec, ModelInstance, ReductionClaim, SymmetryReduction};
     use nirvash::{
         BoolExpr, Fairness, Ltl, SpecVizRegistrationSet, StepExpr,
         registry::{
@@ -2644,7 +2750,7 @@ pub mod registry {
         }
     }
 
-    pub fn collect_symmetry_for<Spec, State>() -> Option<VerifiedSymmetry<State>>
+    pub fn collect_symmetry_for<Spec, State>() -> Option<SymmetryReduction<State>>
     where
         Spec: 'static,
         State: 'static,
@@ -2661,7 +2767,7 @@ pub mod registry {
             "multiple symmetry registrations for spec `{spec_name}` are not supported"
         );
         matched.into_iter().next().map(|(name, build)| {
-            downcast_registered::<VerifiedSymmetry<State>>(build(), spec_name, "symmetry", name)
+            downcast_registered::<SymmetryReduction<State>>(build(), spec_name, "symmetry", name)
         })
     }
 
@@ -2728,13 +2834,14 @@ pub mod registry {
                 }
             }
             if next_model_instance
-                .sound_reduction()
-                .and_then(SoundReduction::symmetry)
+                .claimed_reduction()
+                .and_then(ClaimedReduction::symmetry)
                 .is_none()
                 && let Some(symmetry) = &symmetry
             {
-                next_model_instance = next_model_instance
-                    .with_sound_reduction(SoundReduction::new().with_symmetry(symmetry.clone()));
+                next_model_instance = next_model_instance.with_claimed_reduction(
+                    ClaimedReduction::new().with_symmetry(ReductionClaim::new(symmetry.clone())),
+                );
             }
             *model_instance = next_model_instance;
         }
@@ -2801,13 +2908,13 @@ pub mod registry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionExpr, BoolExpr, Fairness, FairnessDecl, FiniteModelDomain, FrontendSpec,
-        HeuristicReduction, HeuristicStateProjection, IrStateExpr, LoweringCx, Ltl, ModelInstance,
-        ProofObligation, ProofObligationKind, SoundReduction, StepExpr, TemporalExpr, TemporalSpec,
-        TransitionProgram, TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst,
-        VerifiedStateQuotient, ViewExpr,
+        ActionExpr, BoolExpr, ClaimedReduction, Fairness, FairnessDecl, FiniteModelDomain,
+        FrontendSpec, HeuristicReduction, HeuristicStateProjection, IrStateExpr, LoweringCx, Ltl,
+        ModelInstance, ProofObligation, ProofObligationKind, ReductionClaim,
+        StateQuotientReduction, StepExpr, TemporalExpr, TemporalSpec, TransitionProgram,
+        TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst, ViewExpr,
     };
-    use nirvash::{GuardExpr, SoundnessTier};
+    use nirvash::{GuardExpr, TrustTier};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DemoState {
@@ -2982,14 +3089,15 @@ mod tests {
     #[test]
     fn model_instance_keeps_owned_reduction_metadata() {
         let model: ModelInstance<DemoState, DemoAction> = ModelInstance::new("demo")
-            .with_sound_reduction(
-                SoundReduction::new().with_quotient(
-                    VerifiedStateQuotient::new("busy_partition", |state: &DemoState| {
-                        format!("{state:?}")
-                    })
+            .with_claimed_reduction(
+                ClaimedReduction::new().with_quotient(
+                    ReductionClaim::new(StateQuotientReduction::new(
+                        "busy_partition",
+                        |state: &DemoState| format!("{state:?}"),
+                    ))
                     .with_obligation(ProofObligation::new(
                         "busy_partition_sound".to_owned(),
-                        ProofObligationKind::VerifiedStateQuotient,
+                        ProofObligationKind::StateQuotientReduction,
                         "THEOREM busy_partition_sound == QuotientSound".to_owned(),
                         "(assert QuotientSound)".to_owned(),
                     )),
@@ -3006,14 +3114,14 @@ mod tests {
                 .map(|projection| projection.name()),
             Some("phase")
         );
-        assert_eq!(model.soundness_tier(), SoundnessTier::Heuristic);
+        assert_eq!(model.trust_tier(), TrustTier::Heuristic);
         assert_eq!(
             model
                 .reduction_obligations()
                 .into_iter()
                 .map(|obligation| obligation.kind)
                 .collect::<Vec<_>>(),
-            vec![ProofObligationKind::VerifiedStateQuotient]
+            vec![ProofObligationKind::StateQuotientReduction]
         );
     }
 

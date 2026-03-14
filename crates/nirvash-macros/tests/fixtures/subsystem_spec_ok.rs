@@ -1,6 +1,6 @@
 use nirvash::{BoolExpr, StepExpr};
 use nirvash_lower::{FrontendSpec, ModelInstance};
-use nirvash_lower::VerifiedSymmetry;
+use nirvash_lower::{ReductionClaim, SymmetryReduction};
 use nirvash_macros::{
     FiniteModelDomain as FormalFiniteModelDomain, action_constraint, formal_tests, invariant, nirvash_expr,
     nirvash_step_expr, nirvash_transition_program, property, state_constraint, subsystem_spec,
@@ -75,8 +75,8 @@ fn allow_declared_edges() -> StepExpr<State, Action> {
 }
 
 #[symmetry(Spec)]
-fn identity_symmetry() -> VerifiedSymmetry<State> {
-    VerifiedSymmetry::new("identity", |state| *state)
+fn identity_symmetry() -> ReductionClaim<SymmetryReduction<State>> {
+    ReductionClaim::new(SymmetryReduction::new("identity", |state| *state))
 }
 
 fn spec_model_cases() -> Vec<ModelInstance<State, Action>> {

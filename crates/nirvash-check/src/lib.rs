@@ -162,15 +162,15 @@ mod tests {
         BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
         ExplicitDistributedOptions, ExplicitParallelOptions, ExplicitReachabilityStrategy,
         ExplicitSimulationOptions, ExplicitStateCompression, ExplicitStateStorage, ExplorationMode,
-        ExprDomain, GuardExpr, Ltl, SoundnessTier, StepExpr, SymbolicKInductionOptions,
-        SymbolicModelCheckOptions, SymbolicPdrOptions, SymbolicSafetyEngine,
-        SymbolicTemporalEngine, TraceStep, TransitionProgram, TransitionRule, UpdateOp,
-        UpdateProgram, UpdateValueExprAst,
+        ExprDomain, GuardExpr, Ltl, StepExpr, SymbolicKInductionOptions, SymbolicModelCheckOptions,
+        SymbolicPdrOptions, SymbolicSafetyEngine, SymbolicTemporalEngine, TraceStep,
+        TransitionProgram, TransitionRule, TrustTier, UpdateOp, UpdateProgram, UpdateValueExprAst,
     };
     use nirvash_lower::{
-        FrontendSpec, HeuristicActionPruning, HeuristicReduction, HeuristicStateProjection,
-        LoweringCx, ModelBackend, ModelCheckConfig, ModelInstance, ProofObligation,
-        ProofObligationKind, SoundReduction, TemporalSpec, VerifiedPor, VerifiedStateQuotient,
+        ClaimedReduction, FrontendSpec, HeuristicActionPruning, HeuristicReduction,
+        HeuristicStateProjection, LoweringCx, ModelBackend, ModelCheckConfig, ModelInstance,
+        PorReduction, ProofObligation, ProofObligationKind, ReductionClaim, StateQuotientReduction,
+        TemporalSpec,
     };
     use nirvash_macros::{
         FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_backend_accepts_structural_quantifiers() {
+    fn symbolic_backend_rejects_stringly_quantifiers_in_normalized_core() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
         let checker = TestChecker::with_config(
@@ -621,15 +621,22 @@ mod tests {
 
         let snapshot = checker
             .full_reachable_graph_snapshot()
-            .expect("symbolic reachable graph should encode structural quantifiers");
+            .expect_err("unsupported normalized fragments should fail closed");
         let invariants = checker
             .check_invariants()
-            .expect("symbolic invariant check should succeed");
+            .expect_err("symbolic invariant checks should reject the same fragment");
 
         assert_eq!(checker.backend(), ModelBackend::Symbolic);
-        assert!(!snapshot.truncated);
-        assert_eq!(snapshot.states.len(), 3);
-        assert!(invariants.is_ok());
+        assert!(matches!(
+            snapshot,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("stringly quantifiers")
+        ));
+        assert!(matches!(
+            invariants,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("stringly quantifiers")
+        ));
     }
 
     #[test]
@@ -688,10 +695,10 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_k_induction_proves_invariant_without_graph_exploration() {
+    fn symbolic_k_induction_fail_closes_on_unsupported_normalized_fragment() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let result = TestChecker::with_config(
+        let err = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -704,16 +711,20 @@ mod tests {
             },
         )
         .check_invariants()
-        .expect("k-induction should prove the invariant without graph exploration");
+        .expect_err("k-induction should fail closed on unsupported normalized fragments");
 
-        assert!(result.is_ok());
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("stringly quantifiers")
+        ));
     }
 
     #[test]
-    fn symbolic_pdr_proves_invariant_without_graph_exploration() {
+    fn symbolic_pdr_fail_closes_on_unsupported_normalized_fragment() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let result = TestChecker::with_config(
+        let err = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -726,9 +737,13 @@ mod tests {
             },
         )
         .check_invariants()
-        .expect("PDR should prove the invariant without graph exploration");
+        .expect_err("PDR should fail closed on unsupported normalized fragments");
 
-        assert!(result.is_ok());
+        assert!(matches!(
+            err,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("stringly quantifiers")
+        ));
     }
 
     #[test]
@@ -809,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_liveness_to_safety_matches_bounded_lasso() {
+    fn symbolic_temporal_checks_fail_close_on_unsupported_normalized_fragment() {
         let spec = SymbolicTemporalSpec;
         let lowered = lower_spec(&spec);
         let bounded_lasso = TestChecker::with_config(
@@ -824,7 +839,7 @@ mod tests {
             },
         )
         .check_properties()
-        .expect("bounded lasso should check symbolic temporal properties");
+        .expect_err("bounded lasso should fail closed on unsupported normalized fragments");
         let liveness_to_safety = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
@@ -837,10 +852,18 @@ mod tests {
             },
         )
         .check_properties()
-        .expect("liveness-to-safety should check the same symbolic temporal subset");
+        .expect_err("liveness-to-safety should fail closed on unsupported normalized fragments");
 
-        assert_eq!(bounded_lasso, liveness_to_safety);
-        assert!(!bounded_lasso.is_ok());
+        assert!(matches!(
+            bounded_lasso,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("stringly quantifiers")
+        ));
+        assert!(matches!(
+            liveness_to_safety,
+            nirvash::ModelCheckError::UnsupportedConfiguration(message)
+                if message.contains("stringly quantifiers")
+        ));
     }
 
     #[derive(
@@ -1332,14 +1355,14 @@ mod tests {
         .expect("view-abstracted snapshot");
 
         assert_eq!(exact.states.len(), 3);
-        assert_eq!(exact.soundness_tier, SoundnessTier::Exact);
+        assert_eq!(exact.trust_tier, TrustTier::Exact);
         assert_eq!(reduced.states.len(), 2);
         assert_eq!(reduced.initial_indices, vec![0]);
         assert_eq!(reduced.edges.len(), 2);
         assert_eq!(reduced.edges[0].len(), 1);
         assert_eq!(reduced.edges[0][0].action, SimulationAction::Finish);
         assert_eq!(reduced.edges[0][0].target, 1);
-        assert_eq!(reduced.soundness_tier, SoundnessTier::Heuristic);
+        assert_eq!(reduced.trust_tier, TrustTier::Heuristic);
     }
 
     #[test]
@@ -1381,21 +1404,22 @@ mod tests {
         assert_eq!(reduced.edges[0].len(), 1);
         assert_eq!(reduced.edges[0][0].action, CounterexampleAction::TakeShort);
         assert_eq!(reduced.edges[0][0].target, 1);
-        assert_eq!(reduced.soundness_tier, SoundnessTier::Heuristic);
+        assert_eq!(reduced.trust_tier, TrustTier::Heuristic);
     }
 
     #[test]
     fn explicit_sound_reduction_marks_snapshot_and_result_tier() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let model_case = ModelInstance::new("identity_quotient").with_sound_reduction(
-            SoundReduction::new().with_quotient(
-                VerifiedStateQuotient::new("identity_quotient", |state: &SimulationState| {
-                    format!("{state:?}")
-                })
+        let model_case = ModelInstance::new("identity_quotient").with_claimed_reduction(
+            ClaimedReduction::new().with_quotient(
+                ReductionClaim::new(StateQuotientReduction::new(
+                    "identity_quotient",
+                    |state: &SimulationState| format!("{state:?}"),
+                ))
                 .with_obligation(ProofObligation::new(
                     "identity_quotient_sound".to_owned(),
-                    ProofObligationKind::VerifiedStateQuotient,
+                    ProofObligationKind::StateQuotientReduction,
                     "THEOREM identity_quotient_sound == QuotientSound".to_owned(),
                     "(assert QuotientSound)".to_owned(),
                 )),
@@ -1409,8 +1433,8 @@ mod tests {
             .check_all()
             .expect("sound-reduced check");
 
-        assert_eq!(snapshot.soundness_tier, SoundnessTier::SoundReduced);
-        assert_eq!(result.soundness_tier(), SoundnessTier::SoundReduced);
+        assert_eq!(snapshot.trust_tier, TrustTier::ClaimedReduction);
+        assert_eq!(result.trust_tier(), TrustTier::ClaimedReduction);
     }
 
     #[test]
@@ -1501,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_backend_rejects_sound_reduction() {
+    fn symbolic_backend_rejects_claimed_reduction() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
         let err = TestChecker::for_case(
@@ -1512,17 +1536,17 @@ mod tests {
                     exploration: ExplorationMode::ReachableGraph,
                     ..ModelCheckConfig::default()
                 })
-                .with_sound_reduction(
-                    SoundReduction::new().with_por(
-                        VerifiedPor::new(
+                .with_claimed_reduction(
+                    ClaimedReduction::new().with_por(
+                        ReductionClaim::new(PorReduction::new(
                             "advance_only",
                             |_state: &QuantState, action: &QuantAction| {
                                 matches!(action, QuantAction::Advance)
                             },
-                        )
+                        ))
                         .with_obligation(ProofObligation::new(
                             "verified_por_sound".to_owned(),
-                            ProofObligationKind::VerifiedPor,
+                            ProofObligationKind::PorReduction,
                             "THEOREM verified_por_sound == PORSound".to_owned(),
                             "(assert PORSound)".to_owned(),
                         )),
@@ -1535,7 +1559,7 @@ mod tests {
         assert!(matches!(
             err,
             nirvash::ModelCheckError::UnsupportedConfiguration(message)
-                if message.contains("sound reductions")
+                if message.contains("claimed/certified reductions")
         ));
     }
 

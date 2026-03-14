@@ -15,13 +15,14 @@ pub enum ModelBackend {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-pub enum SoundnessTier {
+pub enum TrustTier {
     Exact,
-    SoundReduced,
+    CertifiedReduction,
+    ClaimedReduction,
     Heuristic,
 }
 
-impl SoundnessTier {
+impl TrustTier {
     pub fn join(self, other: Self) -> Self {
         if self >= other { self } else { other }
     }
@@ -504,33 +505,33 @@ pub struct Counterexample<S, A> {
     pub kind: CounterexampleKind,
     pub name: String,
     pub trace: Trace<S, A>,
-    pub soundness_tier: SoundnessTier,
+    pub trust_tier: TrustTier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCheckResult<S, A> {
     violations: Vec<Counterexample<S, A>>,
-    soundness_tier: SoundnessTier,
+    trust_tier: TrustTier,
 }
 
 impl<S, A> ModelCheckResult<S, A> {
     pub fn ok() -> Self {
         Self {
             violations: Vec::new(),
-            soundness_tier: SoundnessTier::Exact,
+            trust_tier: TrustTier::Exact,
         }
     }
 
-    pub fn with_tier(soundness_tier: SoundnessTier) -> Self {
+    pub fn with_tier(trust_tier: TrustTier) -> Self {
         Self {
             violations: Vec::new(),
-            soundness_tier,
+            trust_tier,
         }
     }
 
     pub fn with_violation(violation: Counterexample<S, A>) -> Self {
         Self {
-            soundness_tier: violation.soundness_tier,
+            trust_tier: violation.trust_tier,
             violations: vec![violation],
         }
     }
@@ -543,17 +544,17 @@ impl<S, A> ModelCheckResult<S, A> {
         &self.violations
     }
 
-    pub const fn soundness_tier(&self) -> SoundnessTier {
-        self.soundness_tier
+    pub const fn trust_tier(&self) -> TrustTier {
+        self.trust_tier
     }
 
     pub fn push(&mut self, violation: Counterexample<S, A>) {
-        self.soundness_tier = self.soundness_tier.join(violation.soundness_tier);
+        self.trust_tier = self.trust_tier.join(violation.trust_tier);
         self.violations.push(violation);
     }
 
     pub fn extend(&mut self, other: Self) {
-        self.soundness_tier = self.soundness_tier.join(other.soundness_tier);
+        self.trust_tier = self.trust_tier.join(other.trust_tier);
         self.violations.extend(other.violations);
     }
 }

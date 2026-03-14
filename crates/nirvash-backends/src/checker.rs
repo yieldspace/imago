@@ -94,7 +94,7 @@ impl ExplicitStateIndex {
     fn from_states<S>(
         storage: nirvash::ExplicitStateStorage,
         states: &ExplicitStateStore<S>,
-        quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+        quotient: Option<&nirvash_lower::StateQuotientReduction<S>>,
         projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
     ) -> Self
     where
@@ -111,7 +111,7 @@ impl ExplicitStateIndex {
         &self,
         states: &ExplicitStateStore<S>,
         state: &S,
-        quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+        quotient: Option<&nirvash_lower::StateQuotientReduction<S>>,
         projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
     ) -> Option<usize>
     where
@@ -136,7 +136,7 @@ impl ExplicitStateIndex {
         &mut self,
         states: &ExplicitStateStore<S>,
         state_index: usize,
-        quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+        quotient: Option<&nirvash_lower::StateQuotientReduction<S>>,
         projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
     ) where
         S: FiniteModelDomain + std::fmt::Debug,
@@ -162,7 +162,7 @@ fn fingerprint_hash<T: Hash>(value: &T) -> u64 {
 fn states_share_key<S: PartialEq>(
     lhs: &S,
     rhs: &S,
-    quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+    quotient: Option<&nirvash_lower::StateQuotientReduction<S>>,
     projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
 ) -> bool {
     match projected_state_key(lhs, quotient, projection) {
@@ -175,7 +175,7 @@ fn states_share_key<S: PartialEq>(
 
 fn fingerprint_state<S: std::fmt::Debug>(
     state: &S,
-    quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+    quotient: Option<&nirvash_lower::StateQuotientReduction<S>>,
     projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
 ) -> u64 {
     match projected_state_key(state, quotient, projection) {
@@ -186,7 +186,7 @@ fn fingerprint_state<S: std::fmt::Debug>(
 
 fn projected_state_key<S>(
     state: &S,
-    quotient: Option<&nirvash_lower::VerifiedStateQuotient<S>>,
+    quotient: Option<&nirvash_lower::StateQuotientReduction<S>>,
     projection: Option<nirvash_lower::HeuristicStateProjection<S>>,
 ) -> Option<String> {
     projection
@@ -558,7 +558,7 @@ where
                         kind: CounterexampleKind::Invariant,
                         name: predicate.name().to_owned(),
                         trace: self.trace_to_state(&graph, index),
-                        soundness_tier: self.model_case.soundness_tier(),
+                        trust_tier: self.model_case.trust_tier(),
                     }));
                 }
             }
@@ -577,7 +577,7 @@ where
                 kind: CounterexampleKind::Deadlock,
                 name: "deadlock".to_owned(),
                 trace: self.trace_to_state(&graph, *deadlock),
-                soundness_tier: self.model_case.soundness_tier(),
+                trust_tier: self.model_case.trust_tier(),
             }));
         }
 
@@ -605,7 +605,7 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
-                            soundness_tier: self.model_case.soundness_tier(),
+                            trust_tier: self.model_case.trust_tier(),
                         },
                     );
                 }
@@ -653,7 +653,7 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
-                            soundness_tier: self.model_case.soundness_tier(),
+                            trust_tier: self.model_case.trust_tier(),
                         },
                     );
                 }
@@ -1005,11 +1005,12 @@ where
         ) {
             if !self.model_case.state_constraints().is_empty()
                 || !self.model_case.action_constraints().is_empty()
-                || self.model_case.sound_reduction().is_some()
+                || self.model_case.claimed_reduction().is_some()
+                || self.model_case.certified_reduction().is_some()
                 || self.model_case.heuristic_reduction().is_some()
             {
                 return Err(ModelCheckError::UnsupportedConfiguration(
-                    "parallel frontier exploration does not support state/action constraints, sound reductions, or heuristic reductions",
+                    "parallel frontier exploration does not support state/action constraints, claimed/certified reductions, or heuristic reductions",
                 ));
             }
             return Ok(self.expand_frontier_parallel(
@@ -1274,22 +1275,37 @@ where
             .unwrap_or_else(|| state.clone())
     }
 
-    fn verified_symmetry(&self) -> Option<&nirvash_lower::VerifiedSymmetry<T::State>> {
+    fn verified_symmetry(&self) -> Option<&nirvash_lower::SymmetryReduction<T::State>> {
         self.model_case
-            .sound_reduction()
-            .and_then(|reduction| reduction.symmetry())
+            .certified_reduction()
+            .and_then(|reduction| reduction.symmetry().map(|certified| certified.value()))
+            .or_else(|| {
+                self.model_case
+                    .claimed_reduction()
+                    .and_then(|reduction| reduction.symmetry().map(|claim| claim.value()))
+            })
     }
 
-    fn verified_quotient(&self) -> Option<&nirvash_lower::VerifiedStateQuotient<T::State>> {
+    fn verified_quotient(&self) -> Option<&nirvash_lower::StateQuotientReduction<T::State>> {
         self.model_case
-            .sound_reduction()
-            .and_then(|reduction| reduction.quotient())
+            .certified_reduction()
+            .and_then(|reduction| reduction.quotient().map(|certified| certified.value()))
+            .or_else(|| {
+                self.model_case
+                    .claimed_reduction()
+                    .and_then(|reduction| reduction.quotient().map(|claim| claim.value()))
+            })
     }
 
-    fn verified_por(&self) -> Option<&nirvash_lower::VerifiedPor<T::State, T::Action>> {
+    fn verified_por(&self) -> Option<&nirvash_lower::PorReduction<T::State, T::Action>> {
         self.model_case
-            .sound_reduction()
-            .and_then(|reduction| reduction.por())
+            .certified_reduction()
+            .and_then(|reduction| reduction.por().map(|certified| certified.value()))
+            .or_else(|| {
+                self.model_case
+                    .claimed_reduction()
+                    .and_then(|reduction| reduction.por().map(|claim| claim.value()))
+            })
     }
 
     fn heuristic_state_projection(
@@ -1309,7 +1325,7 @@ where
     }
 
     fn empty_result(&self) -> ModelCheckResult<T::State, T::Action> {
-        ModelCheckResult::with_tier(self.model_case.soundness_tier())
+        ModelCheckResult::with_tier(self.model_case.trust_tier())
     }
 
     fn state_constraints_allow(&self, state: &T::State) -> bool {
@@ -1400,7 +1416,7 @@ where
             deadlocks: graph.deadlocks.clone(),
             truncated: graph.truncated,
             stutter_omitted: false,
-            soundness_tier: self.model_case.soundness_tier(),
+            trust_tier: self.model_case.trust_tier(),
         }
     }
 
@@ -1421,7 +1437,7 @@ where
                         kind: CounterexampleKind::Invariant,
                         name: predicate.name().to_owned(),
                         trace: self.terminal_trace(states.clone(), steps.clone()),
-                        soundness_tier: self.model_case.soundness_tier(),
+                        trust_tier: self.model_case.trust_tier(),
                     },
                 );
                 return;
@@ -1461,7 +1477,7 @@ where
                     kind: CounterexampleKind::Deadlock,
                     name: "deadlock".to_owned(),
                     trace: self.terminal_trace(states.clone(), steps.clone()),
-                    soundness_tier: self.model_case.soundness_tier(),
+                    trust_tier: self.model_case.trust_tier(),
                 },
             );
             return;

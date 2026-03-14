@@ -3,7 +3,7 @@
 //! `ProofBundleExporter` fail-closes on unsupported fragments and exports proof bundles
 //! from the normalized lowered spec core.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use nirvash_ir::{
     ActionExpr, BuiltinPredicateOp, ComparisonOp, CoreNormalizationError, FairnessDecl,
@@ -11,6 +11,9 @@ use nirvash_ir::{
     UpdateOpDecl, ValueExpr, ViewExpr,
 };
 pub use nirvash_ir::{ProofObligation, ProofObligationKind};
+use nirvash_lower::ModelInstance;
+pub use nirvash_lower::{ProofBackendId, ProofCertificate};
+use sha2::{Digest, Sha256};
 
 pub fn invariant_obligations(spec: &SpecCore) -> Vec<ProofObligation> {
     let invariant_names = invariant_names(spec);
@@ -94,6 +97,79 @@ impl ExportedArtifact {
 pub struct ProofBundle {
     pub obligations: Vec<ProofObligation>,
     pub exported_artifacts: Vec<ExportedArtifact>,
+    pub certificates: Vec<ProofCertificate>,
+}
+
+impl ProofBundle {
+    pub fn obligation_hash(&self) -> String {
+        hash_proof_obligations(&self.obligations)
+    }
+
+    pub fn artifact_hash(&self) -> String {
+        hash_exported_artifacts(&self.exported_artifacts)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofDischargeError {
+    UnsupportedBundle(String),
+    Rejected(String),
+}
+
+impl std::fmt::Display for ProofDischargeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedBundle(message) | Self::Rejected(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for ProofDischargeError {}
+
+pub trait ProofDischarger {
+    fn backend(&self) -> ProofBackendId;
+
+    fn discharge(&self, bundle: &ProofBundle) -> Result<ProofCertificate, ProofDischargeError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeProofDischarger {
+    backend: ProofBackendId,
+    artifact_path: Option<PathBuf>,
+}
+
+impl FakeProofDischarger {
+    pub fn new(backend: ProofBackendId) -> Self {
+        Self {
+            backend,
+            artifact_path: None,
+        }
+    }
+
+    pub fn with_artifact_path(mut self, artifact_path: impl Into<PathBuf>) -> Self {
+        self.artifact_path = Some(artifact_path.into());
+        self
+    }
+}
+
+impl ProofDischarger for FakeProofDischarger {
+    fn backend(&self) -> ProofBackendId {
+        self.backend.clone()
+    }
+
+    fn discharge(&self, bundle: &ProofBundle) -> Result<ProofCertificate, ProofDischargeError> {
+        if bundle.exported_artifacts.is_empty() || bundle.obligations.is_empty() {
+            return Err(ProofDischargeError::UnsupportedBundle(
+                "proof bundle must contain obligations and exported artifacts".to_owned(),
+            ));
+        }
+        Ok(ProofCertificate {
+            backend: self.backend(),
+            obligation_hash: bundle.obligation_hash(),
+            artifact_hash: bundle.artifact_hash(),
+            artifact_path: self.artifact_path.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -106,13 +182,35 @@ impl ProofBundleExporter {
         reduction_obligations: &[ProofObligation],
     ) -> Result<ProofBundle, ProofExportError> {
         let normalized = spec.normalize().map_err(ProofExportError::Normalization)?;
-        self.export_normalized(&normalized, reduction_obligations)
+        self.export_normalized_with_certificates(&normalized, reduction_obligations, &[])
     }
 
     pub fn export_normalized(
         &self,
         normalized: &NormalizedSpecCore,
         reduction_obligations: &[ProofObligation],
+    ) -> Result<ProofBundle, ProofExportError> {
+        self.export_normalized_with_certificates(normalized, reduction_obligations, &[])
+    }
+
+    pub fn export_model_instance<S, A>(
+        &self,
+        spec: &SpecCore,
+        model_case: &ModelInstance<S, A>,
+    ) -> Result<ProofBundle, ProofExportError> {
+        let normalized = spec.normalize().map_err(ProofExportError::Normalization)?;
+        self.export_normalized_with_certificates(
+            &normalized,
+            &model_case.reduction_obligations(),
+            &model_case.reduction_certificates(),
+        )
+    }
+
+    pub fn export_normalized_with_certificates(
+        &self,
+        normalized: &NormalizedSpecCore,
+        reduction_obligations: &[ProofObligation],
+        certificates: &[ProofCertificate],
     ) -> Result<ProofBundle, ProofExportError> {
         ensure_proof_fragment_supported(normalized)?;
         for obligation in reduction_obligations {
@@ -138,7 +236,40 @@ impl ProofBundleExporter {
         Ok(ProofBundle {
             obligations,
             exported_artifacts,
+            certificates: certificates.to_vec(),
         })
+    }
+}
+
+pub mod importer {
+    use super::{ProofBackendId, ProofBundle, ProofCertificate};
+    use std::path::PathBuf;
+
+    pub fn import_certificate(
+        backend: ProofBackendId,
+        bundle: &ProofBundle,
+        artifact_path: impl Into<PathBuf>,
+    ) -> ProofCertificate {
+        ProofCertificate {
+            backend,
+            obligation_hash: bundle.obligation_hash(),
+            artifact_hash: bundle.artifact_hash(),
+            artifact_path: Some(artifact_path.into()),
+        }
+    }
+
+    pub fn import_verus_certificate(
+        bundle: &ProofBundle,
+        artifact_path: impl Into<PathBuf>,
+    ) -> ProofCertificate {
+        import_certificate(ProofBackendId::Verus, bundle, artifact_path)
+    }
+
+    pub fn import_refined_rust_certificate(
+        bundle: &ProofBundle,
+        artifact_path: impl Into<PathBuf>,
+    ) -> ProofCertificate {
+        import_certificate(ProofBackendId::RefinedRust, bundle, artifact_path)
     }
 }
 
@@ -174,10 +305,38 @@ fn ensure_obligation_supported(obligation: &ProofObligation) -> Result<(), Proof
     match obligation.kind {
         ProofObligationKind::InitImpliesInvariant
         | ProofObligationKind::StepPreservesInvariant
-        | ProofObligationKind::VerifiedSymmetry
-        | ProofObligationKind::VerifiedStateQuotient
-        | ProofObligationKind::VerifiedPor => Ok(()),
+        | ProofObligationKind::SymmetryReduction
+        | ProofObligationKind::StateQuotientReduction
+        | ProofObligationKind::PorReduction => Ok(()),
     }
+}
+
+fn hash_proof_obligations(obligations: &[ProofObligation]) -> String {
+    let mut hasher = Sha256::new();
+    for obligation in obligations {
+        hasher.update(obligation.label.as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}", obligation.kind).as_bytes());
+        hasher.update([0]);
+        hasher.update(obligation.tla_theorem.as_bytes());
+        hasher.update([0]);
+        hasher.update(obligation.smtlib.as_bytes());
+        hasher.update([0xff]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_exported_artifacts(artifacts: &[ExportedArtifact]) -> String {
+    let mut hasher = Sha256::new();
+    for artifact in artifacts {
+        hasher.update(artifact.label.as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}", artifact.kind).as_bytes());
+        hasher.update([0]);
+        hasher.update(artifact.content.as_bytes());
+        hasher.update([0xff]);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn render_tla_module(spec: &SpecCore, extra_obligations: &[ProofObligation]) -> String {
@@ -1120,12 +1279,16 @@ fn render_unchanged_smt<'a>(env: &mut SmtEnv, vars: impl IntoIterator<Item = &'a
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportedArtifactKind, ProofBundleExporter, ProofExportError, ProofObligation,
-        ProofObligationKind, invariant_obligations,
+        ExportedArtifactKind, FakeProofDischarger, ProofBundleExporter, ProofDischarger,
+        ProofExportError, ProofObligation, ProofObligationKind, importer, invariant_obligations,
     };
     use nirvash_ir::{
         ActionExpr, ComparisonOp, FairnessDecl, SpecCore, StateExpr, TemporalExpr, ValueExpr,
         ViewExpr,
+    };
+    use nirvash_lower::{
+        ClaimedReduction, ModelInstance, ProofBackendId, ProofCertificate, ReductionClaim,
+        StateQuotientReduction,
     };
 
     #[test]
@@ -1197,7 +1360,7 @@ mod tests {
         };
         let reduction = vec![ProofObligation::new(
             "verified_por".to_owned(),
-            ProofObligationKind::VerifiedPor,
+            ProofObligationKind::PorReduction,
             "THEOREM verified_por == PORSound".to_owned(),
             "(assert PORSound)".to_owned(),
         )];
@@ -1219,8 +1382,117 @@ mod tests {
         );
         assert_eq!(
             bundle.obligations.last().map(|obligation| obligation.kind),
-            Some(ProofObligationKind::VerifiedPor)
+            Some(ProofObligationKind::PorReduction)
         );
+    }
+
+    #[test]
+    fn proof_bundle_exporter_carries_model_case_certificates() {
+        let spec = SpecCore {
+            init: StateExpr::True,
+            next: ActionExpr::Unchanged(vec!["vars".to_owned()]),
+            vars: vec![nirvash_ir::VarDecl {
+                name: "vars".to_owned(),
+            }],
+            defs: vec![nirvash_ir::Definition {
+                name: "frontend".to_owned(),
+                body: "DemoSpec".to_owned(),
+            }],
+            invariants: vec![StateExpr::Ref("TypeOk".to_owned())],
+            fairness: Vec::new(),
+            temporal_props: Vec::new(),
+        };
+        let certificate = ProofCertificate {
+            backend: ProofBackendId::Verus,
+            obligation_hash: "obligations".to_owned(),
+            artifact_hash: "artifacts".to_owned(),
+            artifact_path: Some("proofs/verus.json".into()),
+        };
+        let model_case: ModelInstance<u8, ()> = ModelInstance::new("demo")
+            .with_certified_reduction(nirvash_lower::CertifiedReduction::new().with_quotient(
+                nirvash_lower::Certified::new(
+                    StateQuotientReduction::new("identity", |_state: &u8| "same".to_owned()),
+                    certificate.clone(),
+                ),
+            ));
+
+        let bundle = ProofBundleExporter
+            .export_model_instance(&spec, &model_case)
+            .expect("certified model instance should export");
+
+        assert_eq!(bundle.certificates, vec![certificate]);
+    }
+
+    #[test]
+    fn fake_discharger_uses_bundle_hashes() {
+        let spec = SpecCore {
+            init: StateExpr::True,
+            next: ActionExpr::Unchanged(vec!["vars".to_owned()]),
+            vars: vec![nirvash_ir::VarDecl {
+                name: "vars".to_owned(),
+            }],
+            defs: vec![nirvash_ir::Definition {
+                name: "frontend".to_owned(),
+                body: "DemoSpec".to_owned(),
+            }],
+            invariants: vec![StateExpr::Ref("TypeOk".to_owned())],
+            fairness: Vec::new(),
+            temporal_props: Vec::new(),
+        };
+        let bundle = ProofBundleExporter
+            .export(&spec, &[])
+            .expect("supported invariant fragment should export");
+        let certificate = FakeProofDischarger::new(ProofBackendId::Tlaps)
+            .with_artifact_path("proofs/tlaps.tla")
+            .discharge(&bundle)
+            .expect("fake discharger should certify bundle");
+
+        assert_eq!(certificate.obligation_hash, bundle.obligation_hash());
+        assert_eq!(certificate.artifact_hash, bundle.artifact_hash());
+        assert_eq!(certificate.backend, ProofBackendId::Tlaps);
+    }
+
+    #[test]
+    fn importer_uses_stable_bundle_hashes() {
+        let spec = SpecCore {
+            init: StateExpr::True,
+            next: ActionExpr::Unchanged(vec!["vars".to_owned()]),
+            vars: vec![nirvash_ir::VarDecl {
+                name: "vars".to_owned(),
+            }],
+            defs: vec![nirvash_ir::Definition {
+                name: "frontend".to_owned(),
+                body: "DemoSpec".to_owned(),
+            }],
+            invariants: vec![StateExpr::Ref("TypeOk".to_owned())],
+            fairness: Vec::new(),
+            temporal_props: Vec::new(),
+        };
+        let claimed: ClaimedReduction<u8, ()> = ClaimedReduction::new().with_quotient(
+            ReductionClaim::new(StateQuotientReduction::new("identity", |_state: &u8| {
+                "same".to_owned()
+            }))
+            .with_obligation(ProofObligation::new(
+                "quotient_sound",
+                ProofObligationKind::StateQuotientReduction,
+                "THEOREM quotient_sound == QuotientSound",
+                "(assert QuotientSound)",
+            )),
+        );
+        let model_case: ModelInstance<u8, ()> =
+            ModelInstance::new("demo").with_claimed_reduction(claimed);
+        let bundle = ProofBundleExporter
+            .export_model_instance(&spec, &model_case)
+            .expect("claimed reduction should export");
+
+        let verus = importer::import_verus_certificate(&bundle, "proofs/verus.json");
+        let refined_rust =
+            importer::import_refined_rust_certificate(&bundle, "proofs/refined_rust.json");
+
+        assert_eq!(verus.obligation_hash, refined_rust.obligation_hash);
+        assert_eq!(verus.artifact_hash, refined_rust.artifact_hash);
+        assert_eq!(verus.backend, ProofBackendId::Verus);
+        assert_eq!(refined_rust.backend, ProofBackendId::RefinedRust);
     }
 
     #[test]

@@ -335,7 +335,7 @@ where
     }
 
     fn empty_result(&self) -> ModelCheckResult<T::State, T::Action> {
-        ModelCheckResult::with_tier(self.model_case.soundness_tier())
+        ModelCheckResult::with_tier(self.model_case.trust_tier())
     }
 
     fn build_bridge_reachable_graph(
@@ -347,9 +347,11 @@ where
         let schema = self.direct_state_schema()?;
         self.ensure_symbolic_schema_covers_program(&schema, &program)?;
         self.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
-        if self.model_case.sound_reduction().is_some() {
+        if self.model_case.claimed_reduction().is_some()
+            || self.model_case.certified_reduction().is_some()
+        {
             return Err(self.symbolic_ast_required_error(format!(
-                "symbolic reachable-graph backend does not support sound reductions for spec `{}`",
+                "symbolic reachable-graph backend does not support claimed/certified reductions for spec `{}`",
                 self.spec.frontend_name(),
             )));
         }
@@ -454,7 +456,7 @@ where
                     kind: CounterexampleKind::Invariant,
                     name: predicate.name().to_owned(),
                     trace,
-                    soundness_tier: self.model_case.soundness_tier(),
+                    trust_tier: self.model_case.trust_tier(),
                 }));
             }
         }
@@ -482,7 +484,7 @@ where
                     kind: CounterexampleKind::Invariant,
                     name: predicate.name().to_owned(),
                     trace,
-                    soundness_tier: self.model_case.soundness_tier(),
+                    trust_tier: self.model_case.trust_tier(),
                 }));
             }
             if self.invariant_is_kinductive(&schema, &program, &actions, &predicate, max_depth)? {
@@ -535,7 +537,7 @@ where
                             kind: CounterexampleKind::Invariant,
                             name: predicate.name().to_owned(),
                             trace: self.terminal_trace(states, steps),
-                            soundness_tier: self.model_case.soundness_tier(),
+                            trust_tier: self.model_case.trust_tier(),
                         }));
                     }
                 }
@@ -578,7 +580,7 @@ where
                         kind: CounterexampleKind::Invariant,
                         name: predicate.name().to_owned(),
                         trace: self.trace_to_state(&graph, index),
-                        soundness_tier: self.model_case.soundness_tier(),
+                        trust_tier: self.model_case.trust_tier(),
                     }));
                 }
             }
@@ -605,7 +607,7 @@ where
                 kind: CounterexampleKind::Deadlock,
                 name: "deadlock".to_owned(),
                 trace,
-                soundness_tier: self.model_case.soundness_tier(),
+                trust_tier: self.model_case.trust_tier(),
             }));
         }
 
@@ -623,7 +625,7 @@ where
                 kind: CounterexampleKind::Deadlock,
                 name: "deadlock".to_owned(),
                 trace: self.trace_to_state(&graph, *deadlock),
-                soundness_tier: self.model_case.soundness_tier(),
+                trust_tier: self.model_case.trust_tier(),
             }));
         }
 
@@ -654,7 +656,7 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
-                            soundness_tier: self.model_case.soundness_tier(),
+                            trust_tier: self.model_case.trust_tier(),
                         },
                     );
                 }
@@ -689,7 +691,7 @@ where
                         trace.states().to_vec(),
                         trace.steps()[..trace.len() - 1].to_vec(),
                     ),
-                    soundness_tier: self.model_case.soundness_tier(),
+                    trust_tier: self.model_case.trust_tier(),
                 },
             );
         }
@@ -717,7 +719,7 @@ where
                             kind: CounterexampleKind::Property,
                             name: description.clone(),
                             trace: trace.clone(),
-                            soundness_tier: self.model_case.soundness_tier(),
+                            trust_tier: self.model_case.trust_tier(),
                         },
                     );
                 }
@@ -819,7 +821,7 @@ where
             deadlocks: graph.deadlocks.clone(),
             truncated: graph.truncated,
             stutter_omitted: false,
-            soundness_tier: self.model_case.soundness_tier(),
+            trust_tier: self.model_case.trust_tier(),
         }
     }
 
@@ -2040,9 +2042,11 @@ where
                 self.spec.frontend_name(),
             )));
         }
-        if self.model_case.sound_reduction().is_some() {
+        if self.model_case.claimed_reduction().is_some()
+            || self.model_case.certified_reduction().is_some()
+        {
             return Err(self.symbolic_ast_required_error(format!(
-                "symbolic backend does not support sound reductions for model case `{}` in spec `{}`",
+                "symbolic backend does not support claimed/certified reductions for model case `{}` in spec `{}`",
                 self.model_case.label(),
                 self.spec.frontend_name(),
             )));
@@ -2056,8 +2060,13 @@ where
 
     fn canonicalize_state(&self, state: &T::State) -> T::State {
         self.model_case
-            .sound_reduction()
-            .and_then(|reduction| reduction.symmetry())
+            .certified_reduction()
+            .and_then(|reduction| reduction.symmetry().map(|certified| certified.value()))
+            .or_else(|| {
+                self.model_case
+                    .claimed_reduction()
+                    .and_then(|reduction| reduction.symmetry().map(|claim| claim.value()))
+            })
             .map(|symmetry| symmetry.canonicalize(state))
             .unwrap_or_else(|| state.clone())
     }

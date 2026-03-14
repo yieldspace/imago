@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 pub enum ProofObligationKind {
     InitImpliesInvariant,
     StepPreservesInvariant,
-    VerifiedSymmetry,
-    VerifiedStateQuotient,
-    VerifiedPor,
+    SymmetryReduction,
+    StateQuotientReduction,
+    PorReduction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

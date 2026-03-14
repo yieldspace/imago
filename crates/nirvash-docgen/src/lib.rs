@@ -3056,7 +3056,7 @@ mod tests {
             surface: None,
             projection: None,
             backend: nirvash::ModelBackend::Explicit,
-            soundness_tier: nirvash::SoundnessTier::Exact,
+            trust_tier: nirvash::TrustTier::Exact,
             graph: nirvash::DocGraphSnapshot {
                 states: vec![nirvash::DocGraphState {
                     summary: format!("{label}State"),
@@ -3622,7 +3622,7 @@ impl FrontendSpec for SystemSpec {
                 surface: None,
                 projection: None,
                 backend: nirvash::ModelBackend::Explicit,
-                soundness_tier: nirvash::SoundnessTier::Exact,
+                trust_tier: nirvash::TrustTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states: vec![
                         nirvash::DocGraphState {
@@ -3731,7 +3731,7 @@ impl FrontendSpec for SystemSpec {
                 surface: None,
                 projection: None,
                 backend: nirvash::ModelBackend::Explicit,
-                soundness_tier: nirvash::SoundnessTier::Exact,
+                trust_tier: nirvash::TrustTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states: vec![
                         nirvash::DocGraphState {
@@ -3855,7 +3855,7 @@ impl FrontendSpec for SystemSpec {
                 surface: None,
                 projection: None,
                 backend: nirvash::ModelBackend::Explicit,
-                soundness_tier: nirvash::SoundnessTier::Exact,
+                trust_tier: nirvash::TrustTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states: vec![
                         nirvash::DocGraphState {
@@ -3960,7 +3960,7 @@ impl FrontendSpec for SystemSpec {
                 surface: None,
                 projection: None,
                 backend: nirvash::ModelBackend::Explicit,
-                soundness_tier: nirvash::SoundnessTier::Exact,
+                trust_tier: nirvash::TrustTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
                     states,
                     edges,

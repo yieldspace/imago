@@ -2546,7 +2546,7 @@ impl RegistrationKind {
                 quote! { ::nirvash::StepExpr<<#spec as ::nirvash_lower::FrontendSpec>::State, <#spec as ::nirvash_lower::FrontendSpec>::Action> }
             }
             Self::Symmetry => {
-                quote! { ::nirvash_lower::VerifiedSymmetry<<#spec as ::nirvash_lower::FrontendSpec>::State> }
+                quote! { ::nirvash_lower::ReductionClaim<::nirvash_lower::SymmetryReduction<<#spec as ::nirvash_lower::FrontendSpec>::State>> }
             }
         }
     }
@@ -4566,12 +4566,12 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                         );
                         assert_eq!(
                             actual
-                                .sound_reduction()
-                                .and_then(|reduction| reduction.symmetry())
+                                .claimed_reduction()
+                                .and_then(|reduction| reduction.symmetry().map(|claim| claim.value()))
                                 .map(|symmetry| symmetry.name()),
                             expected
-                                .sound_reduction()
-                                .and_then(|reduction| reduction.symmetry())
+                                .claimed_reduction()
+                                .and_then(|reduction| reduction.symmetry().map(|claim| claim.value()))
                                 .map(|symmetry| symmetry.name())
                         );
                         assert_eq!(actual.effective_checker_config(), expected.effective_checker_config());
@@ -4699,7 +4699,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     surface: doc_surface,
                                     projection: doc_projection,
                                     backend,
-                                    soundness_tier: snapshot.soundness_tier,
+                                    trust_tier: snapshot.trust_tier,
                                     graph: ::nirvash::DocGraphSnapshot {
                                         states: states
                                             .into_iter()

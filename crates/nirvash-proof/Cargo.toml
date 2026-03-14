@@ -10,3 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 nirvash-ir = { workspace = true }
+nirvash-lower = { workspace = true }
+sha2 = { workspace = true }
