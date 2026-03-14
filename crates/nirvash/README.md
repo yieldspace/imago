@@ -3,10 +3,100 @@
 `nirvash` は `imago` workspace の formal frontend DSL です。  
 authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgram` を中心に保ちつつ、checker-facing な semantic core / lowering / conformance / proof export は sibling crate へ分離されました。
 
+## 現在のシステム全体像
+
+現在の `nirvash` system は、大きく分けると次の 3 層です。
+
+- authoring surface
+  - `nirvash` / `nirvash-foundation` / `nirvash-macros` で spec を Rust と DSL で記述する層
+- semantic core / lowering
+  - `nirvash-lower` が authored spec を `LoweredSpec` と `SpecCore` へ落とし込む層
+- execution surfaces
+  - `nirvash-check` / `nirvash-backends` / `nirvash-conformance` / `nirvash-proof` / `nirvash-docgen` が lower 後の spec を消費する層
+
+```mermaid
+flowchart TB
+    subgraph authoring["Authoring surface"]
+        spec["user spec<br/>FrontendSpec + TemporalSpec"]
+        nirvash_root["nirvash<br/>DSL / TransitionProgram / DocGraph"]
+        foundation["nirvash-foundation<br/>FiniteModelDomain / SymbolicEncoding"]
+        macros["nirvash-macros<br/>derive / registry / formal_tests / code_tests"]
+    end
+
+    subgraph lowering["Semantic core / lowering"]
+        lower["nirvash-lower<br/>lower() -> LoweredSpec"]
+        ir["nirvash-ir<br/>SpecCore / NormalizedSpecCore / ProofObligation"]
+    end
+
+    subgraph execution["Execution surfaces"]
+        check["nirvash-check<br/>ExplicitModelChecker / SymbolicModelChecker"]
+        backends["nirvash-backends<br/>explicit / symbolic engines"]
+        conformance["nirvash-conformance<br/>runtime replay / refinement"]
+        proof["nirvash-proof<br/>proof bundle export / discharge"]
+        docgen["nirvash-docgen<br/>rustdoc Mermaid generation"]
+    end
+
+    spec --> nirvash_root
+    spec --> foundation
+    spec --> macros
+    nirvash_root --> lower
+    foundation --> lower
+    macros --> lower
+    lower --> ir
+    lower --> check
+    check --> backends
+    lower --> conformance
+    lower --> proof
+    nirvash_root --> docgen
+    macros --> docgen
+```
+
+`nirvash` root crate は「spec を書く側」の入口で、`nirvash-lower` がその authored semantics を checker-facing な `LoweredSpec` へ変換します。
+その後、checker は `nirvash-check`、runtime との照合は `nirvash-conformance`、証明 artifact 生成は `nirvash-proof`、可視化は `nirvash-docgen` が担います。
+
+## 1 つの spec が通る経路
+
+`nirvash` の current path は「書く -> lower する -> 実行 surface を選ぶ」です。`LoweredSpec` が各 surface の共通境界になっています。
+
+```mermaid
+flowchart LR
+    authored["authored spec<br/>initial_states / actions / transition_program<br/>invariants / properties / fairness"]
+    lowered["LoweredSpec<br/>core + normalized_core()<br/>symbolic_artifacts + executable"]
+    model["ModelInstance / ModelCheckConfig<br/>backend / exploration / reduction"]
+    explicit["explicit path<br/>reachable graph / bounded lasso / simulate"]
+    symbolic["symbolic path<br/>BMC / K-Induction / PDR / temporal"]
+    replay["runtime replay path<br/>ObservedTrace / refinement witness"]
+    export["proof path<br/>obligations / bundle / certificate"]
+    docs["doc path<br/>DocGraph / SpecViz / Mermaid fragment"]
+
+    authored --> lowered
+    lowered --> model
+    model --> explicit
+    model --> symbolic
+    lowered --> replay
+    lowered --> export
+    authored --> docs
+```
+
+- authored spec の正本
+  - `FrontendSpec` / `TemporalSpec` 実装と `TransitionProgram`
+- checker-facing contract の正本
+  - `nirvash_lower::LoweredSpec`
+- symbolic / proof の意味論正本
+  - `LoweredSpec::normalized_core()`
+- runtime refinement の正本
+  - `nirvash-conformance` の `ObservedTrace`, `TraceRefinementMap`, `step_refines_relation`
+- docs 可視化の正本
+  - `DocGraph` / `SpecViz` provider 登録と `nirvash-docgen`
+
 ## Crate split
 
 - `nirvash`
   - DSL / transition frontend / doc graph shared type
+- `nirvash-foundation`
+  - `FiniteModelDomain` / `SymbolicEncoding` / symbolic state schema の基底 trait と helper
+- `nirvash-macros`
+  - derive / registry / `formal_tests` / `code_tests` / subsystem registration
 - `nirvash-ir`
   - backend 非依存の `SpecCore`, `StateExpr`, `ActionExpr`, `TemporalExpr`, `FairnessDecl`
 - `nirvash-lower`
@@ -19,6 +109,8 @@ authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgra
   - witness / runtime binding / refinement assert / `proptest` / `loom` / `kani` adapter
 - `nirvash-proof`
   - `ProofBundleExporter` / `ProofDischarger` / certificate importer
+- `nirvash-docgen`
+  - rustdoc 向けの Mermaid fragment / doc graph / spec viz 生成
 
 通常の runtime crate は引き続き `nirvash` を起点に authoring できますが、checker / conformance / proof 側は `nirvash-lower` / `nirvash-conformance` / `nirvash-proof` を明示的に参照します。`LoweredSpec` は `core` に加えて `normalized_core()` を公開し、symbolic backend と proof export はこの正規化済み core を意味論の正本として参照します。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
