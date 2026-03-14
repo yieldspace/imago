@@ -1,0 +1,13 @@
+error[E0432]: unresolved imports `nirvash_macros::code_witness_test_main`, `nirvash_macros::code_witness_tests`, `nirvash_macros::contract_case`, `nirvash_macros::nirvash_projection_contract`, `nirvash_macros::nirvash_runtime_contract`
+ --> tests/fixtures/removed_surface_names.rs:2:5
+  |
+2 |     code_witness_test_main, code_witness_tests, contract_case, nirvash_projection_contract,
+  |     ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |                       |                   |              |
+  |     |                       |                   |              no `nirvash_projection_contract` in the root
+  |     |                       |                   |              help: a similar name exists in the module: `nirvash_projection_model`
+  |     |                       |                   no `contract_case` in the root
+  |     |                       no `code_witness_tests` in the root
+  |     no `code_witness_test_main` in the root
+3 |     nirvash_runtime_contract,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^ no `nirvash_runtime_contract` in the root

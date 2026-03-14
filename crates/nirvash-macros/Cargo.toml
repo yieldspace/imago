@@ -8,15 +8,9 @@ publish.workspace = true
 [lib]
 proc-macro = true
 
-[[test]]
-name = "code_witness_history_names"
-path = "tests/code_witness_history_names.rs"
-harness = false
-
-[[test]]
-name = "code_witness_nondeterministic_paths"
-path = "tests/code_witness_nondeterministic_paths.rs"
-harness = false
+[features]
+default = []
+loom = []
 
 [dependencies]
 proc-macro2 = { workspace = true }
@@ -28,6 +22,9 @@ nirvash-conformance = { workspace = true }
 nirvash = { workspace = true }
 nirvash-check = { workspace = true }
 nirvash-lower = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 trybuild = { workspace = true }

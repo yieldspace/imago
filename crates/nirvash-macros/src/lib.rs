@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro::TokenStream;
@@ -12,6 +14,8 @@ use syn::{
     ItemFn, ItemImpl, Lit, LitStr, Member, Pat, Path, PathArguments, RangeLimits, Stmt, Token,
     Type, UnOp, parse_macro_input,
 };
+
+mod codegen;
 
 #[proc_macro_derive(
     FiniteModelDomain,
@@ -110,42 +114,43 @@ pub fn formal_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 #[proc_macro_attribute]
 pub fn code_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as CodeTestArgs);
-    let _item = parse_macro_input!(item as ItemConst);
-    match expand_code_tests(args) {
+    match codegen::expand_code_tests(attr, item) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
 #[proc_macro_attribute]
-pub fn code_witness_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as CodeTestArgs);
-    let _item = parse_macro_input!(item as ItemConst);
-    match expand_code_witness_tests(args) {
+pub fn nirvash_binding(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match codegen::expand_binding(attr, item) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
 #[proc_macro_attribute]
-pub fn nirvash_runtime_contract(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as RuntimeContractArgs);
-    let item = parse_macro_input!(item as ItemImpl);
-    match expand_runtime_contract(args, item) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+pub fn nirvash(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 #[proc_macro_attribute]
-pub fn nirvash_projection_contract(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as ProjectionContractArgs);
-    let item = parse_macro_input!(item as ItemImpl);
-    match expand_projection_contract(args, item) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+pub fn nirvash_fixture(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn nirvash_project(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn nirvash_project_output(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn nirvash_trace(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 #[proc_macro]
@@ -184,24 +189,12 @@ pub fn nirvash_transition_program(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_attribute]
-pub fn contract_case(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
 #[proc_macro]
-pub fn code_witness_test_main(input: TokenStream) -> TokenStream {
-    let _ = parse_macro_input!(input as syn::parse::Nothing);
-    quote! {
-        #[doc(hidden)]
-        pub fn __nirvash_code_witness_main_marker() {}
-
-        fn main() {
-            let _ = __nirvash_code_witness_main_marker as fn();
-            ::nirvash_conformance::run_registered_code_witness_tests();
-        }
+pub fn import_generated_tests(input: TokenStream) -> TokenStream {
+    match codegen::expand_import_generated_tests(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
     }
-    .into()
 }
 
 #[proc_macro_attribute]
@@ -2804,6 +2797,24 @@ fn expand_finite_model_domain_tokens(input: DeriveInput) -> syn::Result<proc_mac
     let supported_data = ensure_supported_signature_data(&ident, &input.data)?;
     let action_doc_registration =
         signature_action_doc_registration(&ident, &input.data, &generics)?;
+    let finite_domain_seed_registration = if generics.params.is_empty() {
+        quote! {
+            ::nirvash::inventory::submit! {
+                ::nirvash::registry::RegisteredFiniteDomainSeed {
+                    value_type_id: ::std::any::TypeId::of::<#ident #ty_generics>,
+                    values: || {
+                        <#ident #ty_generics as ::nirvash_lower::FiniteModelDomain>::finite_domain()
+                            .into_vec()
+                            .into_iter()
+                            .map(|value| Box::new(value) as Box<dyn ::std::any::Any>)
+                            .collect()
+                    },
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     if args.custom
         && (args.range.is_some()
@@ -2860,6 +2871,7 @@ fn expand_finite_model_domain_tokens(input: DeriveInput) -> syn::Result<proc_mac
             }
         }
 
+        #finite_domain_seed_registration
         #action_doc_registration
     })
 }

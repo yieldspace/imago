@@ -52,6 +52,231 @@ type MaybeBlockedPath<T> = Option<(Vec<Vec<usize>>, Vec<TraceStep<<T as CheckerS
 
 const AUTO_DIRECT_SMT_DEPTH_CAP: usize = 4;
 
+pub mod trace_constraints {
+    use z3::{Solver, ast::Int};
+
+    use nirvash_lower::{
+        CheckerSpec, ModelCheckError, ModelInstance, ReachableGraphSnapshot, Trace, TraceStep,
+    };
+
+    pub use crate::planning::{SymbolicTraceConstraint, build_symbolic_trace_constraint as build};
+
+    pub fn matching_candidates_for_case<T>(
+        spec: &T,
+        model_case: ModelInstance<T::State, T::Action>,
+        state_hints: &[Option<&T::State>],
+        steps: &[TraceStep<T::Action>],
+    ) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError>
+    where
+        T: CheckerSpec,
+        T::State: Clone + PartialEq + 'static,
+        T::Action: Clone + PartialEq + 'static,
+    {
+        super::SymbolicModelChecker::for_case(spec, model_case)
+            .constrained_candidates(state_hints, steps)
+    }
+
+    pub fn matching_candidates<S, A>(
+        snapshot: &ReachableGraphSnapshot<S, A>,
+        initial: Option<&S>,
+        steps: &[TraceStep<A>],
+    ) -> Vec<Trace<S, A>>
+    where
+        S: Clone + PartialEq,
+        A: Clone + PartialEq,
+    {
+        let mut traces = Vec::new();
+        for &initial_index in &snapshot.initial_indices {
+            if initial
+                .as_ref()
+                .is_some_and(|expected| snapshot.states[initial_index] != **expected)
+            {
+                continue;
+            }
+
+            let mut states = vec![snapshot.states[initial_index].clone()];
+            let mut trace_steps = Vec::new();
+            collect_matching_candidates(
+                snapshot,
+                initial_index,
+                steps,
+                0,
+                &mut states,
+                &mut trace_steps,
+                &mut traces,
+            );
+        }
+        traces
+    }
+
+    fn collect_matching_candidates<S, A>(
+        snapshot: &ReachableGraphSnapshot<S, A>,
+        state_index: usize,
+        expected_steps: &[TraceStep<A>],
+        depth: usize,
+        states: &mut Vec<S>,
+        steps: &mut Vec<TraceStep<A>>,
+        traces: &mut Vec<Trace<S, A>>,
+    ) where
+        S: Clone + PartialEq,
+        A: Clone + PartialEq,
+    {
+        if depth == expected_steps.len() {
+            let mut completed_steps = steps.clone();
+            completed_steps.push(TraceStep::Stutter);
+            traces.push(Trace::new(
+                states.clone(),
+                completed_steps,
+                states.len().saturating_sub(1),
+            ));
+            return;
+        }
+        let Some(expected_step) = expected_steps.get(depth) else {
+            return;
+        };
+        for edge in &snapshot.edges[state_index] {
+            if &TraceStep::Action(edge.action.clone()) != expected_step {
+                continue;
+            }
+            states.push(snapshot.states[edge.target].clone());
+            steps.push(TraceStep::Action(edge.action.clone()));
+            collect_matching_candidates(
+                snapshot,
+                edge.target,
+                expected_steps,
+                depth + 1,
+                states,
+                steps,
+                traces,
+            );
+            steps.pop();
+            states.pop();
+        }
+    }
+
+    pub(super) fn constrained_candidates<T>(
+        checker: &super::SymbolicModelChecker<'_, T>,
+        state_hints: &[Option<&T::State>],
+        steps: &[TraceStep<T::Action>],
+    ) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError>
+    where
+        T: CheckerSpec,
+        T::State: Clone + PartialEq + 'static,
+        T::Action: Clone + PartialEq + 'static,
+    {
+        if state_hints.len() != steps.len() + 1 {
+            return Err(ModelCheckError::UnsupportedConfiguration(
+                "trace constraints require one more state hint than observed steps",
+            ));
+        }
+
+        checker.ensure_no_explicit_only_reducers()?;
+        checker.ensure_symbolic_constraints_ast_native()?;
+        checker.ensure_symbolic_stutter_is_identity()?;
+        let program = checker.direct_transition_program()?;
+        let schema = checker.direct_state_schema()?;
+        checker.ensure_symbolic_schema_covers_program(&schema, &program)?;
+        checker.ensure_symbolic_schema_covers_model_case_constraints(&schema)?;
+        let actions = checker.action_domain();
+        let vars = super::LassoVars::new("trace_constraint", steps.len() + 1, &schema);
+        let solver = Solver::new();
+
+        vars.assert_domains(&solver, &schema, checker.step_domain_size());
+        match state_hints.first().and_then(|state| *state) {
+            Some(initial) => vars.states[0].fix_to_state(&solver, &schema, initial),
+            None => solver.assert(checker.encode_initial_state_formula(&schema, &vars.states[0])?),
+        }
+
+        for (index, hint) in state_hints.iter().enumerate() {
+            if index > 0 {
+                if let Some(state) = hint {
+                    vars.states[index].fix_to_state(&solver, &schema, state);
+                }
+            }
+            checker.assert_state_constraints(&solver, &schema, &vars.states[index]);
+        }
+
+        for (index, expected_step) in steps.iter().enumerate() {
+            match expected_step {
+                TraceStep::Action(action) => {
+                    let Some(action_index) =
+                        actions.iter().position(|candidate| candidate == action)
+                    else {
+                        return Err(ModelCheckError::UnsupportedConfiguration(
+                            "trace constraints require observed actions to belong to the model action domain",
+                        ));
+                    };
+                    solver.assert(vars.steps[index].eq(Int::from_u64((action_index + 1) as u64)));
+                }
+                TraceStep::Stutter => {
+                    solver.assert(vars.steps[index].eq(Int::from_u64(0)));
+                }
+            }
+            solver.assert(checker.encode_transition_formula(
+                &schema,
+                &vars.states[index],
+                &vars.steps[index],
+                &vars.states[index + 1],
+                &program,
+                &actions,
+            ));
+            solver.assert(checker.encode_action_constraints_formula(
+                &schema,
+                &vars.states[index],
+                &vars.steps[index],
+                &vars.states[index + 1],
+                &actions,
+            ));
+        }
+
+        let last = steps.len();
+        let mut loop_cases = vec![super::bool_and(&[
+            vars.terminal.eq(Int::from_u64(1)),
+            vars.loop_start.eq(Int::from_u64(last as u64)),
+            vars.steps[last].eq(Int::from_u64(0)),
+        ])];
+
+        for target in 0..=last {
+            loop_cases.push(super::bool_and(&[
+                vars.terminal.eq(Int::from_u64(0)),
+                vars.loop_start.eq(Int::from_u64(target as u64)),
+                checker.encode_transition_formula(
+                    &schema,
+                    &vars.states[last],
+                    &vars.steps[last],
+                    &vars.states[target],
+                    &program,
+                    &actions,
+                ),
+                checker.encode_action_constraints_formula(
+                    &schema,
+                    &vars.states[last],
+                    &vars.steps[last],
+                    &vars.states[target],
+                    &actions,
+                ),
+            ]));
+        }
+        solver.assert(super::bool_or(&loop_cases));
+
+        let mut traces = Vec::new();
+        while super::solver_is_sat(&solver) {
+            let Some(model) = solver.get_model() else {
+                break;
+            };
+            let Some(trace) = vars.decode(&model, &schema, &actions) else {
+                break;
+            };
+            if !traces.contains(&trace) {
+                traces.push(trace);
+            }
+            super::block_current_model(&solver, &model, &vars.all_values());
+        }
+
+        Ok(traces)
+    }
+}
+
 impl<S, A> ReachableGraph<S, A> {
     fn state_index(&self, state: &S) -> Option<usize>
     where
@@ -259,6 +484,14 @@ where
         let graph = self.build_bridge_reachable_graph(self.config.clone())?;
         self.ensure_untruncated(&graph)?;
         Ok(self.snapshot_from_graph(&graph))
+    }
+
+    fn constrained_candidates(
+        &self,
+        state_hints: &[Option<&T::State>],
+        steps: &[TraceStep<T::Action>],
+    ) -> Result<Vec<Trace<T::State, T::Action>>, ModelCheckError> {
+        trace_constraints::constrained_candidates(self, state_hints, steps)
     }
 
     pub fn check_invariants(

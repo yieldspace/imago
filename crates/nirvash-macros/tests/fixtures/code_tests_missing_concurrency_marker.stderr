@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `Binding: ConcurrentBinding<Spec>` is not satisfied
+   --> tests/fixtures/code_tests_missing_concurrency_marker.rs:106:69
+    |
+106 |     let _ = nirvash_conformance::require_concurrent_binding::<Spec, Binding>;
+    |                                                                     ^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `ConcurrentBinding<Spec>` is not implemented for `Binding`
+   --> tests/fixtures/code_tests_missing_concurrency_marker.rs:85:1
+    |
+ 85 | struct Binding;
+    | ^^^^^^^^^^^^^^
+note: required by a bound in `require_concurrent_binding`
+   --> $WORKSPACE/crates/nirvash-conformance/src/lib.rs
+    |
+    | pub fn require_concurrent_binding<Spec, Binding>()
+    |        -------------------------- required by a bound in this function
+...
+    |     Binding: GeneratedBinding<Spec> + ConcurrentBinding<Spec>,
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `require_concurrent_binding`

@@ -57,6 +57,11 @@ pub struct RegisteredActionDocPresentation {
     pub format: fn(&dyn Any) -> Option<crate::DocGraphActionPresentation>,
 }
 
+pub struct RegisteredFiniteDomainSeed {
+    pub value_type_id: fn() -> TypeId,
+    pub values: fn() -> Vec<Box<dyn Any>>,
+}
+
 pub struct RegisteredSymbolicPureHelper {
     pub key: &'static str,
 }
@@ -74,6 +79,7 @@ inventory::collect!(RegisteredActionConstraint);
 inventory::collect!(RegisteredSymmetry);
 inventory::collect!(RegisteredActionDocLabel);
 inventory::collect!(RegisteredActionDocPresentation);
+inventory::collect!(RegisteredFiniteDomainSeed);
 inventory::collect!(RegisteredSymbolicPureHelper);
 inventory::collect!(RegisteredSymbolicEffect);
 
@@ -95,6 +101,19 @@ pub fn lookup_action_doc_presentation(
         .filter(|entry| (entry.value_type_id)() == value_type_id)
         .find_map(|entry| (entry.format)(value))
         .filter(|presentation| !presentation.label.trim().is_empty())
+}
+
+pub fn lookup_finite_domain_seed_values<T>() -> Vec<T>
+where
+    T: 'static,
+{
+    let value_type_id = TypeId::of::<T>();
+    inventory::iter::<RegisteredFiniteDomainSeed>
+        .into_iter()
+        .filter(|entry| (entry.value_type_id)() == value_type_id)
+        .flat_map(|entry| (entry.values)().into_iter())
+        .filter_map(|value| value.downcast::<T>().ok().map(|boxed| *boxed))
+        .collect()
 }
 
 pub fn has_registered_symbolic_pure_helper(key: &str) -> bool {

@@ -44,6 +44,7 @@ pub use nirvash_foundation::{
     lookup_symbolic_state_schema, normalize_symbolic_state_path, symbolic_leaf_field,
     symbolic_leaf_index, symbolic_leaf_value, symbolic_seed_value, symbolic_state_fields,
 };
+pub use nirvash_macros::import_generated_tests;
 pub use predicate::{
     BoolExpr, BoolExprAst, BuiltinPredicateOp, ComparisonOp, ErasedGuardValueExprAst,
     ErasedStateExprAst, ErasedStepValueExprAst, GuardAst, GuardExpr, GuardValueExpr,
@@ -51,7 +52,10 @@ pub use predicate::{
     SymbolicRegistration, TransitionProgram, TransitionProgramError, TransitionRule,
     TransitionSuccessor, UpdateAst, UpdateChoice, UpdateOp, UpdateProgram, UpdateValueExprAst,
 };
-pub use registry::{RegisteredActionDocLabel, RegisteredActionDocPresentation};
+pub use registry::{
+    RegisteredActionDocLabel, RegisteredActionDocPresentation, RegisteredFiniteDomainSeed,
+    lookup_finite_domain_seed_values,
+};
 pub use relation::{
     RegisteredRelationalState, RelAtom, RelSet, Relation2, RelationError, RelationField,
     RelationFieldKind, RelationFieldSchema, RelationFieldSummary, RelationalState,

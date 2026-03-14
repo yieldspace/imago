@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+loom = ["dep:loom"]
+shuttle = ["dep:shuttle"]
+
 [lib]
 path = "src/lib.rs"
 
@@ -13,9 +18,15 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [dependencies]
 nirvash = { workspace = true }
+nirvash-backends = { workspace = true }
 nirvash-check = { workspace = true }
 nirvash-lower = { workspace = true }
+nirvash-proof = { workspace = true }
+proptest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+loom = { workspace = true, optional = true }
+shuttle = { workspace = true, optional = true }
 
 [dev-dependencies]
-loom = { workspace = true }
-proptest = { workspace = true }
+tempfile = { workspace = true }

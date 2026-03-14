@@ -1,0 +1,5 @@
+error: code_tests no longer accepts legacy `spec`/`binding` arguments; attach #[code_tests] to the spec item and configure runtime bindings with #[nirvash_binding(spec = ...)]
+ --> tests/fixtures/code_tests_legacy_args.rs:3:14
+  |
+3 | #[code_tests(spec = Spec, binding = Binding)]
+  |              ^^^^

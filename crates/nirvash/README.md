@@ -20,7 +20,7 @@ flowchart TB
         spec["user spec<br/>FrontendSpec + TemporalSpec"]
         nirvash_root["nirvash<br/>DSL / TransitionProgram / DocGraph"]
         foundation["nirvash-foundation<br/>FiniteModelDomain / SymbolicEncoding"]
-        macros["nirvash-macros<br/>derive / registry / formal_tests / code_tests"]
+        macros["nirvash-macros<br/>derive / registry / formal_tests / code_tests / nirvash_binding"]
     end
 
     subgraph lowering["Semantic core / lowering"]
@@ -96,7 +96,7 @@ flowchart LR
 - `nirvash-foundation`
   - `FiniteModelDomain` / `SymbolicEncoding` / symbolic state schema の基底 trait と helper
 - `nirvash-macros`
-  - derive / registry / `formal_tests` / `code_tests` / subsystem registration
+  - derive / registry / `formal_tests` / import-first `code_tests` / `nirvash_binding` / subsystem registration
 - `nirvash-ir`
   - backend 非依存の `SpecCore`, `StateExpr`, `ActionExpr`, `TemporalExpr`, `FairnessDecl`
 - `nirvash-lower`
@@ -106,11 +106,13 @@ flowchart LR
 - `nirvash-backends`
   - explicit / symbolic backend 実装（`LoweredSpec` を受ける）
 - `nirvash-conformance`
-  - witness / runtime binding / refinement assert / `proptest` / `loom` / `kani` adapter
+  - `SpecOracle` / runtime binding / generated harness plan / replay artifact / `proptest` / `loom` / `kani` adapter
 - `nirvash-proof`
   - `ProofBundleExporter` / `ProofDischarger` / certificate importer
 - `nirvash-docgen`
   - rustdoc 向けの Mermaid fragment / doc graph / spec viz 生成
+- `cargo-nirvash`
+  - `target/nirvash/{manifest,replay}` と `tests/generated/*_{replay,kani}.rs` を扱う CLI (`list-tests` / `materialize-tests` / `replay`)
 
 通常の runtime crate は引き続き `nirvash` を起点に authoring できますが、checker / conformance / proof 側は `nirvash-lower` / `nirvash-conformance` / `nirvash-proof` を明示的に参照します。`LoweredSpec` は `core` に加えて `normalized_core()` を公開し、symbolic backend と proof export はこの正規化済み core を意味論の正本として参照します。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
@@ -157,8 +159,29 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
 - `FrontendSpec` / `LoweredSpec`: backend へ渡る lowering boundary
 - `TemporalSpec`: property / core fairness provider
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
-- `ActionApplier` / `StateObserver`: runtime conformance capability (`nirvash-conformance`)
+- `SpecOracle` / `RuntimeBinding` / `TraceBinding` / `ConcurrentBinding`: runtime conformance contract (`nirvash-conformance`)
 - `pred!` / `step!` / `ltl!` と registry macro
+
+## Generated Code Tests
+
+新しい code test surface は spec item と binding impl を分けて宣言します。
+
+- spec 側
+  - `#[code_tests]` を `struct Spec;` / `enum Spec` / `type Spec = ...;` に付ける
+  - spec 自体は `FrontendSpec + TemporalSpec + SpecOracle` を実装する
+- runtime 側
+  - `#[nirvash_binding(spec = Spec)]` を `impl Binding { ... }` に付ける
+  - method 単位で `#[nirvash(create)]`, `#[nirvash(action = ...)]`, `#[nirvash_fixture]`, `#[nirvash_project]`, `#[nirvash_project_output]`, `#[nirvash_trace]` を使う
+- canonical installer
+  - `nirvash::import_generated_tests! { spec = Spec, binding = Binding }` を使う
+  - profile を絞るときは `nirvash::import_generated_tests! { spec = Spec, binding = Binding, profiles = [generated::profiles::unit_default().with_seeds(generated::seeds::boundary().with_strategy::<u64, _>(proptest::sample::select(vec![0, 1, 255, 256])).with_initial_state(State::Idle))] }`
+  - reusable な typed seed は `nirvash_conformance::register_seed_strategy::<T, _, _>(|| strategy)` で登録でき、`FiniteModelDomain -> BoundaryCatalog -> registered Strategy -> deterministic Arbitrary -> Default -> singleton fallback` の順で自動 seed に取り込まれる
+  - 手早い override は `small_keys(["a", "b"])`, `boundary_numbers::<u64>()`, `smoke_fixture(MyRuntime::default())` を `with(...)` に渡せる
+- generated module
+  - `generated::{prelude, metadata, seeds, profiles, plans, install, replay, bindings}` が生える
+  - `generated::install::{all_tests!, tests!, unit_tests!, trace_tests!, kani_harnesses!, loom_tests!}` は low-level API として残る。spec が nested module 配下にある場合の canonical path は `nirvash::import_generated_tests!` で、crate root から low-level installer を直接使うなら `generated` を re-export してから呼ぶ
+
+runtime artifact は `target/nirvash/{manifest,replay}` に保存され、materialized replay / Kani harness は `tests/generated/*_replay.rs` と `tests/generated/*_kani.rs` に出力されます。`cargo nirvash list-tests`, `cargo nirvash materialize-tests`, `cargo nirvash replay` で扱えます。
 
 ## Minimal Example
 

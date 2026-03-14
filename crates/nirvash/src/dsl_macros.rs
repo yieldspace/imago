@@ -212,6 +212,19 @@ macro_rules! finite_model_domain_spec {
                 )?
             }
         }
+
+        $crate::inventory::submit! {
+            $crate::registry::RegisteredFiniteDomainSeed {
+                value_type_id: ::std::any::TypeId::of::<$ty>,
+                values: || {
+                    <$ty as $crate::FiniteModelDomain>::finite_domain()
+                        .into_vec()
+                        .into_iter()
+                        .map(|value| Box::new(value) as Box<dyn ::std::any::Any>)
+                        .collect()
+                },
+            }
+        }
     };
 }
 

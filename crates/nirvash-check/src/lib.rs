@@ -1,8 +1,11 @@
+mod planner;
+
 pub use nirvash_lower::{
     CheckerSpec, Counterexample, CounterexampleKind, ExplorationMode, FiniteModelDomain,
     LoweredSpec, ModelBackend, ModelCheckConfig, ModelCheckError, ModelCheckResult, ModelInstance,
     ReachableGraphSnapshot, Trace,
 };
+pub use planner::*;
 
 type TraceVec<T> = Vec<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 

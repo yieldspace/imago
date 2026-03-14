@@ -828,6 +828,513 @@ pub struct LoweredSpec<'a, S, A> {
     executable: ExecutableSemantics<'a, S, A>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedTestCore {
+    pub spec_name: &'static str,
+    pub state_ty: &'static str,
+    pub action_ty: &'static str,
+    pub default_model_backend: Option<ModelBackend>,
+    pub model_cases: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedTestDomains<S, A> {
+    pub states: Vec<S>,
+    pub actions: Vec<A>,
+    pub catalog: BoundaryLiteralCatalog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryTransition<S, A> {
+    pub prev: S,
+    pub action: A,
+    pub next: S,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoundaryLiteralCatalog {
+    pub comparison_literals: Vec<String>,
+    pub cardinality_thresholds: Vec<usize>,
+    pub state_literals: Vec<String>,
+    pub action_literals: Vec<String>,
+    pub update_literals: Vec<String>,
+    pub temporal_bad_prefix_guards: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryCatalog<S, A> {
+    pub initial_states: Vec<S>,
+    pub boundary_states: Vec<S>,
+    pub terminal_states: Vec<S>,
+    pub transitions: Vec<BoundaryTransition<S, A>>,
+    pub catalog: BoundaryLiteralCatalog,
+}
+
+pub type GeneratedTestBoundaries<S, A> = BoundaryCatalog<S, A>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryMining<S, A> {
+    pub initial_states: Vec<S>,
+    pub boundary_states: Vec<S>,
+    pub terminal_states: Vec<S>,
+    pub transitions: Vec<BoundaryTransition<S, A>>,
+    pub actions: Vec<A>,
+    pub catalog: BoundaryLiteralCatalog,
+}
+
+impl<S, A> BoundaryMining<S, A>
+where
+    S: Clone + Eq,
+    A: Clone + Eq,
+{
+    pub fn mine<T>(spec: &T) -> Self
+    where
+        T: CheckerSpec<State = S, Action = A>,
+    {
+        let initial_states = spec.initial_states();
+        let actions = spec.actions();
+        let mut boundary_states = Vec::new();
+        let mut transitions = Vec::new();
+        let mut terminal_states = Vec::new();
+        let catalog = spec
+            .normalized_core()
+            .map(BoundaryLiteralCatalog::from_normalized_core)
+            .unwrap_or_default();
+
+        for state in &initial_states {
+            for action in &actions {
+                for next in spec.transition_relation(state, action) {
+                    push_unique(&mut boundary_states, next.clone());
+                    push_unique(
+                        &mut transitions,
+                        BoundaryTransition {
+                            prev: state.clone(),
+                            action: action.clone(),
+                            next,
+                        },
+                    );
+                }
+            }
+        }
+
+        for state in initial_states.iter().chain(boundary_states.iter()) {
+            let has_successor = actions
+                .iter()
+                .any(|action| !spec.transition_relation(state, action).is_empty());
+            if !has_successor {
+                push_unique(&mut terminal_states, state.clone());
+            }
+        }
+
+        Self {
+            initial_states,
+            boundary_states,
+            transitions,
+            terminal_states,
+            actions,
+            catalog,
+        }
+    }
+
+    pub fn generated_test_domains(&self) -> GeneratedTestDomains<S, A> {
+        let mut states = self.initial_states.clone();
+        for state in &self.boundary_states {
+            push_unique(&mut states, state.clone());
+        }
+        for state in &self.terminal_states {
+            push_unique(&mut states, state.clone());
+        }
+        GeneratedTestDomains {
+            states,
+            actions: self.actions.clone(),
+            catalog: self.catalog.clone(),
+        }
+    }
+
+    pub fn generated_test_boundaries(&self) -> GeneratedTestBoundaries<S, A> {
+        BoundaryCatalog {
+            initial_states: self.initial_states.clone(),
+            boundary_states: self.boundary_states.clone(),
+            terminal_states: self.terminal_states.clone(),
+            transitions: self.transitions.clone(),
+            catalog: self.catalog.clone(),
+        }
+    }
+}
+
+impl BoundaryLiteralCatalog {
+    pub fn from_normalized_core(normalized: &NormalizedSpecCore) -> Self {
+        let mut catalog = Self::default();
+        collect_state_expr_literals(&normalized.core.init, &mut catalog);
+        collect_action_expr_literals(&normalized.core.next, &mut catalog);
+        for invariant in &normalized.core.invariants {
+            collect_state_expr_literals(invariant, &mut catalog);
+        }
+        for property in &normalized.core.temporal_props {
+            collect_temporal_expr_literals(property, &mut catalog);
+        }
+        for fairness in &normalized.core.fairness {
+            collect_fairness_literals(fairness, &mut catalog);
+        }
+        catalog
+    }
+}
+
+fn collect_fairness_literals(fairness: &FairnessDecl, catalog: &mut BoundaryLiteralCatalog) {
+    match fairness {
+        FairnessDecl::WF { action, .. } | FairnessDecl::SF { action, .. } => {
+            collect_action_expr_literals(action, catalog);
+        }
+    }
+}
+
+fn collect_temporal_expr_literals(expr: &TemporalExpr, catalog: &mut BoundaryLiteralCatalog) {
+    match expr {
+        TemporalExpr::State(state) => collect_state_expr_literals(state, catalog),
+        TemporalExpr::Action(action) | TemporalExpr::Enabled(action) => {
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, format!("{expr:?}"));
+            collect_action_expr_literals(action, catalog);
+        }
+        TemporalExpr::Not(inner) | TemporalExpr::Next(inner) => {
+            collect_temporal_expr_literals(inner, catalog);
+        }
+        TemporalExpr::Always(inner)
+        | TemporalExpr::Eventually(inner)
+        | TemporalExpr::Until(inner, _)
+        | TemporalExpr::LeadsTo(inner, _) => {
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, format!("{expr:?}"));
+            collect_temporal_expr_literals(inner, catalog);
+            if let TemporalExpr::Until(_, rhs) | TemporalExpr::LeadsTo(_, rhs) = expr {
+                collect_temporal_expr_literals(rhs, catalog);
+            }
+        }
+        TemporalExpr::And(values) | TemporalExpr::Or(values) => {
+            for value in values {
+                collect_temporal_expr_literals(value, catalog);
+            }
+        }
+        TemporalExpr::Implies(lhs, rhs) => {
+            collect_temporal_expr_literals(lhs, catalog);
+            collect_temporal_expr_literals(rhs, catalog);
+        }
+        TemporalExpr::Ref(name) => {
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, name.clone());
+        }
+        TemporalExpr::Opaque(value) => {
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, value.clone());
+        }
+    }
+}
+
+fn collect_state_expr_literals(expr: &IrStateExpr, catalog: &mut BoundaryLiteralCatalog) {
+    match expr {
+        IrStateExpr::True | IrStateExpr::False => {}
+        IrStateExpr::Var(name)
+        | IrStateExpr::Ref(name)
+        | IrStateExpr::Const(name)
+        | IrStateExpr::Opaque(name) => {
+            push_unique_string(&mut catalog.state_literals, name.clone());
+            maybe_push_threshold(name, &mut catalog.cardinality_thresholds);
+        }
+        IrStateExpr::Eq(lhs, rhs) | IrStateExpr::In(lhs, rhs) | IrStateExpr::Implies(lhs, rhs) => {
+            collect_state_expr_literals(lhs, catalog);
+            collect_state_expr_literals(rhs, catalog);
+        }
+        IrStateExpr::Not(value)
+        | IrStateExpr::Forall(_, value)
+        | IrStateExpr::Exists(_, value)
+        | IrStateExpr::Choose(_, value) => collect_state_expr_literals(value, catalog),
+        IrStateExpr::And(values) | IrStateExpr::Or(values) => {
+            for value in values {
+                collect_state_expr_literals(value, catalog);
+            }
+        }
+        IrStateExpr::Compare { lhs, rhs, .. } | IrStateExpr::Builtin { lhs, rhs, .. } => {
+            collect_value_expr_literals(lhs, catalog);
+            collect_value_expr_literals(rhs, catalog);
+            extract_value_literals(lhs, &mut catalog.comparison_literals);
+            extract_value_literals(rhs, &mut catalog.comparison_literals);
+            for literal in extract_value_literals_to_vec(lhs)
+                .into_iter()
+                .chain(extract_value_literals_to_vec(rhs))
+            {
+                maybe_push_threshold(&literal, &mut catalog.cardinality_thresholds);
+            }
+        }
+        IrStateExpr::Match { value, pattern } => {
+            push_unique_string(&mut catalog.state_literals, value.clone());
+            push_unique_string(&mut catalog.state_literals, pattern.clone());
+        }
+        IrStateExpr::Quantified {
+            domain,
+            body,
+            read_paths,
+            ..
+        } => {
+            push_unique_string(&mut catalog.state_literals, domain.clone());
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, body.clone());
+            for path in read_paths {
+                push_unique_string(&mut catalog.state_literals, path.clone());
+            }
+        }
+    }
+}
+
+fn collect_action_expr_literals(expr: &ActionExpr, catalog: &mut BoundaryLiteralCatalog) {
+    match expr {
+        ActionExpr::True | ActionExpr::False => {}
+        ActionExpr::Ref(name) | ActionExpr::Opaque(name) => {
+            push_unique_string(&mut catalog.action_literals, name.clone());
+        }
+        ActionExpr::Pred(state) => collect_state_expr_literals(state, catalog),
+        ActionExpr::Unchanged(paths) => {
+            for path in paths {
+                push_unique_string(&mut catalog.update_literals, format!("unchanged:{path}"));
+            }
+        }
+        ActionExpr::And(values) | ActionExpr::Or(values) => {
+            for value in values {
+                collect_action_expr_literals(value, catalog);
+            }
+        }
+        ActionExpr::Implies(lhs, rhs) => {
+            collect_action_expr_literals(lhs, catalog);
+            collect_action_expr_literals(rhs, catalog);
+        }
+        ActionExpr::Exists(_, value) | ActionExpr::Enabled(value) => {
+            collect_action_expr_literals(value, catalog);
+        }
+        ActionExpr::Compare { lhs, rhs, .. } | ActionExpr::Builtin { lhs, rhs, .. } => {
+            collect_value_expr_literals(lhs, catalog);
+            collect_value_expr_literals(rhs, catalog);
+            extract_value_literals(lhs, &mut catalog.comparison_literals);
+            extract_value_literals(rhs, &mut catalog.comparison_literals);
+        }
+        ActionExpr::Match { value, pattern } => {
+            push_unique_string(&mut catalog.action_literals, value.clone());
+            push_unique_string(&mut catalog.action_literals, pattern.clone());
+        }
+        ActionExpr::Quantified {
+            domain,
+            body,
+            read_paths,
+            ..
+        } => {
+            push_unique_string(&mut catalog.action_literals, domain.clone());
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, body.clone());
+            for path in read_paths {
+                push_unique_string(&mut catalog.action_literals, path.clone());
+            }
+        }
+        ActionExpr::Rule {
+            name,
+            guard,
+            update,
+        } => {
+            push_unique_string(&mut catalog.action_literals, name.clone());
+            collect_action_expr_literals(guard, catalog);
+            collect_update_expr_literals(update, catalog);
+        }
+        ActionExpr::BoxAction { action, .. } | ActionExpr::AngleAction { action, .. } => {
+            collect_action_expr_literals(action, catalog);
+        }
+    }
+}
+
+fn collect_update_expr_literals(expr: &IrUpdateExpr, catalog: &mut BoundaryLiteralCatalog) {
+    match expr {
+        IrUpdateExpr::Sequence(ops) => {
+            for op in ops {
+                match op {
+                    IrUpdateOpDecl::Assign { target, value } => {
+                        push_unique_string(
+                            &mut catalog.update_literals,
+                            format!("assign:{target}={value:?}"),
+                        );
+                        collect_value_expr_literals(value, catalog);
+                    }
+                    IrUpdateOpDecl::SetInsert { target, item } => {
+                        push_unique_string(
+                            &mut catalog.update_literals,
+                            format!("insert:{target}={item:?}"),
+                        );
+                        collect_value_expr_literals(item, catalog);
+                    }
+                    IrUpdateOpDecl::SetRemove { target, item } => {
+                        push_unique_string(
+                            &mut catalog.update_literals,
+                            format!("remove:{target}={item:?}"),
+                        );
+                        collect_value_expr_literals(item, catalog);
+                    }
+                    IrUpdateOpDecl::Effect { name, .. } => {
+                        push_unique_string(&mut catalog.update_literals, format!("effect:{name}"));
+                    }
+                }
+            }
+        }
+        IrUpdateExpr::Choice {
+            domain,
+            body,
+            read_paths,
+            write_paths,
+        } => {
+            push_unique_string(
+                &mut catalog.update_literals,
+                format!("choice:{domain}:{body}"),
+            );
+            for path in read_paths.iter().chain(write_paths.iter()) {
+                push_unique_string(&mut catalog.update_literals, path.clone());
+            }
+        }
+    }
+}
+
+fn collect_value_expr_literals(expr: &IrValueExpr, catalog: &mut BoundaryLiteralCatalog) {
+    match expr {
+        IrValueExpr::Unit => {}
+        IrValueExpr::Opaque(value) | IrValueExpr::Literal(value) | IrValueExpr::Field(value) => {
+            push_unique_string(&mut catalog.state_literals, value.clone());
+            maybe_push_threshold(value, &mut catalog.cardinality_thresholds);
+        }
+        IrValueExpr::PureCall {
+            name,
+            read_paths,
+            symbolic_key,
+        } => {
+            push_unique_string(&mut catalog.state_literals, name.clone());
+            if let Some(symbolic_key) = symbolic_key {
+                push_unique_string(&mut catalog.state_literals, symbolic_key.clone());
+            }
+            for path in read_paths {
+                push_unique_string(&mut catalog.state_literals, path.clone());
+            }
+        }
+        IrValueExpr::Add(lhs, rhs)
+        | IrValueExpr::Sub(lhs, rhs)
+        | IrValueExpr::Mul(lhs, rhs)
+        | IrValueExpr::Union(lhs, rhs)
+        | IrValueExpr::Intersection(lhs, rhs)
+        | IrValueExpr::Difference(lhs, rhs) => {
+            collect_value_expr_literals(lhs, catalog);
+            collect_value_expr_literals(rhs, catalog);
+        }
+        IrValueExpr::Neg(value) => collect_value_expr_literals(value, catalog),
+        IrValueExpr::SequenceUpdate { base, index, value }
+        | IrValueExpr::FunctionUpdate {
+            base,
+            key: index,
+            value,
+        } => {
+            collect_value_expr_literals(base, catalog);
+            collect_value_expr_literals(index, catalog);
+            collect_value_expr_literals(value, catalog);
+        }
+        IrValueExpr::RecordUpdate { base, field, value } => {
+            collect_value_expr_literals(base, catalog);
+            push_unique_string(
+                &mut catalog.update_literals,
+                format!("record_field:{field}"),
+            );
+            collect_value_expr_literals(value, catalog);
+        }
+        IrValueExpr::Comprehension {
+            domain,
+            body,
+            read_paths,
+        } => {
+            push_unique_string(&mut catalog.state_literals, domain.clone());
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, body.clone());
+            for path in read_paths {
+                push_unique_string(&mut catalog.state_literals, path.clone());
+            }
+        }
+        IrValueExpr::Conditional {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            push_unique_string(&mut catalog.temporal_bad_prefix_guards, condition.clone());
+            collect_value_expr_literals(then_branch, catalog);
+            collect_value_expr_literals(else_branch, catalog);
+        }
+    }
+}
+
+fn extract_value_literals(expr: &IrValueExpr, dest: &mut Vec<String>) {
+    for literal in extract_value_literals_to_vec(expr) {
+        push_unique_string(dest, literal);
+    }
+}
+
+fn extract_value_literals_to_vec(expr: &IrValueExpr) -> Vec<String> {
+    let mut literals = Vec::new();
+    match expr {
+        IrValueExpr::Literal(value) => literals.push(value.clone()),
+        IrValueExpr::Add(lhs, rhs)
+        | IrValueExpr::Sub(lhs, rhs)
+        | IrValueExpr::Mul(lhs, rhs)
+        | IrValueExpr::Union(lhs, rhs)
+        | IrValueExpr::Intersection(lhs, rhs)
+        | IrValueExpr::Difference(lhs, rhs) => {
+            literals.extend(extract_value_literals_to_vec(lhs));
+            literals.extend(extract_value_literals_to_vec(rhs));
+        }
+        IrValueExpr::Neg(value) => literals.extend(extract_value_literals_to_vec(value)),
+        IrValueExpr::SequenceUpdate { base, index, value }
+        | IrValueExpr::FunctionUpdate {
+            base,
+            key: index,
+            value,
+        } => {
+            literals.extend(extract_value_literals_to_vec(base));
+            literals.extend(extract_value_literals_to_vec(index));
+            literals.extend(extract_value_literals_to_vec(value));
+        }
+        IrValueExpr::RecordUpdate { base, value, .. } => {
+            literals.extend(extract_value_literals_to_vec(base));
+            literals.extend(extract_value_literals_to_vec(value));
+        }
+        IrValueExpr::Conditional {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            literals.extend(extract_value_literals_to_vec(then_branch));
+            literals.extend(extract_value_literals_to_vec(else_branch));
+        }
+        IrValueExpr::Unit
+        | IrValueExpr::Opaque(_)
+        | IrValueExpr::Field(_)
+        | IrValueExpr::PureCall { .. }
+        | IrValueExpr::Comprehension { .. } => {}
+    }
+    literals
+}
+
+fn push_unique_string(items: &mut Vec<String>, value: String) {
+    if !items.contains(&value) {
+        items.push(value);
+    }
+}
+
+fn maybe_push_threshold(raw: &str, thresholds: &mut Vec<usize>) {
+    if let Ok(value) = raw.parse::<usize>() {
+        if !thresholds.contains(&value) {
+            thresholds.push(value);
+        }
+    }
+}
+
+fn push_unique<T>(items: &mut Vec<T>, value: T)
+where
+    T: PartialEq,
+{
+    if !items.contains(&value) {
+        items.push(value);
+    }
+}
+
 impl<'a, S, A> fmt::Debug for LoweredSpec<'a, S, A>
 where
     S: Debug,
@@ -885,6 +1392,24 @@ impl<'a, S, A> LoweredSpec<'a, S, A> {
         &self.core
     }
 
+    pub fn generated_test_core(&self) -> GeneratedTestCore
+    where
+        S: Clone,
+        A: Clone,
+    {
+        GeneratedTestCore {
+            spec_name: self.name(),
+            state_ty: self.state_ty(),
+            action_ty: self.action_ty(),
+            default_model_backend: self.default_model_backend(),
+            model_cases: self
+                .model_instances()
+                .into_iter()
+                .map(|case| case.label())
+                .collect(),
+        }
+    }
+
     pub fn normalized_core(&self) -> Result<&NormalizedSpecCore, CoreNormalizationError> {
         self.normalized_core
             .get_or_init(|| self.core.normalize())
@@ -922,6 +1447,14 @@ impl<'a, S, A> LoweredSpec<'a, S, A> {
         self.executable.actions.clone()
     }
 
+    pub fn generated_test_domains(&self) -> GeneratedTestDomains<S, A>
+    where
+        S: Clone + Debug + Eq + 'static,
+        A: Clone + Debug + Eq + 'static,
+    {
+        BoundaryMining::mine(self).generated_test_domains()
+    }
+
     pub fn transition_program(&self) -> Option<TransitionProgram<S, A>>
     where
         S: Clone,
@@ -954,6 +1487,14 @@ impl<'a, S, A> LoweredSpec<'a, S, A> {
         self.transition_relation(prev, action)
             .into_iter()
             .any(|candidate_next| candidate_next == *next)
+    }
+
+    pub fn generated_test_boundaries(&self) -> GeneratedTestBoundaries<S, A>
+    where
+        S: Clone + Debug + Eq + 'static,
+        A: Clone + Debug + Eq + 'static,
+    {
+        BoundaryMining::mine(self).generated_test_boundaries()
     }
 
     pub fn invariants(&self) -> Vec<BoolExpr<S>>

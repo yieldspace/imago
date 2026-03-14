@@ -16,4 +16,5 @@ checker-tests = []
 [dependencies]
 inventory = { workspace = true }
 nirvash-foundation = { workspace = true }
+nirvash-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

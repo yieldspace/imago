@@ -1,48 +1,43 @@
-use std::sync::Mutex;
+#![allow(unused_imports)]
 
 use nirvash::BoolExpr;
-use nirvash_conformance::{
-    ActionApplier, ProtocolConformanceSpec, ProtocolRuntimeBinding, StateObserver,
-};
+use nirvash_conformance::{ProjectedState, SpecOracle};
 use nirvash_lower::{FrontendSpec, TemporalSpec};
-use nirvash_macros::FiniteModelDomain as FormalFiniteModelDomain;
-use nirvash_macros::code_tests;
+use nirvash_macros::{
+    FiniteModelDomain as FormalFiniteModelDomain, code_tests, nirvash_binding, nirvash_project,
+    nirvash_project_output,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
+#[code_tests]
 struct Spec;
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Binding;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, FormalFiniteModelDomain,
+)]
 enum State {
     Idle,
     Fast,
     Slow,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, FormalFiniteModelDomain,
+)]
 enum Action {
     Start,
     Reset,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Output {
     Ack,
     Rejected,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Context;
-
 impl FrontendSpec for Spec {
     type State = State;
     type Action = Action;
-
-    fn frontend_name(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
 
     fn initial_states(&self) -> Vec<Self::State> {
         vec![State::Idle]
@@ -67,12 +62,8 @@ impl TemporalSpec for Spec {
     }
 }
 
-impl ProtocolConformanceSpec for Spec {
+impl SpecOracle for Spec {
     type ExpectedOutput = Output;
-    type ProbeState = State;
-    type ProbeOutput = Output;
-    type SummaryState = State;
-    type SummaryOutput = Output;
 
     fn expected_output(
         &self,
@@ -86,72 +77,68 @@ impl ProtocolConformanceSpec for Spec {
             Output::Rejected
         }
     }
+}
 
-    fn summarize_state(&self, probe: &Self::ProbeState) -> Self::SummaryState {
-        *probe
-    }
+#[derive(Clone, Debug)]
+struct Binding {
+    state: State,
+}
 
-    fn summarize_output(&self, probe: &Self::ProbeOutput) -> Self::SummaryOutput {
-        probe.clone()
-    }
-
-    fn abstract_state(&self, observed: &Self::SummaryState) -> Self::State {
-        *observed
-    }
-
-    fn abstract_output(&self, observed: &Self::SummaryOutput) -> Self::ExpectedOutput {
-        observed.clone()
+impl Default for Binding {
+    fn default() -> Self {
+        Self { state: State::Idle }
     }
 }
 
-#[code_tests(spec = Spec, binding = Binding)]
-const _: () = ();
-
-struct Driver {
-    state: Mutex<State>,
-}
-
-impl ProtocolRuntimeBinding<Spec> for Binding {
-    type Runtime = Driver;
-    type Context = Context;
-
-    async fn fresh_runtime(_spec: &Spec) -> Self::Runtime {
-        Driver {
-            state: Mutex::new(State::Idle),
-        }
-    }
-
-    fn context(_spec: &Spec) -> Self::Context {
-        Context
-    }
-}
-
-impl ActionApplier for Driver {
-    type Action = Action;
-    type Output = Output;
-    type Context = Context;
-
-    async fn execute_action(&self, _context: &Context, action: &Action) -> Output {
-        let mut state = self.state.lock().expect("lock state");
-        match (*state, action) {
-            (State::Idle, Action::Start) => {
-                *state = State::Fast;
-                Output::Ack
-            }
-            (State::Fast | State::Slow, Action::Reset) => {
-                *state = State::Idle;
+#[nirvash_binding(spec = Spec)]
+impl Binding {
+    #[nirvash(action = Action::Start)]
+    fn start(&mut self) -> Output {
+        match self.state {
+            State::Idle => {
+                self.state = State::Fast;
                 Output::Ack
             }
             _ => Output::Rejected,
         }
     }
-}
 
-impl StateObserver for Driver {
-    type SummaryState = State;
-    type Context = Context;
+    #[nirvash(action = Action::Reset)]
+    fn reset(&mut self) -> Output {
+        match self.state {
+            State::Fast | State::Slow => {
+                self.state = State::Idle;
+                Output::Ack
+            }
+            State::Idle => Output::Rejected,
+        }
+    }
 
-    async fn observe_state(&self, _context: &Context) -> State {
-        *self.state.lock().expect("lock state")
+    #[nirvash_project]
+    fn project(&self) -> ProjectedState<State> {
+        match self.state {
+            State::Idle => ProjectedState::Exact(State::Idle),
+            State::Fast => ProjectedState::Partial(State::Fast),
+            State::Slow => ProjectedState::Partial(State::Slow),
+        }
+    }
+
+    #[nirvash_project_output]
+    fn project_output(_action: &Action, output: &Output) -> Output {
+        output.clone()
     }
 }
+
+generated::install::tests!(
+    binding = Binding,
+    profiles = [
+        generated::profiles::smoke_default(),
+        generated::profiles::unit_default().engines([
+            nirvash_conformance::EnginePlan::ExplicitSuite,
+            nirvash_conformance::EnginePlan::ProptestOnline {
+                cases: 256,
+                max_steps: 8,
+            },
+        ]),
+    ],
+);

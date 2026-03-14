@@ -1,0 +1,5 @@
+error: nirvash_binding requires one #[nirvash_project] method
+  --> tests/fixtures/code_tests_missing_projection.rs:88:6
+   |
+88 | impl Binding {
+   |      ^^^^^^^
