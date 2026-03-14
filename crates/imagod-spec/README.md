@@ -1,19 +1,26 @@
 # imagod-spec
 
-`imagod` の shared contract を所有する crate です。
+`imagod-spec` は `imagod` の shared contract を所有する crate です。
 
-この crate は runtime が常時依存できる軽い正本で、公開面は次の module に限定します。
+現行の source-of-truth は command contract 単体ではなく、次の canonical domain modules です。
 
-- `command_contract`: command lifecycle と command protocol の contract
-- `wire`: request / response / event / log datagram を含む wire contract
-- `ipc`: manager-runner 間の IPC contract と plugin / capability metadata
-- `messages`: daemon / control plane の message contract
-- `envelope`: envelope contract
-- `error`: error contract
-- `validate`: contract validation helper
+- `identity`
+  - transport principal / session role / bounded service-session-authority ids
+- `authorization`
+  - external message permission、internal operation permission、binding grant、denial reason
+- `manager`
+  - boot/config/listening/shutdown/maintenance lifecycle
+- `service`
+  - artifact/runtime をまとめた service lifecycle
+- `operation`
+  - command slot と manager-auth fragment
+- `rpc`
+  - local/remote RPC outcome fragment
+- `system`
+  - daemon-visible `SystemEvent` と canonical `SystemStateFragment`
 
-`imagod-spec` 自体は `imago-protocol` や `imagod-ipc` の contract type を再 export しません。  
-逆に `imago-protocol` は CBOR codec helper、`imagod-ipc` は transport / auth helper としてこの crate の型を使います。
+既存の `wire` / `messages` / `ipc` / `envelope` / `error` / `validate` は残しますが、役割は adapter です。  
+domain semantics は上の canonical modules に置き、wire 型はそこへの transport-specific projection として扱います。
 
-`summary` / `probe` / `projection` / runtime conformance surface はこの crate に含めません。  
-formal semantics、model checking、docgen は `imagod-spec-formal` 側で扱います。
+`imagod-spec` 自体は runtime が常時依存できる軽い契約層です。  
+formal semantics、model checking、derived view は `imagod-spec-formal` 側で扱います。

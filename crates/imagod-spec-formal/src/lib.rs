@@ -1,9 +1,9 @@
-pub mod atoms;
+pub mod authz_view;
 pub mod bounds;
-pub mod control_plane;
-pub mod manager_plane;
-pub mod operation_plane;
-pub mod service_plane;
+pub mod control_view;
+pub mod manager_view;
+pub mod operation_view;
+pub mod service_view;
 pub mod system;
 
 #[cfg(test)]
@@ -17,17 +17,11 @@ where
     spec.lower(&mut lowering_cx).expect("spec should lower")
 }
 
-pub use atoms::{RemoteAuthorityAtom, RequestKindAtom, ServiceAtom, SessionAtom, StreamAtom};
-pub use control_plane::{ControlPlaneAction, ControlPlaneSpec, ControlPlaneState, RequestPhase};
 pub use imagod_spec::{
-    CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
-    CommandProtocolStageId, OperationPhase,
-};
-pub use manager_plane::{ManagerPhase, ManagerPlaneAction, ManagerPlaneSpec, ManagerPlaneState};
-pub use operation_plane::{
-    OperationPlaneAction, OperationPlaneSpec, OperationPlaneState, RpcOutcome,
-};
-pub use service_plane::{
-    ServiceLifecyclePhase, ServicePlaneAction, ServicePlaneSpec, ServicePlaneState,
+    AuthorizationDecision, AuthorizationDenialReason, BindingGrantId, CommandKind,
+    CommandLifecycleState, CommandTerminalState, ExternalMessage, InterfaceId, MaintenancePhase,
+    ManagerAuthState, ManagerPhase, ManagerShutdownPhase, OperationPermission, RemoteAuthorityId,
+    RpcOutcome, ServiceId, ServiceLifecyclePhase, SessionAuthState, SessionId, SessionRequestState,
+    SessionRole, SystemEvent, SystemStateFragment, TransportPrincipal,
 };
 pub use system::{SystemAction, SystemSpec, SystemState};

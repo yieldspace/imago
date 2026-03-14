@@ -1,17 +1,36 @@
+pub mod authorization;
 pub mod command_contract;
 pub mod envelope;
 pub mod error;
+pub mod identity;
 pub mod ipc;
+pub mod manager;
 pub mod messages;
+pub mod operation;
+pub mod rpc;
+pub mod service;
+pub mod system;
 pub mod validate;
 pub mod wire;
 
-pub use command_contract::{
-    CommandErrorKind, CommandKind, CommandLifecycleState, CommandProtocolAction,
-    CommandProtocolContext, CommandProtocolObservedState, CommandProtocolOutput,
-    CommandProtocolStageId, OperationPhase,
+pub use authorization::{
+    AuthorizationDecision, AuthorizationDenialReason, BindingGrantId, ExternalMessage, InterfaceId,
+    OperationPermission, SessionRequestState,
+};
+pub use error::*;
+pub use identity::{
+    RemoteAuthorityId, ServiceId, SessionAuthState, SessionId, SessionRole, TransportPrincipal,
 };
 pub use ipc::*;
+pub use manager::{MaintenancePhase, ManagerPhase, ManagerShutdownPhase};
+pub use messages::MessageType;
+pub use operation::{
+    CommandErrorKind, CommandKind, CommandLifecycleState, CommandTerminalState, ManagerAuthState,
+};
+pub use rpc::RpcOutcome;
+pub use service::ServiceLifecyclePhase;
+pub use system::{SystemEvent, SystemStateFragment};
+pub use validate::*;
 pub use wire::*;
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+//! Canonical identity and session roles used by the formal system model.
+
 use nirvash_macros::{
     FiniteModelDomain as FormalFiniteModelDomain, RelAtom,
     SymbolicEncoding as FormalSymbolicEncoding,
@@ -11,45 +13,12 @@ use nirvash_macros::{
     Eq,
     PartialOrd,
     Ord,
+    Hash,
     FormalFiniteModelDomain,
     FormalSymbolicEncoding,
     RelAtom,
 )]
-pub enum ServiceAtom {
-    Service0,
-    Service1,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    FormalFiniteModelDomain,
-    FormalSymbolicEncoding,
-    RelAtom,
-)]
-pub enum RemoteAuthorityAtom {
-    Edge0,
-    Edge1,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    FormalFiniteModelDomain,
-    FormalSymbolicEncoding,
-    RelAtom,
-)]
-pub enum SessionAtom {
+pub enum SessionId {
     Session0,
     Session1,
 }
@@ -62,13 +31,14 @@ pub enum SessionAtom {
     Eq,
     PartialOrd,
     Ord,
+    Hash,
     FormalFiniteModelDomain,
     FormalSymbolicEncoding,
     RelAtom,
 )]
-pub enum StreamAtom {
-    Stream0,
-    Stream1,
+pub enum ServiceId {
+    Service0,
+    Service1,
 }
 
 #[derive(
@@ -79,13 +49,32 @@ pub enum StreamAtom {
     Eq,
     PartialOrd,
     Ord,
+    Hash,
     FormalFiniteModelDomain,
     FormalSymbolicEncoding,
     RelAtom,
 )]
-pub enum SessionRoleAtom {
+pub enum RemoteAuthorityId {
+    Authority0,
+    Authority1,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+)]
+pub enum TransportPrincipal {
     Admin,
     Client,
+    ServiceRunner,
     Unknown,
 }
 
@@ -97,20 +86,32 @@ pub enum SessionRoleAtom {
     Eq,
     PartialOrd,
     Ord,
+    Hash,
     FormalFiniteModelDomain,
     FormalSymbolicEncoding,
-    RelAtom,
 )]
-pub enum RequestKindAtom {
-    HelloNegotiate,
-    DeployPrepare,
-    ArtifactPush,
-    ArtifactCommit,
-    CommandStart,
-    StateRequest,
-    ServicesList,
-    CommandCancel,
-    LogsRequest,
-    RpcInvoke,
-    BindingsCertUpload,
+pub enum SessionRole {
+    Admin,
+    Client,
+    ServiceRunner,
+    Unknown,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    FormalFiniteModelDomain,
+    FormalSymbolicEncoding,
+)]
+pub enum SessionAuthState {
+    Disconnected,
+    Accepted,
+    Authenticated,
+    Drained,
 }

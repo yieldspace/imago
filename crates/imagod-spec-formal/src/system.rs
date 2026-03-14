@@ -1,67 +1,19 @@
-use nirvash::{BoolExpr, Fairness, Ltl, RelSet, TransitionProgram};
+use nirvash::{BoolExpr, TransitionProgram};
 use nirvash_lower::{FrontendSpec, ModelInstance};
 use nirvash_macros::{
-    FiniteModelDomain as FormalFiniteModelDomain, RelationalState,
-    SymbolicEncoding as FormalSymbolicEncoding, action_constraint, fairness, invariant,
-    nirvash_expr, nirvash_step_expr, nirvash_transition_program, property, state_constraint,
-    system_spec,
+    invariant, nirvash_expr, nirvash_step_expr, nirvash_transition_program, system_spec,
 };
 
-use crate::{
-    CommandErrorKind, CommandKind, CommandLifecycleState,
-    atoms::{RemoteAuthorityAtom, ServiceAtom, SessionAtom, SessionRoleAtom, StreamAtom},
-    bounds::{MAX_LASSO_DEPTH, MaintenanceTicks, doc_cap_focus, doc_cap_surface},
-    control_plane::{ControlPlaneAction, RequestPhase},
-    manager_plane::{ManagerPhase, ManagerPlaneAction},
-    operation_plane::{OperationPlaneAction, RpcOutcome},
-    service_plane::{ServiceLifecyclePhase, ServicePlaneAction},
+use crate::bounds::{MAX_LASSO_DEPTH, doc_cap_focus, doc_cap_surface};
+use imagod_spec::{
+    AuthorizationDecision, BindingGrantId, ExternalMessage, InterfaceId, MaintenancePhase,
+    ManagerAuthState, ManagerPhase, ManagerShutdownPhase, OperationPermission, RemoteAuthorityId,
+    RpcOutcome, ServiceId, ServiceLifecyclePhase, SessionAuthState, SessionId, SessionRequestState,
+    SessionRole, SystemEvent, SystemStateFragment, TransportPrincipal,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding)]
-pub enum SystemAction {
-    Manager(ManagerPlaneAction),
-    Control(ControlPlaneAction),
-    Service(ServicePlaneAction),
-    Operation(OperationPlaneAction),
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, RelationalState,
-)]
-#[finite_model_domain(custom)]
-pub struct SystemState {
-    pub config_loaded: bool,
-    pub created_default: bool,
-    pub manager_phase: ManagerPhase,
-    pub accepts_control: bool,
-    pub shutdown_started: bool,
-    pub services_drained: bool,
-    pub maintenance_stopped: bool,
-    pub maintenance_ticks: MaintenanceTicks,
-    pub active_sessions: RelSet<SessionAtom>,
-    pub admin_sessions: RelSet<SessionAtom>,
-    pub client_sessions: RelSet<SessionAtom>,
-    pub active_streams: RelSet<StreamAtom>,
-    pub authority_uploaded: bool,
-    pub last_role: Option<SessionRoleAtom>,
-    pub request_phase: RequestPhase,
-    pub service0: ServiceLifecyclePhase,
-    pub service1: ServiceLifecyclePhase,
-    pub bound_services: RelSet<ServiceAtom>,
-    pub remote_connections: RelSet<RemoteAuthorityAtom>,
-    pub command_kind: Option<CommandKind>,
-    pub command_state: Option<CommandLifecycleState>,
-    pub cancel_requested: bool,
-    pub local_rpc_target: Option<ServiceAtom>,
-    pub remote_rpc_target: Option<ServiceAtom>,
-    pub remote_rpc_authority: Option<RemoteAuthorityAtom>,
-    pub last_rpc_outcome: RpcOutcome,
-}
-
-nirvash::finite_model_domain_spec!(
-    SystemStateFiniteModelDomainSpec for SystemState,
-    representatives = system_state_domain()
-);
+pub type SystemState = SystemStateFragment;
+pub type SystemAction = SystemEvent;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemSpec;
@@ -72,141 +24,13 @@ impl SystemSpec {
     }
 
     pub fn initial_state(&self) -> SystemState {
-        SystemState {
-            config_loaded: false,
-            created_default: false,
-            manager_phase: ManagerPhase::Booting,
-            accepts_control: false,
-            shutdown_started: false,
-            services_drained: false,
-            maintenance_stopped: false,
-            maintenance_ticks: MaintenanceTicks::new(0).expect("within bounds"),
-            active_sessions: RelSet::empty(),
-            admin_sessions: RelSet::empty(),
-            client_sessions: RelSet::empty(),
-            active_streams: RelSet::empty(),
-            authority_uploaded: false,
-            last_role: None,
-            request_phase: RequestPhase::Idle,
-            service0: ServiceLifecyclePhase::Absent,
-            service1: ServiceLifecyclePhase::Absent,
-            bound_services: RelSet::empty(),
-            remote_connections: RelSet::empty(),
-            command_kind: None,
-            command_state: None,
-            cancel_requested: false,
-            local_rpc_target: None,
-            remote_rpc_target: None,
-            remote_rpc_authority: None,
-            last_rpc_outcome: RpcOutcome::None,
-        }
-    }
-
-    fn actions_union(&self) -> Vec<SystemAction> {
-        let mut actions = Vec::new();
-        actions.extend(
-            <ManagerPlaneAction as nirvash::ActionVocabulary>::action_vocabulary()
-                .into_iter()
-                .map(SystemAction::Manager),
-        );
-        actions.extend(
-            <ControlPlaneAction as nirvash::ActionVocabulary>::action_vocabulary()
-                .into_iter()
-                .map(SystemAction::Control),
-        );
-        actions.extend(
-            <ServicePlaneAction as nirvash::ActionVocabulary>::action_vocabulary()
-                .into_iter()
-                .map(SystemAction::Service),
-        );
-        actions.extend(
-            <OperationPlaneAction as nirvash::ActionVocabulary>::action_vocabulary()
-                .into_iter()
-                .map(SystemAction::Operation),
-        );
-        actions
+        SystemState::new()
     }
 }
 
-fn system_state_domain() -> Vec<SystemState> {
-    let spec = SystemSpec::new();
-    let initial = spec.initial_state();
-
-    let mut listening = initial.clone();
-    listening.config_loaded = true;
-    listening.manager_phase = ManagerPhase::Listening;
-    listening.accepts_control = true;
-
-    let mut dual_sessions = listening.clone();
-    dual_sessions.active_sessions.insert(SessionAtom::Session0);
-    dual_sessions.active_sessions.insert(SessionAtom::Session1);
-    dual_sessions.admin_sessions.insert(SessionAtom::Session0);
-    dual_sessions.client_sessions.insert(SessionAtom::Session1);
-    dual_sessions.active_streams.insert(StreamAtom::Stream0);
-    dual_sessions.active_streams.insert(StreamAtom::Stream1);
-    dual_sessions.last_role = Some(SessionRoleAtom::Client);
-    dual_sessions.request_phase = RequestPhase::Pending;
-
-    let mut service_running = listening.clone();
-    service_running.service0 = ServiceLifecyclePhase::Running;
-    service_running.service1 = ServiceLifecyclePhase::Promoted;
-    service_running.bound_services.insert(ServiceAtom::Service0);
-    service_running.command_kind = Some(CommandKind::Run);
-    service_running.command_state = Some(CommandLifecycleState::Running);
-
-    let mut local_rpc = service_running.clone();
-    local_rpc.local_rpc_target = Some(ServiceAtom::Service0);
-
-    let mut remote_rpc = service_running.clone();
-    remote_rpc
-        .remote_connections
-        .insert(RemoteAuthorityAtom::Edge0);
-    remote_rpc.remote_rpc_target = Some(ServiceAtom::Service0);
-    remote_rpc.remote_rpc_authority = Some(RemoteAuthorityAtom::Edge0);
-    remote_rpc.last_rpc_outcome = RpcOutcome::RemoteConnected;
-
-    let mut shutdown = service_running.clone();
-    shutdown.manager_phase = ManagerPhase::ShutdownRequested;
-    shutdown.accepts_control = false;
-    shutdown.shutdown_started = true;
-    shutdown.request_phase = RequestPhase::Idle;
-    shutdown.active_streams = RelSet::empty();
-    shutdown.command_state = None;
-    shutdown.command_kind = None;
-    shutdown.cancel_requested = false;
-
-    let mut stopped = shutdown.clone();
-    stopped.services_drained = true;
-    stopped.maintenance_stopped = true;
-    stopped.manager_phase = ManagerPhase::Stopped;
-    stopped.service0 = ServiceLifecyclePhase::Reaped;
-    stopped.remote_connections = RelSet::empty();
-    stopped.remote_rpc_target = None;
-    stopped.remote_rpc_authority = None;
-    stopped.local_rpc_target = None;
-
+fn base_model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     vec![
-        initial,
-        listening,
-        dual_sessions,
-        service_running,
-        local_rpc,
-        remote_rpc,
-        shutdown,
-        stopped,
-    ]
-}
-
-fn system_model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
-    vec![
-        ModelInstance::new("explicit_control_service_surface")
-            .with_checker_config(nirvash::ModelCheckConfig {
-                backend: Some(nirvash::ModelBackend::Explicit),
-                ..nirvash::ModelCheckConfig::reachable_graph()
-            })
-            .with_doc_checker_config(doc_cap_surface())
-            .with_check_deadlocks(false),
-        ModelInstance::new("explicit_control_rpc_focus")
+        ModelInstance::new("explicit_system_surface")
             .with_checker_config(nirvash::ModelCheckConfig {
                 backend: Some(nirvash::ModelBackend::Explicit),
                 ..nirvash::ModelCheckConfig::reachable_graph()
@@ -220,321 +44,116 @@ fn system_model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
             })
             .with_doc_checker_config(doc_cap_focus())
             .with_check_deadlocks(false),
-        ModelInstance::new("symbolic_control_rpc_focus")
+        ModelInstance::new("explicit_multi_service_scenario")
+            .with_checker_config(nirvash::ModelCheckConfig {
+                backend: Some(nirvash::ModelBackend::Explicit),
+                ..nirvash::ModelCheckConfig::reachable_graph()
+            })
+            .with_doc_checker_config(doc_cap_surface())
+            .with_check_deadlocks(false),
+        ModelInstance::new("explicit_symbolic_focus")
+            .with_checker_config(nirvash::ModelCheckConfig {
+                backend: Some(nirvash::ModelBackend::Explicit),
+                ..nirvash::ModelCheckConfig::reachable_graph()
+            })
+            .with_doc_checker_config(doc_cap_focus())
+            .with_check_deadlocks(false)
+            .with_action_constraint(symbolic_focus_actions()),
+        ModelInstance::new("symbolic_focus")
             .with_checker_config(nirvash::ModelCheckConfig {
                 backend: Some(nirvash::ModelBackend::Symbolic),
                 ..nirvash::ModelCheckConfig::reachable_graph()
             })
             .with_doc_checker_config(doc_cap_focus())
-            .with_check_deadlocks(false),
-        ModelInstance::new("symbolic_shutdown_progress")
-            .with_checker_config(nirvash::ModelCheckConfig {
-                backend: Some(nirvash::ModelBackend::Symbolic),
-                ..nirvash::ModelCheckConfig::bounded_lasso(MAX_LASSO_DEPTH)
-            })
-            .with_doc_checker_config(doc_cap_focus())
-            .with_check_deadlocks(false),
+            .with_check_deadlocks(false)
+            .with_action_constraint(symbolic_focus_actions()),
     ]
 }
 
-#[action_constraint(
-    SystemSpec,
-    cases("explicit_control_service_surface", "explicit_shutdown_progress")
-)]
-fn explicit_surface_actions() -> nirvash::StepExpr<SystemState, SystemAction> {
-    nirvash_step_expr! { explicit_surface_actions(_prev, action, _next) =>
-        matches!(action, SystemAction::Manager(_))
-            || matches!(
-                action,
-                SystemAction::Control(ControlPlaneAction::AcceptSession(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::AcceptSession(SessionAtom::Session1))
-                    | SystemAction::Control(ControlPlaneAction::AuthenticateAdmin(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::AuthenticateClient(SessionAtom::Session1))
-                    | SystemAction::Control(ControlPlaneAction::OpenRequest(
-                        StreamAtom::Stream0,
-                        crate::RequestKindAtom::ServicesList
-                    ))
-                    | SystemAction::Control(ControlPlaneAction::CompleteResponse(
-                        StreamAtom::Stream0,
-                        crate::RequestKindAtom::ServicesList
-                    ))
-                    | SystemAction::Control(ControlPlaneAction::CloseStream(StreamAtom::Stream0))
-                    | SystemAction::Control(ControlPlaneAction::OpenRequest(
-                        StreamAtom::Stream1,
-                        crate::RequestKindAtom::ServicesList
-                    ))
-                    | SystemAction::Control(ControlPlaneAction::StartLogFollow(StreamAtom::Stream1))
-                    | SystemAction::Control(ControlPlaneAction::FinishLogFollow(StreamAtom::Stream1))
-                    | SystemAction::Control(ControlPlaneAction::UploadAuthority(SessionAtom::Session1))
-            )
-            || matches!(
-                action,
-                SystemAction::Service(ServicePlaneAction::UploadArtifact(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::CommitArtifact(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::PromoteArtifact(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::PrepareService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::StartService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::StopService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::ReapService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::UploadArtifact(ServiceAtom::Service1))
-                    | SystemAction::Service(ServicePlaneAction::CommitArtifact(ServiceAtom::Service1))
-                    | SystemAction::Service(ServicePlaneAction::PromoteArtifact(ServiceAtom::Service1))
-                    | SystemAction::Service(ServicePlaneAction::TriggerRollback(ServiceAtom::Service1))
-                    | SystemAction::Service(ServicePlaneAction::FinishRollback(ServiceAtom::Service1))
-            )
-            || matches!(
-                action,
-                SystemAction::Operation(OperationPlaneAction::GrantBinding(ServiceAtom::Service0))
-                    | SystemAction::Operation(OperationPlaneAction::GrantBinding(ServiceAtom::Service1))
-                    | SystemAction::Operation(OperationPlaneAction::StartCommand(CommandKind::Run))
-                    | SystemAction::Operation(OperationPlaneAction::MarkCommandRunning)
-                    | SystemAction::Operation(OperationPlaneAction::FinishCommandSucceeded)
-                    | SystemAction::Operation(OperationPlaneAction::ClearCommandSlot)
-                    | SystemAction::Operation(OperationPlaneAction::StartLocalRpc(
-                        ServiceAtom::Service0
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::CompleteLocalRpc(
-                        ServiceAtom::Service0
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-            )
-    }
-}
-
-#[state_constraint(
-    SystemSpec,
-    cases(
-        "explicit_control_rpc_focus",
-        "symbolic_control_rpc_focus",
-        "symbolic_shutdown_progress"
-    )
-)]
-fn symbolic_focus_state() -> BoolExpr<SystemState> {
-    nirvash_expr! { symbolic_focus_state(state) =>
-        !state.active_sessions.contains(&SessionAtom::Session1)
-            && !state.admin_sessions.contains(&SessionAtom::Session1)
-            && !state.client_sessions.contains(&SessionAtom::Session1)
-            && !state.active_streams.contains(&StreamAtom::Stream1)
-            && !state.bound_services.contains(&ServiceAtom::Service1)
-            && !state.remote_connections.contains(&RemoteAuthorityAtom::Edge1)
-            && state.service1 == ServiceLifecyclePhase::Absent
-            && state.local_rpc_target != Some(ServiceAtom::Service1)
-            && state.remote_rpc_target != Some(ServiceAtom::Service1)
-            && state.remote_rpc_authority != Some(RemoteAuthorityAtom::Edge1)
-    }
-}
-
-#[action_constraint(
-    SystemSpec,
-    cases(
-        "explicit_control_rpc_focus",
-        "symbolic_control_rpc_focus",
-        "symbolic_shutdown_progress"
-    )
-)]
 fn symbolic_focus_actions() -> nirvash::StepExpr<SystemState, SystemAction> {
     nirvash_step_expr! { symbolic_focus_actions(_prev, action, _next) =>
-        matches!(action, SystemAction::Manager(_))
-            || matches!(
-                action,
-                SystemAction::Control(ControlPlaneAction::AcceptSession(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::AuthenticateAdmin(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::AuthenticateClient(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::AuthenticateUnknown(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::OpenRequest(
-                        StreamAtom::Stream0,
-                        crate::RequestKindAtom::ServicesList
-                    ))
-                    | SystemAction::Control(ControlPlaneAction::CompleteResponse(
-                        StreamAtom::Stream0,
-                        crate::RequestKindAtom::ServicesList
-                    ))
-                    | SystemAction::Control(ControlPlaneAction::RejectRequest(
-                        StreamAtom::Stream0,
-                        crate::RequestKindAtom::ServicesList
-                    ))
-                    | SystemAction::Control(ControlPlaneAction::StartLogFollow(StreamAtom::Stream0))
-                    | SystemAction::Control(ControlPlaneAction::FinishLogFollow(StreamAtom::Stream0))
-                    | SystemAction::Control(ControlPlaneAction::UploadAuthority(SessionAtom::Session0))
-                    | SystemAction::Control(ControlPlaneAction::CloseStream(StreamAtom::Stream0))
-                    | SystemAction::Control(ControlPlaneAction::DrainSession(SessionAtom::Session0))
-            )
-            || matches!(
-                action,
-                SystemAction::Service(ServicePlaneAction::UploadArtifact(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::CommitArtifact(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::PromoteArtifact(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::PrepareService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::StartService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::StopService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::ReapService(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::TriggerRollback(ServiceAtom::Service0))
-                    | SystemAction::Service(ServicePlaneAction::FinishRollback(ServiceAtom::Service0))
-            )
-            || matches!(
-                action,
-                SystemAction::Operation(OperationPlaneAction::GrantBinding(ServiceAtom::Service0))
-                    | SystemAction::Operation(OperationPlaneAction::RevokeBinding(ServiceAtom::Service0))
-                    | SystemAction::Operation(OperationPlaneAction::StartCommand(_))
-                    | SystemAction::Operation(OperationPlaneAction::MarkCommandRunning)
-                    | SystemAction::Operation(OperationPlaneAction::RequestCommandCancel)
-                    | SystemAction::Operation(OperationPlaneAction::FinishCommandSucceeded)
-                    | SystemAction::Operation(OperationPlaneAction::FinishCommandFailed(
-                        CommandErrorKind::Internal
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::FinishCommandCanceled)
-                    | SystemAction::Operation(OperationPlaneAction::ClearCommandSlot)
-                    | SystemAction::Operation(OperationPlaneAction::StartLocalRpc(ServiceAtom::Service0))
-                    | SystemAction::Operation(OperationPlaneAction::CompleteLocalRpc(ServiceAtom::Service0))
-                    | SystemAction::Operation(OperationPlaneAction::DenyLocalRpc(ServiceAtom::Service0))
-                    | SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::DenyRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                    | SystemAction::Operation(OperationPlaneAction::DisconnectRemote(
-                        RemoteAuthorityAtom::Edge0
-                    ))
-            )
-    }
-}
-
-#[invariant(SystemSpec)]
-fn control_and_operation_require_manager_uptime() -> BoolExpr<SystemState> {
-    nirvash_expr! { control_and_operation_require_manager_uptime(state) =>
-        !(
-            state.active_sessions.some()
-                || state.active_streams.some()
-                || state.command_state.is_some()
-                || state.local_rpc_target.is_some()
-                || state.remote_rpc_target.is_some()
+        matches!(action,
+            SystemEvent::LoadConfig(false)
+                | SystemEvent::FinishRestore
+                | SystemEvent::AcceptSession(SessionId::Session0, TransportPrincipal::Client)
+                | SystemEvent::AuthenticateSession(SessionId::Session0, SessionRole::Client)
+                | SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::HelloNegotiate)
+                | SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::RpcInvoke)
+                | SystemEvent::CompleteMessage(SessionId::Session0)
+                | SystemEvent::PrepareService(ServiceId::Service0)
+                | SystemEvent::CommitService(ServiceId::Service0)
+                | SystemEvent::PromoteService(ServiceId::Service0)
+                | SystemEvent::StartService(ServiceId::Service0)
+                | SystemEvent::RequestShutdown
+                | SystemEvent::DrainSession(SessionId::Session0)
+                | SystemEvent::ConfirmSessionsDrained
+                | SystemEvent::StopService(ServiceId::Service0)
+                | SystemEvent::ConfirmServicesStopped
+                | SystemEvent::ConfirmMaintenanceStopped
+                | SystemEvent::CompleteShutdown
         )
-            || matches!(
-                state.manager_phase,
-                ManagerPhase::Listening | ManagerPhase::Maintenance | ManagerPhase::ShutdownRequested
-            )
+    }
+}
+
+fn system_model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
+    let mut cases = base_model_cases();
+    cases.extend(crate::manager_view::model_cases());
+    cases.extend(crate::control_view::model_cases());
+    cases.extend(crate::service_view::model_cases());
+    cases.extend(crate::operation_view::model_cases());
+    cases.extend(crate::authz_view::model_cases());
+    cases
+}
+
+#[invariant(SystemSpec)]
+fn shutdown_disables_new_control() -> BoolExpr<SystemState> {
+    nirvash_expr! { shutdown_disables_new_control(state) =>
+        state.manager_phase != ManagerPhase::ShutdownRequested || !state.manager_accepts_control
     }
 }
 
 #[invariant(SystemSpec)]
-fn stopped_manager_is_quiescent() -> BoolExpr<SystemState> {
-    nirvash_expr! { stopped_manager_is_quiescent(state) =>
-        !matches!(state.manager_phase, ManagerPhase::Stopped)
+fn completed_shutdown_is_quiescent() -> BoolExpr<SystemState> {
+    nirvash_expr! { completed_shutdown_is_quiescent(state) =>
+        state.manager_shutdown_phase != ManagerShutdownPhase::Completed
             || (
-                !state.accepts_control
-                    && state.active_streams.no()
-                    && state.command_state.is_none()
-                    && state.local_rpc_target.is_none()
-                    && state.remote_rpc_target.is_none()
+                state.manager_phase == ManagerPhase::Stopped
+                    && !state.manager_accepts_control
+                    && !state.active_sessions.contains(&SessionId::Session0)
+                    && !state.active_sessions.contains(&SessionId::Session1)
+                    && state.command_state == None
+                    && state.local_rpc_target == None
+                    && state.remote_rpc_target == None
+                    && state.remote_rpc_authority == None
             )
     }
 }
 
 #[invariant(SystemSpec)]
-fn rpc_target_requires_binding_and_running_service() -> BoolExpr<SystemState> {
-    nirvash_expr! { rpc_target_requires_binding_and_running_service(state) =>
-        (state.local_rpc_target != Some(ServiceAtom::Service0)
-            || (state.bound_services.contains(&ServiceAtom::Service0)
-                && matches!(state.service0, ServiceLifecyclePhase::Running)))
-            && (state.local_rpc_target != Some(ServiceAtom::Service1)
-                || (state.bound_services.contains(&ServiceAtom::Service1)
-                    && matches!(state.service1, ServiceLifecyclePhase::Running)))
-            && (state.remote_rpc_target != Some(ServiceAtom::Service0)
-                || (state.bound_services.contains(&ServiceAtom::Service0)
-                    && matches!(state.service0, ServiceLifecyclePhase::Running)))
-            && (state.remote_rpc_target != Some(ServiceAtom::Service1)
-                || (state.bound_services.contains(&ServiceAtom::Service1)
-                    && matches!(state.service1, ServiceLifecyclePhase::Running)))
-    }
-}
-
-#[invariant(SystemSpec)]
-fn shutdown_stops_accepting_new_control() -> BoolExpr<SystemState> {
-    nirvash_expr! { shutdown_stops_accepting_new_control(state) =>
-        !state.shutdown_started || !state.accepts_control
-    }
-}
-
-#[property(SystemSpec)]
-fn shutdown_started_leads_to_stopped() -> Ltl<SystemState, SystemAction> {
-    Ltl::leads_to(
-        Ltl::pred(nirvash_expr! { shutdown_started(state) => state.shutdown_started }),
-        Ltl::pred(
-            nirvash_expr! { stopped(state) => matches!(state.manager_phase, ManagerPhase::Stopped) },
-        ),
-    )
-}
-
-#[property(SystemSpec)]
-fn active_rpc_leads_to_quiescence() -> Ltl<SystemState, SystemAction> {
-    Ltl::leads_to(
-        Ltl::pred(nirvash_expr! { active_rpc(state) =>
-            state.local_rpc_target.is_some() || state.remote_rpc_target.is_some()
-        }),
-        Ltl::pred(nirvash_expr! { quiescent_rpc(state) =>
-            state.local_rpc_target.is_none() && state.remote_rpc_target.is_none()
-        }),
-    )
-}
-
-#[fairness(SystemSpec)]
-fn shutdown_finish_progress() -> Fairness<SystemState, SystemAction> {
-    Fairness::weak(
-        nirvash_step_expr! { shutdown_finish_progress(prev, action, next) =>
-            matches!(prev.manager_phase, ManagerPhase::ShutdownRequested)
-                && prev.services_drained
-                && prev.maintenance_stopped
-                && matches!(action, SystemAction::Manager(ManagerPlaneAction::FinishShutdown))
-                && matches!(next.manager_phase, ManagerPhase::Stopped)
-        },
-    )
-}
-
-#[fairness(SystemSpec)]
-fn rpc_progress() -> Fairness<SystemState, SystemAction> {
-    Fairness::weak(nirvash_step_expr! { rpc_progress(prev, action, next) =>
-        (prev.local_rpc_target.is_some()
-            && matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteLocalRpc(_)))
-            && next.local_rpc_target.is_none())
-        || (prev.remote_rpc_target.is_some()
-            && matches!(
-                action,
-                SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(_, _))
-                    | SystemAction::Operation(OperationPlaneAction::DisconnectRemote(_))
+fn allowed_remote_rpc_requires_target_and_authority() -> BoolExpr<SystemState> {
+    nirvash_expr! { allowed_remote_rpc_requires_target_and_authority(state) =>
+        state.last_operation_decision != AuthorizationDecision::Allow
+            || state.last_operation_permission != Some(OperationPermission::RemoteInvoke)
+            || (
+                state.remote_rpc_target != None
+                    && state.remote_rpc_authority != None
+                    && (
+                        state.remote_rpc_target == Some(ServiceId::Service0)
+                            && state.service0_lifecycle == ServiceLifecyclePhase::Running
+                        || state.remote_rpc_target == Some(ServiceId::Service1)
+                            && state.service1_lifecycle == ServiceLifecyclePhase::Running
+                    )
             )
-            && next.remote_rpc_target.is_none())
-    })
+    }
 }
 
-#[system_spec(
-    model_cases(system_model_cases),
-    subsystems(
-        crate::manager_plane::ManagerPlaneSpec,
-        crate::control_plane::ControlPlaneSpec,
-        crate::service_plane::ServicePlaneSpec,
-        crate::operation_plane::OperationPlaneSpec
-    )
-)]
+#[system_spec(model_cases(system_model_cases))]
 impl FrontendSpec for SystemSpec {
     type State = SystemState;
     type Action = SystemAction;
 
     fn frontend_name(&self) -> &'static str {
-        "system"
+        std::any::type_name::<Self>()
     }
 
     fn initial_states(&self) -> Vec<Self::State> {
@@ -542,716 +161,1051 @@ impl FrontendSpec for SystemSpec {
     }
 
     fn actions(&self) -> Vec<Self::Action> {
-        self.actions_union()
+        <Self::Action as nirvash::ActionVocabulary>::action_vocabulary()
     }
 
     fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
-            rule load_existing_config when matches!(action, SystemAction::Manager(ManagerPlaneAction::LoadExistingConfig))
-                && matches!(prev.manager_phase, ManagerPhase::Booting) => {
-                set config_loaded <= true;
-                set created_default <= false;
+            rule load_config_created_default
+                when matches!(action, SystemEvent::LoadConfig(true))
+                    && prev.manager_phase == ManagerPhase::Booting => {
+                set manager_config_loaded <= true;
+                set manager_created_default <= true;
                 set manager_phase <= ManagerPhase::ConfigReady;
             }
 
-            rule create_default_config when matches!(action, SystemAction::Manager(ManagerPlaneAction::CreateDefaultConfig))
-                && matches!(prev.manager_phase, ManagerPhase::Booting) => {
-                set config_loaded <= true;
-                set created_default <= true;
+            rule load_config_existing
+                when matches!(action, SystemEvent::LoadConfig(false))
+                    && prev.manager_phase == ManagerPhase::Booting => {
+                set manager_config_loaded <= true;
+                set manager_created_default <= false;
                 set manager_phase <= ManagerPhase::ConfigReady;
             }
 
-            rule start_restore when matches!(action, SystemAction::Manager(ManagerPlaneAction::StartRestore))
-                && matches!(prev.manager_phase, ManagerPhase::ConfigReady)
-                && prev.config_loaded => {
-                set manager_phase <= ManagerPhase::Restoring;
-            }
-
-            rule finish_restore when matches!(action, SystemAction::Manager(ManagerPlaneAction::FinishRestore))
-                && matches!(prev.manager_phase, ManagerPhase::Restoring) => {
+            rule finish_restore
+                when matches!(action, SystemEvent::FinishRestore)
+                    && prev.manager_phase == ManagerPhase::ConfigReady => {
                 set manager_phase <= ManagerPhase::Listening;
-                set accepts_control <= true;
+                set manager_accepts_control <= true;
+                set maintenance_phase <= MaintenancePhase::Running;
             }
 
-            rule tick_maintenance when matches!(action, SystemAction::Manager(ManagerPlaneAction::TickMaintenance))
-                && matches!(prev.manager_phase, ManagerPhase::Listening | ManagerPhase::Maintenance)
-                && !prev.shutdown_started
-                && !prev.maintenance_ticks.is_max() => {
-                set manager_phase <= ManagerPhase::Maintenance;
-                set maintenance_ticks <= prev.maintenance_ticks.saturating_inc();
-            }
-
-            rule begin_shutdown when matches!(action, SystemAction::Manager(ManagerPlaneAction::BeginShutdown))
-                && matches!(prev.manager_phase, ManagerPhase::Listening | ManagerPhase::Maintenance) => {
-                set manager_phase <= ManagerPhase::ShutdownRequested;
-                set accepts_control <= false;
-                set shutdown_started <= true;
-            }
-
-            rule drain_services when matches!(action, SystemAction::Manager(ManagerPlaneAction::DrainServices))
-                && matches!(prev.manager_phase, ManagerPhase::ShutdownRequested)
-                && !matches!(prev.service0, ServiceLifecyclePhase::Running | ServiceLifecyclePhase::Stopping)
-                && !matches!(prev.service1, ServiceLifecyclePhase::Running | ServiceLifecyclePhase::Stopping) => {
-                set services_drained <= true;
-            }
-
-            rule stop_maintenance when matches!(action, SystemAction::Manager(ManagerPlaneAction::StopMaintenance))
-                && matches!(prev.manager_phase, ManagerPhase::ShutdownRequested) => {
-                set maintenance_stopped <= true;
-            }
-
-            rule finish_shutdown when matches!(action, SystemAction::Manager(ManagerPlaneAction::FinishShutdown))
-                && matches!(prev.manager_phase, ManagerPhase::ShutdownRequested)
-                && prev.services_drained
-                && prev.maintenance_stopped => {
-                set manager_phase <= ManagerPhase::Stopped;
-            }
-
-            rule accept_session0 when matches!(action, SystemAction::Control(ControlPlaneAction::AcceptSession(SessionAtom::Session0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && !prev.active_sessions.contains(&SessionAtom::Session0) => {
-                insert active_sessions <= SessionAtom::Session0;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule accept_session1 when matches!(action, SystemAction::Control(ControlPlaneAction::AcceptSession(SessionAtom::Session1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && !prev.active_sessions.contains(&SessionAtom::Session1) => {
-                insert active_sessions <= SessionAtom::Session1;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule authenticate_admin0 when matches!(action, SystemAction::Control(ControlPlaneAction::AuthenticateAdmin(SessionAtom::Session0)))
-                && prev.accepts_control
-                && prev.active_sessions.contains(&SessionAtom::Session0) => {
-                insert admin_sessions <= SessionAtom::Session0;
-                remove client_sessions <= SessionAtom::Session0;
-                set last_role <= Some(SessionRoleAtom::Admin);
-            }
-
-            rule authenticate_admin1 when matches!(action, SystemAction::Control(ControlPlaneAction::AuthenticateAdmin(SessionAtom::Session1)))
-                && prev.accepts_control
-                && prev.active_sessions.contains(&SessionAtom::Session1) => {
-                insert admin_sessions <= SessionAtom::Session1;
-                remove client_sessions <= SessionAtom::Session1;
-                set last_role <= Some(SessionRoleAtom::Admin);
-            }
-
-            rule authenticate_client0 when matches!(action, SystemAction::Control(ControlPlaneAction::AuthenticateClient(SessionAtom::Session0)))
-                && prev.accepts_control
-                && prev.active_sessions.contains(&SessionAtom::Session0) => {
-                insert client_sessions <= SessionAtom::Session0;
-                remove admin_sessions <= SessionAtom::Session0;
-                set last_role <= Some(SessionRoleAtom::Client);
-            }
-
-            rule authenticate_client1 when matches!(action, SystemAction::Control(ControlPlaneAction::AuthenticateClient(SessionAtom::Session1)))
-                && prev.accepts_control
-                && prev.active_sessions.contains(&SessionAtom::Session1) => {
-                insert client_sessions <= SessionAtom::Session1;
-                remove admin_sessions <= SessionAtom::Session1;
-                set last_role <= Some(SessionRoleAtom::Client);
-            }
-
-            rule authenticate_unknown0 when matches!(action, SystemAction::Control(ControlPlaneAction::AuthenticateUnknown(SessionAtom::Session0)))
-                && prev.accepts_control
-                && prev.active_sessions.contains(&SessionAtom::Session0) => {
-                remove admin_sessions <= SessionAtom::Session0;
-                remove client_sessions <= SessionAtom::Session0;
-                set last_role <= Some(SessionRoleAtom::Unknown);
-            }
-
-            rule authenticate_unknown1 when matches!(action, SystemAction::Control(ControlPlaneAction::AuthenticateUnknown(SessionAtom::Session1)))
-                && prev.accepts_control
-                && prev.active_sessions.contains(&SessionAtom::Session1) => {
-                remove admin_sessions <= SessionAtom::Session1;
-                remove client_sessions <= SessionAtom::Session1;
-                set last_role <= Some(SessionRoleAtom::Unknown);
-            }
-
-            rule open_request0 when matches!(action, SystemAction::Control(ControlPlaneAction::OpenRequest(StreamAtom::Stream0, _)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && !prev.active_streams.contains(&StreamAtom::Stream0) => {
-                insert active_streams <= StreamAtom::Stream0;
-                set request_phase <= RequestPhase::Pending;
-            }
-
-            rule open_request1 when matches!(action, SystemAction::Control(ControlPlaneAction::OpenRequest(StreamAtom::Stream1, _)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && !prev.active_streams.contains(&StreamAtom::Stream1) => {
-                insert active_streams <= StreamAtom::Stream1;
-                set request_phase <= RequestPhase::Pending;
-            }
-
-            rule complete_response0 when matches!(action, SystemAction::Control(ControlPlaneAction::CompleteResponse(StreamAtom::Stream0, _)))
-                && prev.active_streams.contains(&StreamAtom::Stream0)
-                && matches!(prev.request_phase, RequestPhase::Pending) => {
-                set request_phase <= RequestPhase::Responded;
-            }
-
-            rule complete_response1 when matches!(action, SystemAction::Control(ControlPlaneAction::CompleteResponse(StreamAtom::Stream1, _)))
-                && prev.active_streams.contains(&StreamAtom::Stream1)
-                && matches!(prev.request_phase, RequestPhase::Pending) => {
-                set request_phase <= RequestPhase::Responded;
-            }
-
-            rule reject_request0 when matches!(action, SystemAction::Control(ControlPlaneAction::RejectRequest(StreamAtom::Stream0, _)))
-                && prev.active_streams.contains(&StreamAtom::Stream0)
-                && matches!(prev.request_phase, RequestPhase::Pending) => {
-                set request_phase <= RequestPhase::Rejected;
-            }
-
-            rule reject_request1 when matches!(action, SystemAction::Control(ControlPlaneAction::RejectRequest(StreamAtom::Stream1, _)))
-                && prev.active_streams.contains(&StreamAtom::Stream1)
-                && matches!(prev.request_phase, RequestPhase::Pending) => {
-                set request_phase <= RequestPhase::Rejected;
-            }
-
-            rule start_log_follow0 when matches!(action, SystemAction::Control(ControlPlaneAction::StartLogFollow(StreamAtom::Stream0)))
-                && prev.active_streams.contains(&StreamAtom::Stream0)
-                && !prev.shutdown_started => {
-                set request_phase <= RequestPhase::FollowingLogs0;
-            }
-
-            rule start_log_follow1 when matches!(action, SystemAction::Control(ControlPlaneAction::StartLogFollow(StreamAtom::Stream1)))
-                && prev.active_streams.contains(&StreamAtom::Stream1)
-                && !prev.shutdown_started => {
-                set request_phase <= RequestPhase::FollowingLogs1;
-            }
-
-            rule finish_log_follow0 when matches!(action, SystemAction::Control(ControlPlaneAction::FinishLogFollow(StreamAtom::Stream0)))
-                && matches!(prev.request_phase, RequestPhase::FollowingLogs0) => {
-                remove active_streams <= StreamAtom::Stream0;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule finish_log_follow1 when matches!(action, SystemAction::Control(ControlPlaneAction::FinishLogFollow(StreamAtom::Stream1)))
-                && matches!(prev.request_phase, RequestPhase::FollowingLogs1) => {
-                remove active_streams <= StreamAtom::Stream1;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule upload_authority0 when matches!(action, SystemAction::Control(ControlPlaneAction::UploadAuthority(SessionAtom::Session0)))
-                && prev.accepts_control
-                && prev.client_sessions.contains(&SessionAtom::Session0) => {
-                set authority_uploaded <= true;
-            }
-
-            rule upload_authority1 when matches!(action, SystemAction::Control(ControlPlaneAction::UploadAuthority(SessionAtom::Session1)))
-                && prev.accepts_control
-                && prev.client_sessions.contains(&SessionAtom::Session1) => {
-                set authority_uploaded <= true;
-            }
-
-            rule close_stream0 when matches!(action, SystemAction::Control(ControlPlaneAction::CloseStream(StreamAtom::Stream0)))
-                && prev.active_streams.contains(&StreamAtom::Stream0) => {
-                remove active_streams <= StreamAtom::Stream0;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule close_stream1 when matches!(action, SystemAction::Control(ControlPlaneAction::CloseStream(StreamAtom::Stream1)))
-                && prev.active_streams.contains(&StreamAtom::Stream1) => {
-                remove active_streams <= StreamAtom::Stream1;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule drain_session0 when matches!(action, SystemAction::Control(ControlPlaneAction::DrainSession(SessionAtom::Session0)))
-                && prev.active_sessions.contains(&SessionAtom::Session0) => {
-                remove active_sessions <= SessionAtom::Session0;
-                remove admin_sessions <= SessionAtom::Session0;
-                remove client_sessions <= SessionAtom::Session0;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule drain_session1 when matches!(action, SystemAction::Control(ControlPlaneAction::DrainSession(SessionAtom::Session1)))
-                && prev.active_sessions.contains(&SessionAtom::Session1) => {
-                remove active_sessions <= SessionAtom::Session1;
-                remove admin_sessions <= SessionAtom::Session1;
-                remove client_sessions <= SessionAtom::Session1;
-                set request_phase <= RequestPhase::Idle;
-            }
-
-            rule upload_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::UploadArtifact(ServiceAtom::Service0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(
-                    prev.service0,
-                    ServiceLifecyclePhase::Absent | ServiceLifecyclePhase::RolledBack | ServiceLifecyclePhase::Reaped
-                ) => {
-                set service0 <= ServiceLifecyclePhase::Uploaded;
-            }
-
-            rule upload_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::UploadArtifact(ServiceAtom::Service1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(
-                    prev.service1,
-                    ServiceLifecyclePhase::Absent | ServiceLifecyclePhase::RolledBack | ServiceLifecyclePhase::Reaped
-                ) => {
-                set service1 <= ServiceLifecyclePhase::Uploaded;
-            }
-
-            rule commit_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::CommitArtifact(ServiceAtom::Service0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(prev.service0, ServiceLifecyclePhase::Uploaded) => {
-                set service0 <= ServiceLifecyclePhase::Committed;
-            }
-
-            rule commit_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::CommitArtifact(ServiceAtom::Service1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(prev.service1, ServiceLifecyclePhase::Uploaded) => {
-                set service1 <= ServiceLifecyclePhase::Committed;
-            }
-
-            rule promote_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::PromoteArtifact(ServiceAtom::Service0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(prev.service0, ServiceLifecyclePhase::Committed) => {
-                set service0 <= ServiceLifecyclePhase::Promoted;
-            }
-
-            rule promote_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::PromoteArtifact(ServiceAtom::Service1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(prev.service1, ServiceLifecyclePhase::Committed) => {
-                set service1 <= ServiceLifecyclePhase::Promoted;
-            }
-
-            rule prepare_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::PrepareService(ServiceAtom::Service0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(prev.service0, ServiceLifecyclePhase::Promoted) => {
-                set service0 <= ServiceLifecyclePhase::Ready;
-            }
-
-            rule prepare_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::PrepareService(ServiceAtom::Service1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && matches!(prev.service1, ServiceLifecyclePhase::Promoted) => {
-                set service1 <= ServiceLifecyclePhase::Ready;
-            }
-
-            rule start_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::StartService(ServiceAtom::Service0)))
-                && !prev.shutdown_started
-                && matches!(prev.service0, ServiceLifecyclePhase::Ready) => {
-                set service0 <= ServiceLifecyclePhase::Running;
-            }
-
-            rule start_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::StartService(ServiceAtom::Service1)))
-                && !prev.shutdown_started
-                && matches!(prev.service1, ServiceLifecyclePhase::Ready) => {
-                set service1 <= ServiceLifecyclePhase::Running;
-            }
-
-            rule stop_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::StopService(ServiceAtom::Service0)))
-                && matches!(prev.service0, ServiceLifecyclePhase::Running) => {
-                set service0 <= ServiceLifecyclePhase::Stopping;
-            }
-
-            rule stop_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::StopService(ServiceAtom::Service1)))
-                && matches!(prev.service1, ServiceLifecyclePhase::Running) => {
-                set service1 <= ServiceLifecyclePhase::Stopping;
-            }
-
-            rule reap_service0 when matches!(action, SystemAction::Service(ServicePlaneAction::ReapService(ServiceAtom::Service0)))
-                && matches!(prev.service0, ServiceLifecyclePhase::Stopping) => {
-                set service0 <= ServiceLifecyclePhase::Reaped;
-            }
-
-            rule reap_service1 when matches!(action, SystemAction::Service(ServicePlaneAction::ReapService(ServiceAtom::Service1)))
-                && matches!(prev.service1, ServiceLifecyclePhase::Stopping) => {
-                set service1 <= ServiceLifecyclePhase::Reaped;
-            }
-
-            rule trigger_rollback0 when matches!(action, SystemAction::Service(ServicePlaneAction::TriggerRollback(ServiceAtom::Service0)))
-                && matches!(
-                    prev.service0,
-                    ServiceLifecyclePhase::Committed | ServiceLifecyclePhase::Promoted | ServiceLifecyclePhase::Ready
-                ) => {
-                set service0 <= ServiceLifecyclePhase::RollbackPending;
-            }
-
-            rule trigger_rollback1 when matches!(action, SystemAction::Service(ServicePlaneAction::TriggerRollback(ServiceAtom::Service1)))
-                && matches!(
-                    prev.service1,
-                    ServiceLifecyclePhase::Committed | ServiceLifecyclePhase::Promoted | ServiceLifecyclePhase::Ready
-                ) => {
-                set service1 <= ServiceLifecyclePhase::RollbackPending;
-            }
-
-            rule finish_rollback0 when matches!(action, SystemAction::Service(ServicePlaneAction::FinishRollback(ServiceAtom::Service0)))
-                && matches!(prev.service0, ServiceLifecyclePhase::RollbackPending) => {
-                set service0 <= ServiceLifecyclePhase::RolledBack;
-            }
-
-            rule finish_rollback1 when matches!(action, SystemAction::Service(ServicePlaneAction::FinishRollback(ServiceAtom::Service1)))
-                && matches!(prev.service1, ServiceLifecyclePhase::RollbackPending) => {
-                set service1 <= ServiceLifecyclePhase::RolledBack;
-            }
-
-            rule grant_binding0 when matches!(action, SystemAction::Operation(OperationPlaneAction::GrantBinding(ServiceAtom::Service0)))
-                && !prev.bound_services.contains(&ServiceAtom::Service0)
-                && !prev.shutdown_started => {
-                insert bound_services <= ServiceAtom::Service0;
-            }
-
-            rule grant_binding1 when matches!(action, SystemAction::Operation(OperationPlaneAction::GrantBinding(ServiceAtom::Service1)))
-                && !prev.bound_services.contains(&ServiceAtom::Service1)
-                && !prev.shutdown_started => {
-                insert bound_services <= ServiceAtom::Service1;
-            }
-
-            rule revoke_binding0 when matches!(action, SystemAction::Operation(OperationPlaneAction::RevokeBinding(ServiceAtom::Service0)))
-                && prev.bound_services.contains(&ServiceAtom::Service0)
-                && prev.local_rpc_target != Some(ServiceAtom::Service0)
-                && prev.remote_rpc_target != Some(ServiceAtom::Service0) => {
-                remove bound_services <= ServiceAtom::Service0;
-            }
-
-            rule revoke_binding1 when matches!(action, SystemAction::Operation(OperationPlaneAction::RevokeBinding(ServiceAtom::Service1)))
-                && prev.bound_services.contains(&ServiceAtom::Service1)
-                && prev.local_rpc_target != Some(ServiceAtom::Service1)
-                && prev.remote_rpc_target != Some(ServiceAtom::Service1) => {
-                remove bound_services <= ServiceAtom::Service1;
-            }
-
-            rule start_command when matches!(action, SystemAction::Operation(OperationPlaneAction::StartCommand(_)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && prev.command_state.is_none() => {
-                set command_kind <= if matches!(
-                    action,
-                    SystemAction::Operation(OperationPlaneAction::StartCommand(CommandKind::Deploy))
-                ) {
-                    Some(CommandKind::Deploy)
-                } else if matches!(
-                    action,
-                    SystemAction::Operation(OperationPlaneAction::StartCommand(CommandKind::Run))
-                ) {
-                    Some(CommandKind::Run)
+            rule accept_session0
+                when matches!(action, SystemEvent::AcceptSession(SessionId::Session0, _))
+                    && prev.manager_accepts_control
+                    && prev.session0_auth == SessionAuthState::Disconnected => {
+                insert active_sessions <= SessionId::Session0;
+                set session0_principal <= if matches!(action, SystemEvent::AcceptSession(SessionId::Session0, TransportPrincipal::Admin)) {
+                    TransportPrincipal::Admin
+                } else if matches!(action, SystemEvent::AcceptSession(SessionId::Session0, TransportPrincipal::Client)) {
+                    TransportPrincipal::Client
+                } else if matches!(action, SystemEvent::AcceptSession(SessionId::Session0, TransportPrincipal::ServiceRunner)) {
+                    TransportPrincipal::ServiceRunner
                 } else {
-                    Some(CommandKind::Stop)
+                    TransportPrincipal::Unknown
                 };
-                set command_state <= Some(CommandLifecycleState::Accepted);
-                set cancel_requested <= false;
+                set session0_auth <= SessionAuthState::Accepted;
+                set session0_role <= SessionRole::Unknown;
+                set session0_request <= SessionRequestState::Idle;
             }
 
-            rule mark_command_running when matches!(action, SystemAction::Operation(OperationPlaneAction::MarkCommandRunning))
-                && matches!(prev.command_state, Some(CommandLifecycleState::Accepted)) => {
-                set command_state <= Some(CommandLifecycleState::Running);
+            rule accept_session1
+                when matches!(action, SystemEvent::AcceptSession(SessionId::Session1, _))
+                    && prev.manager_accepts_control
+                    && prev.session1_auth == SessionAuthState::Disconnected => {
+                insert active_sessions <= SessionId::Session1;
+                set session1_principal <= if matches!(action, SystemEvent::AcceptSession(SessionId::Session1, TransportPrincipal::Admin)) {
+                    TransportPrincipal::Admin
+                } else if matches!(action, SystemEvent::AcceptSession(SessionId::Session1, TransportPrincipal::Client)) {
+                    TransportPrincipal::Client
+                } else if matches!(action, SystemEvent::AcceptSession(SessionId::Session1, TransportPrincipal::ServiceRunner)) {
+                    TransportPrincipal::ServiceRunner
+                } else {
+                    TransportPrincipal::Unknown
+                };
+                set session1_auth <= SessionAuthState::Accepted;
+                set session1_role <= SessionRole::Unknown;
+                set session1_request <= SessionRequestState::Idle;
             }
 
-            rule request_command_cancel when matches!(action, SystemAction::Operation(OperationPlaneAction::RequestCommandCancel))
-                && matches!(
-                    prev.command_state,
-                    Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
+            rule authenticate_session0
+                when matches!(action, SystemEvent::AuthenticateSession(SessionId::Session0, _))
+                    && prev.session0_auth == SessionAuthState::Accepted => {
+                set session0_auth <= SessionAuthState::Authenticated;
+                set session0_role <= if matches!(action, SystemEvent::AuthenticateSession(SessionId::Session0, SessionRole::Admin)) {
+                    SessionRole::Admin
+                } else if matches!(action, SystemEvent::AuthenticateSession(SessionId::Session0, SessionRole::Client)) {
+                    SessionRole::Client
+                } else if matches!(action, SystemEvent::AuthenticateSession(SessionId::Session0, SessionRole::ServiceRunner)) {
+                    SessionRole::ServiceRunner
+                } else {
+                    SessionRole::Unknown
+                };
+            }
+
+            rule authenticate_session1
+                when matches!(action, SystemEvent::AuthenticateSession(SessionId::Session1, _))
+                    && prev.session1_auth == SessionAuthState::Accepted => {
+                set session1_auth <= SessionAuthState::Authenticated;
+                set session1_role <= if matches!(action, SystemEvent::AuthenticateSession(SessionId::Session1, SessionRole::Admin)) {
+                    SessionRole::Admin
+                } else if matches!(action, SystemEvent::AuthenticateSession(SessionId::Session1, SessionRole::Client)) {
+                    SessionRole::Client
+                } else if matches!(action, SystemEvent::AuthenticateSession(SessionId::Session1, SessionRole::ServiceRunner)) {
+                    SessionRole::ServiceRunner
+                } else {
+                    SessionRole::Unknown
+                };
+            }
+
+            rule drain_session0
+                when matches!(action, SystemEvent::DrainSession(SessionId::Session0))
+                    && prev.active_sessions.contains(&SessionId::Session0) => {
+                remove active_sessions <= SessionId::Session0;
+                set session0_auth <= SessionAuthState::Drained;
+                set session0_request <= SessionRequestState::Idle;
+            }
+
+            rule drain_session1
+                when matches!(action, SystemEvent::DrainSession(SessionId::Session1))
+                    && prev.active_sessions.contains(&SessionId::Session1) => {
+                remove active_sessions <= SessionId::Session1;
+                set session1_auth <= SessionAuthState::Drained;
+                set session1_request <= SessionRequestState::Idle;
+            }
+
+            rule request_message_session0_hello
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::HelloNegotiate))
+                    && prev.session0_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session0);
+                set last_message <= Some(ExternalMessage::HelloNegotiate);
+                set last_message_decision <= if prev.session0_principal == TransportPrincipal::Unknown {
+                    AuthorizationDecision::DenyUnknownPrincipal
+                } else {
+                    AuthorizationDecision::Allow
+                };
+                set session0_request <= if prev.session0_principal == TransportPrincipal::Unknown {
+                    SessionRequestState::Denied
+                } else {
+                    SessionRequestState::Pending
+                };
+            }
+
+            rule request_message_session0_command_start
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::CommandStart))
+                    && prev.session0_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session0);
+                set last_message <= Some(ExternalMessage::CommandStart);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session0_role == SessionRole::Admin {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session0_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session0_role == SessionRole::Admin {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session0_logs
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::LogsRequest))
+                    && prev.session0_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session0);
+                set last_message <= Some(ExternalMessage::LogsRequest);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session0_role == SessionRole::Admin {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session0_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session0_role == SessionRole::Admin {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session0_rpc
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::RpcInvoke))
+                    && prev.session0_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session0);
+                set last_message <= Some(ExternalMessage::RpcInvoke);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session0_role == SessionRole::Admin || prev.session0_role == SessionRole::Client {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session0_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session0_role == SessionRole::Admin || prev.session0_role == SessionRole::Client {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session0_bindings
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session0, ExternalMessage::BindingsCertUpload))
+                    && prev.session0_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session0);
+                set last_message <= Some(ExternalMessage::BindingsCertUpload);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session0_role == SessionRole::Admin {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session0_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session0_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session0_role == SessionRole::Admin {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session1_hello
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session1, ExternalMessage::HelloNegotiate))
+                    && prev.session1_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session1);
+                set last_message <= Some(ExternalMessage::HelloNegotiate);
+                set last_message_decision <= if prev.session1_principal == TransportPrincipal::Unknown {
+                    AuthorizationDecision::DenyUnknownPrincipal
+                } else {
+                    AuthorizationDecision::Allow
+                };
+                set session1_request <= if prev.session1_principal == TransportPrincipal::Unknown {
+                    SessionRequestState::Denied
+                } else {
+                    SessionRequestState::Pending
+                };
+            }
+
+            rule request_message_session1_command_start
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session1, ExternalMessage::CommandStart))
+                    && prev.session1_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session1);
+                set last_message <= Some(ExternalMessage::CommandStart);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session1_role == SessionRole::Admin {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session1_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session1_role == SessionRole::Admin {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session1_logs
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session1, ExternalMessage::LogsRequest))
+                    && prev.session1_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session1);
+                set last_message <= Some(ExternalMessage::LogsRequest);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session1_role == SessionRole::Admin {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session1_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session1_role == SessionRole::Admin {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session1_rpc
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session1, ExternalMessage::RpcInvoke))
+                    && prev.session1_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session1);
+                set last_message <= Some(ExternalMessage::RpcInvoke);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session1_role == SessionRole::Admin || prev.session1_role == SessionRole::Client {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session1_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session1_role == SessionRole::Admin || prev.session1_role == SessionRole::Client {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule request_message_session1_bindings
+                when matches!(action, SystemEvent::RequestMessage(SessionId::Session1, ExternalMessage::BindingsCertUpload))
+                    && prev.session1_auth != SessionAuthState::Disconnected => {
+                set last_message_session <= Some(SessionId::Session1);
+                set last_message <= Some(ExternalMessage::BindingsCertUpload);
+                set last_message_decision <= if !prev.manager_accepts_control {
+                    AuthorizationDecision::DenyManagerNotListening
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    AuthorizationDecision::DenySessionDrained
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    AuthorizationDecision::DenySessionNotAuthenticated
+                } else if prev.session1_role == SessionRole::Admin {
+                    AuthorizationDecision::Allow
+                } else {
+                    AuthorizationDecision::DenyMessageNotAllowed
+                };
+                set session1_request <= if !prev.manager_accepts_control {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth == SessionAuthState::Drained {
+                    SessionRequestState::Denied
+                } else if prev.session1_auth != SessionAuthState::Authenticated {
+                    SessionRequestState::Denied
+                } else if prev.session1_role == SessionRole::Admin {
+                    SessionRequestState::Pending
+                } else {
+                    SessionRequestState::Denied
+                };
+            }
+
+            rule complete_message_session0
+                when matches!(action, SystemEvent::CompleteMessage(SessionId::Session0))
+                    && prev.session0_request == SessionRequestState::Pending => {
+                set session0_request <= SessionRequestState::Completed;
+            }
+
+            rule complete_message_session1
+                when matches!(action, SystemEvent::CompleteMessage(SessionId::Session1))
+                    && prev.session1_request == SessionRequestState::Pending => {
+                set session1_request <= SessionRequestState::Completed;
+            }
+
+            rule prepare_service
+                when matches!(action, SystemEvent::PrepareService(_))
+                    && prev.manager_phase == ManagerPhase::Listening => {
+                set service0_lifecycle <= if matches!(action, SystemEvent::PrepareService(ServiceId::Service0)) {
+                    ServiceLifecyclePhase::Prepared
+                } else {
+                    state.service0_lifecycle
+                };
+                set service1_lifecycle <= if matches!(action, SystemEvent::PrepareService(ServiceId::Service1)) {
+                    ServiceLifecyclePhase::Prepared
+                } else {
+                    state.service1_lifecycle
+                };
+            }
+
+            rule commit_service
+                when matches!(action, SystemEvent::CommitService(_)) => {
+                set service0_lifecycle <= if matches!(action, SystemEvent::CommitService(ServiceId::Service0))
+                    && prev.service0_lifecycle == ServiceLifecyclePhase::Prepared {
+                    ServiceLifecyclePhase::Committed
+                } else {
+                    state.service0_lifecycle
+                };
+                set service1_lifecycle <= if matches!(action, SystemEvent::CommitService(ServiceId::Service1))
+                    && prev.service1_lifecycle == ServiceLifecyclePhase::Prepared {
+                    ServiceLifecyclePhase::Committed
+                } else {
+                    state.service1_lifecycle
+                };
+            }
+
+            rule promote_service
+                when matches!(action, SystemEvent::PromoteService(_)) => {
+                set service0_lifecycle <= if matches!(action, SystemEvent::PromoteService(ServiceId::Service0))
+                    && prev.service0_lifecycle == ServiceLifecyclePhase::Committed {
+                    ServiceLifecyclePhase::Promoted
+                } else {
+                    state.service0_lifecycle
+                };
+                set service1_lifecycle <= if matches!(action, SystemEvent::PromoteService(ServiceId::Service1))
+                    && prev.service1_lifecycle == ServiceLifecyclePhase::Committed {
+                    ServiceLifecyclePhase::Promoted
+                } else {
+                    state.service1_lifecycle
+                };
+            }
+
+            rule start_service
+                when matches!(action, SystemEvent::StartService(_))
+                    && prev.manager_phase == ManagerPhase::Listening => {
+                set service0_lifecycle <= if matches!(action, SystemEvent::StartService(ServiceId::Service0))
+                    && prev.service0_lifecycle == ServiceLifecyclePhase::Promoted {
+                    ServiceLifecyclePhase::Running
+                } else {
+                    state.service0_lifecycle
+                };
+                set service1_lifecycle <= if matches!(action, SystemEvent::StartService(ServiceId::Service1))
+                    && prev.service1_lifecycle == ServiceLifecyclePhase::Promoted {
+                    ServiceLifecyclePhase::Running
+                } else {
+                    state.service1_lifecycle
+                };
+            }
+
+            rule stop_service
+                when matches!(action, SystemEvent::StopService(_)) => {
+                set service0_lifecycle <= if matches!(action, SystemEvent::StopService(ServiceId::Service0))
+                    && prev.service0_lifecycle == ServiceLifecyclePhase::Running {
+                    ServiceLifecyclePhase::Stopping
+                } else {
+                    state.service0_lifecycle
+                };
+                set service1_lifecycle <= if matches!(action, SystemEvent::StopService(ServiceId::Service1))
+                    && prev.service1_lifecycle == ServiceLifecyclePhase::Running {
+                    ServiceLifecyclePhase::Stopping
+                } else {
+                    state.service1_lifecycle
+                };
+            }
+
+            rule verify_manager_auth
+                when matches!(action, SystemEvent::VerifyManagerAuth(_))
+                    && prev.manager_phase == ManagerPhase::Listening => {
+                set service0_manager_auth <= if matches!(action, SystemEvent::VerifyManagerAuth(ServiceId::Service0)) {
+                    ManagerAuthState::Verified
+                } else {
+                    state.service0_manager_auth
+                };
+                set service1_manager_auth <= if matches!(action, SystemEvent::VerifyManagerAuth(ServiceId::Service1)) {
+                    ManagerAuthState::Verified
+                } else {
+                    state.service1_manager_auth
+                };
+            }
+
+            rule grant_binding
+                when matches!(action, SystemEvent::GrantBinding(_))
+                    && prev.manager_phase == ManagerPhase::Listening => {
+                insert binding_grants <= if matches!(action, SystemEvent::GrantBinding(BindingGrantId::Service0ToService1ControlApi)) {
+                    BindingGrantId::Service0ToService1ControlApi
+                } else if matches!(action, SystemEvent::GrantBinding(BindingGrantId::Service0ToService1LogsApi)) {
+                    BindingGrantId::Service0ToService1LogsApi
+                } else if matches!(action, SystemEvent::GrantBinding(BindingGrantId::Service1ToService0ControlApi)) {
+                    BindingGrantId::Service1ToService0ControlApi
+                } else {
+                    BindingGrantId::Service1ToService0LogsApi
+                };
+            }
+
+            rule register_remote_authority
+                when matches!(action, SystemEvent::RegisterRemoteAuthority(_))
+                    && prev.manager_phase == ManagerPhase::Listening => {
+                insert trusted_authorities <= if matches!(action, SystemEvent::RegisterRemoteAuthority(RemoteAuthorityId::Authority0)) {
+                    RemoteAuthorityId::Authority0
+                } else {
+                    RemoteAuthorityId::Authority1
+                };
+            }
+
+            rule start_command
+                when matches!(action, SystemEvent::StartCommand(_))
+                    && prev.manager_accepts_control
+                    && prev.command_state == None => {
+                set command_kind <= if matches!(action, SystemEvent::StartCommand(imagod_spec::command_contract::CommandKind::Deploy)) {
+                    Some(imagod_spec::command_contract::CommandKind::Deploy)
+                } else if matches!(action, SystemEvent::StartCommand(imagod_spec::command_contract::CommandKind::Run)) {
+                    Some(imagod_spec::command_contract::CommandKind::Run)
+                } else {
+                    Some(imagod_spec::command_contract::CommandKind::Stop)
+                };
+                set command_state <= Some(imagod_spec::command_contract::CommandLifecycleState::Accepted);
+                set command_cancel_requested <= false;
+            }
+
+            rule request_command_cancel
+                when matches!(action, SystemEvent::RequestCommandCancel)
+                    && prev.command_state == Some(imagod_spec::command_contract::CommandLifecycleState::Accepted)
+                        || prev.command_state == Some(imagod_spec::command_contract::CommandLifecycleState::Running) => {
+                set command_cancel_requested <= true;
+                set last_operation_permission <= Some(OperationPermission::CancelCommand);
+                set last_operation_decision <= AuthorizationDecision::Allow;
+            }
+
+            rule finish_command
+                when matches!(action, SystemEvent::FinishCommand(_))
+                    && prev.command_state != None => {
+                set command_state <= if matches!(action, SystemEvent::FinishCommand(imagod_spec::CommandTerminalState::Succeeded)) {
+                    Some(imagod_spec::command_contract::CommandLifecycleState::Succeeded)
+                } else if matches!(action, SystemEvent::FinishCommand(imagod_spec::CommandTerminalState::Failed)) {
+                    Some(imagod_spec::command_contract::CommandLifecycleState::Failed)
+                } else {
+                    Some(imagod_spec::command_contract::CommandLifecycleState::Canceled)
+                };
+            }
+
+            rule resolve_invocation_target_allowed
+                when (
+                    matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service0, ServiceId::Service1, InterfaceId::ControlApi))
+                        && prev.service0_manager_auth == ManagerAuthState::Verified
+                        && prev.binding_grants.contains(&BindingGrantId::Service0ToService1ControlApi)
+                        && prev.service1_lifecycle == ServiceLifecyclePhase::Running
+                ) || (
+                    matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service1, ServiceId::Service0, InterfaceId::ControlApi))
+                        && prev.service1_manager_auth == ManagerAuthState::Verified
+                        && prev.binding_grants.contains(&BindingGrantId::Service1ToService0ControlApi)
+                        && prev.service0_lifecycle == ServiceLifecyclePhase::Running
                 ) => {
-                set cancel_requested <= true;
+                set last_operation_actor <= if matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service0, _, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::ResolveInvocationTarget);
+                set last_operation_decision <= AuthorizationDecision::Allow;
+                set local_rpc_target <= if matches!(action, SystemEvent::InvokeLocalRpc(_, ServiceId::Service0, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_rpc_outcome <= RpcOutcome::LocalInvoked;
             }
 
-            rule finish_command_succeeded when matches!(action, SystemAction::Operation(OperationPlaneAction::FinishCommandSucceeded))
-                && matches!(prev.command_state, Some(CommandLifecycleState::Running)) => {
-                set command_state <= Some(CommandLifecycleState::Succeeded);
-                set cancel_requested <= false;
+            rule resolve_invocation_target_denied
+                when matches!(action, SystemEvent::InvokeLocalRpc(_, _, InterfaceId::ControlApi))
+                    && !(
+                        matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service0, ServiceId::Service1, InterfaceId::ControlApi))
+                            && prev.service0_manager_auth == ManagerAuthState::Verified
+                            && prev.binding_grants.contains(&BindingGrantId::Service0ToService1ControlApi)
+                            && prev.service1_lifecycle == ServiceLifecyclePhase::Running
+                        || matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service1, ServiceId::Service0, InterfaceId::ControlApi))
+                            && prev.service1_manager_auth == ManagerAuthState::Verified
+                            && prev.binding_grants.contains(&BindingGrantId::Service1ToService0ControlApi)
+                            && prev.service0_lifecycle == ServiceLifecyclePhase::Running
+                    ) => {
+                set last_operation_actor <= if matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service0, _, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::ResolveInvocationTarget);
+                set last_operation_decision <= if matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service0, _, _))
+                    && prev.service0_manager_auth != ManagerAuthState::Verified
+                    || matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service1, _, _))
+                        && prev.service1_manager_auth != ManagerAuthState::Verified {
+                    AuthorizationDecision::DenyManagerAuthMissing
+                } else if matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service0, ServiceId::Service1, _))
+                    && !prev.binding_grants.contains(&BindingGrantId::Service0ToService1ControlApi)
+                    || matches!(action, SystemEvent::InvokeLocalRpc(ServiceId::Service1, ServiceId::Service0, _))
+                        && !prev.binding_grants.contains(&BindingGrantId::Service1ToService0ControlApi) {
+                    AuthorizationDecision::DenyBindingMissing
+                } else {
+                    AuthorizationDecision::DenyTargetServiceNotRunning
+                };
+                set last_rpc_outcome <= RpcOutcome::LocalDenied;
             }
 
-            rule finish_command_failed when matches!(action, SystemAction::Operation(OperationPlaneAction::FinishCommandFailed(_)))
-                && matches!(
-                    prev.command_state,
-                    Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
+            rule connect_remote_allowed
+                when (
+                    matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0))
+                        && prev.service0_manager_auth == ManagerAuthState::Verified
+                        && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                ) || (
+                    matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority0))
+                        && prev.service1_manager_auth == ManagerAuthState::Verified
+                        && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                ) || (
+                    matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority1))
+                        && prev.service0_manager_auth == ManagerAuthState::Verified
+                        && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority1)
+                ) || (
+                    matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority1))
+                        && prev.service1_manager_auth == ManagerAuthState::Verified
+                        && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority1)
                 ) => {
-                set command_state <= Some(CommandLifecycleState::Failed);
-                set cancel_requested <= false;
+                set last_operation_actor <= if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::RemoteConnect);
+                set last_operation_decision <= AuthorizationDecision::Allow;
+                set service0_remote_connection <= if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0)) {
+                    Some(RemoteAuthorityId::Authority0)
+                } else if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority1)) {
+                    Some(RemoteAuthorityId::Authority1)
+                } else {
+                    state.service0_remote_connection
+                };
+                set service1_remote_connection <= if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority0)) {
+                    Some(RemoteAuthorityId::Authority0)
+                } else if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority1)) {
+                    Some(RemoteAuthorityId::Authority1)
+                } else {
+                    state.service1_remote_connection
+                };
+                set remote_rpc_authority <= if matches!(action, SystemEvent::ConnectRemoteRpc(_, RemoteAuthorityId::Authority0)) {
+                    Some(RemoteAuthorityId::Authority0)
+                } else {
+                    Some(RemoteAuthorityId::Authority1)
+                };
+                set last_rpc_outcome <= RpcOutcome::RemoteConnected;
             }
 
-            rule finish_command_canceled when matches!(action, SystemAction::Operation(OperationPlaneAction::FinishCommandCanceled))
-                && matches!(
-                    prev.command_state,
-                    Some(CommandLifecycleState::Accepted | CommandLifecycleState::Running)
-                )
-                && prev.cancel_requested => {
-                set command_state <= Some(CommandLifecycleState::Canceled);
-                set cancel_requested <= false;
+            rule connect_remote_denied
+                when matches!(action, SystemEvent::ConnectRemoteRpc(_, _))
+                    && !(
+                        matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0))
+                            && prev.service0_manager_auth == ManagerAuthState::Verified
+                            && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                        || matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority0))
+                            && prev.service1_manager_auth == ManagerAuthState::Verified
+                            && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                        || matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority1))
+                            && prev.service0_manager_auth == ManagerAuthState::Verified
+                            && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority1)
+                        || matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority1))
+                            && prev.service1_manager_auth == ManagerAuthState::Verified
+                            && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority1)
+                    ) => {
+                set last_operation_actor <= if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::RemoteConnect);
+                set last_operation_decision <= if matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service0, _))
+                    && prev.service0_manager_auth != ManagerAuthState::Verified
+                    || matches!(action, SystemEvent::ConnectRemoteRpc(ServiceId::Service1, _))
+                        && prev.service1_manager_auth != ManagerAuthState::Verified {
+                    AuthorizationDecision::DenyManagerAuthMissing
+                } else {
+                    AuthorizationDecision::DenyRemoteAuthorityUnknown
+                };
+                set last_rpc_outcome <= RpcOutcome::RemoteDenied;
             }
 
-            rule clear_command_slot when matches!(action, SystemAction::Operation(OperationPlaneAction::ClearCommandSlot))
-                && prev.command_state.is_some_and(CommandLifecycleState::is_terminal) => {
+            rule invoke_remote_allowed
+                when (
+                    matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0, ServiceId::Service1, InterfaceId::ControlApi))
+                        && prev.service0_manager_auth == ManagerAuthState::Verified
+                        && prev.binding_grants.contains(&BindingGrantId::Service0ToService1ControlApi)
+                        && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                        && prev.service0_remote_connection == Some(RemoteAuthorityId::Authority0)
+                        && prev.service1_lifecycle == ServiceLifecyclePhase::Running
+                ) || (
+                    matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority0, ServiceId::Service0, InterfaceId::ControlApi))
+                        && prev.service1_manager_auth == ManagerAuthState::Verified
+                        && prev.binding_grants.contains(&BindingGrantId::Service1ToService0ControlApi)
+                        && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                        && prev.service1_remote_connection == Some(RemoteAuthorityId::Authority0)
+                        && prev.service0_lifecycle == ServiceLifecyclePhase::Running
+                ) => {
+                set last_operation_actor <= if matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, _, _, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::RemoteInvoke);
+                set last_operation_decision <= AuthorizationDecision::Allow;
+                set remote_rpc_target <= if matches!(action, SystemEvent::InvokeRemoteRpc(_, _, ServiceId::Service0, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set remote_rpc_authority <= if matches!(action, SystemEvent::InvokeRemoteRpc(_, RemoteAuthorityId::Authority0, _, _)) {
+                    Some(RemoteAuthorityId::Authority0)
+                } else {
+                    Some(RemoteAuthorityId::Authority1)
+                };
+                set last_rpc_outcome <= RpcOutcome::RemoteInvoked;
+            }
+
+            rule invoke_remote_denied
+                when matches!(action, SystemEvent::InvokeRemoteRpc(_, _, _, InterfaceId::ControlApi))
+                    && !(
+                        matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0, ServiceId::Service1, InterfaceId::ControlApi))
+                            && prev.service0_manager_auth == ManagerAuthState::Verified
+                            && prev.binding_grants.contains(&BindingGrantId::Service0ToService1ControlApi)
+                            && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                            && prev.service0_remote_connection == Some(RemoteAuthorityId::Authority0)
+                            && prev.service1_lifecycle == ServiceLifecyclePhase::Running
+                        || matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority0, ServiceId::Service0, InterfaceId::ControlApi))
+                            && prev.service1_manager_auth == ManagerAuthState::Verified
+                            && prev.binding_grants.contains(&BindingGrantId::Service1ToService0ControlApi)
+                            && prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                            && prev.service1_remote_connection == Some(RemoteAuthorityId::Authority0)
+                            && prev.service0_lifecycle == ServiceLifecyclePhase::Running
+                    ) => {
+                set last_operation_actor <= if matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, _, _, _)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::RemoteInvoke);
+                set last_operation_decision <= if matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, _, _, _))
+                    && prev.service0_manager_auth != ManagerAuthState::Verified
+                    || matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service1, _, _, _))
+                        && prev.service1_manager_auth != ManagerAuthState::Verified {
+                    AuthorizationDecision::DenyManagerAuthMissing
+                } else if matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, _, ServiceId::Service1, _))
+                    && !prev.binding_grants.contains(&BindingGrantId::Service0ToService1ControlApi)
+                    || matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service1, _, ServiceId::Service0, _))
+                        && !prev.binding_grants.contains(&BindingGrantId::Service1ToService0ControlApi) {
+                    AuthorizationDecision::DenyBindingMissing
+                } else if matches!(action, SystemEvent::InvokeRemoteRpc(_, RemoteAuthorityId::Authority0, _, _))
+                    && !prev.trusted_authorities.contains(&RemoteAuthorityId::Authority0)
+                    || matches!(action, SystemEvent::InvokeRemoteRpc(_, RemoteAuthorityId::Authority1, _, _))
+                        && !prev.trusted_authorities.contains(&RemoteAuthorityId::Authority1) {
+                    AuthorizationDecision::DenyRemoteAuthorityUnknown
+                } else if matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0, _, _))
+                    && prev.service0_remote_connection != Some(RemoteAuthorityId::Authority0)
+                    || matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority0, _, _))
+                        && prev.service1_remote_connection != Some(RemoteAuthorityId::Authority0)
+                    || matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority1, _, _))
+                        && prev.service0_remote_connection != Some(RemoteAuthorityId::Authority1)
+                    || matches!(action, SystemEvent::InvokeRemoteRpc(ServiceId::Service1, RemoteAuthorityId::Authority1, _, _))
+                        && prev.service1_remote_connection != Some(RemoteAuthorityId::Authority1) {
+                    AuthorizationDecision::DenyRemoteConnectionMissing
+                } else {
+                    AuthorizationDecision::DenyTargetServiceNotRunning
+                };
+                set last_rpc_outcome <= RpcOutcome::RemoteDenied;
+            }
+
+            rule disconnect_remote_allowed
+                when matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service0))
+                    && prev.service0_remote_connection != None
+                    || matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service1))
+                        && prev.service1_remote_connection != None => {
+                set last_operation_actor <= if matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service0)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::RemoteDisconnect);
+                set last_operation_decision <= AuthorizationDecision::Allow;
+                set service0_remote_connection <= if matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service0)) {
+                    None
+                } else {
+                    state.service0_remote_connection
+                };
+                set service1_remote_connection <= if matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service1)) {
+                    None
+                } else {
+                    state.service1_remote_connection
+                };
+                set remote_rpc_target <= None;
+                set remote_rpc_authority <= None;
+                set last_rpc_outcome <= RpcOutcome::RemoteDisconnected;
+            }
+
+            rule disconnect_remote_denied
+                when matches!(action, SystemEvent::DisconnectRemoteRpc(_))
+                    && !(
+                        matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service0))
+                            && prev.service0_remote_connection != None
+                        || matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service1))
+                            && prev.service1_remote_connection != None
+                    ) => {
+                set last_operation_actor <= if matches!(action, SystemEvent::DisconnectRemoteRpc(ServiceId::Service0)) {
+                    Some(ServiceId::Service0)
+                } else {
+                    Some(ServiceId::Service1)
+                };
+                set last_operation_permission <= Some(OperationPermission::RemoteDisconnect);
+                set last_operation_decision <= AuthorizationDecision::DenyRemoteConnectionMissing;
+                set last_rpc_outcome <= RpcOutcome::RemoteDenied;
+            }
+
+            rule request_shutdown
+                when matches!(action, SystemEvent::RequestShutdown)
+                    && prev.manager_phase == ManagerPhase::Listening => {
+                set manager_phase <= ManagerPhase::ShutdownRequested;
+                set manager_shutdown_phase <= ManagerShutdownPhase::DrainingSessions;
+                set manager_accepts_control <= false;
+            }
+
+            rule confirm_sessions_drained
+                when matches!(action, SystemEvent::ConfirmSessionsDrained)
+                    && prev.manager_shutdown_phase == ManagerShutdownPhase::DrainingSessions => {
+                remove active_sessions <= SessionId::Session0;
+                remove active_sessions <= SessionId::Session1;
+                set session0_auth <= if prev.session0_auth == SessionAuthState::Disconnected {
+                    SessionAuthState::Disconnected
+                } else {
+                    SessionAuthState::Drained
+                };
+                set session1_auth <= if prev.session1_auth == SessionAuthState::Disconnected {
+                    SessionAuthState::Disconnected
+                } else {
+                    SessionAuthState::Drained
+                };
+                set session0_request <= SessionRequestState::Idle;
+                set session1_request <= SessionRequestState::Idle;
+                set manager_shutdown_phase <= ManagerShutdownPhase::StoppingServices;
+            }
+
+            rule confirm_services_stopped
+                when matches!(action, SystemEvent::ConfirmServicesStopped)
+                    && prev.manager_shutdown_phase == ManagerShutdownPhase::StoppingServices => {
+                set service0_lifecycle <= if prev.service0_lifecycle == ServiceLifecyclePhase::Absent {
+                    ServiceLifecyclePhase::Absent
+                } else {
+                    ServiceLifecyclePhase::Reaped
+                };
+                set service1_lifecycle <= if prev.service1_lifecycle == ServiceLifecyclePhase::Absent {
+                    ServiceLifecyclePhase::Absent
+                } else {
+                    ServiceLifecyclePhase::Reaped
+                };
+                set service0_remote_connection <= None;
+                set service1_remote_connection <= None;
+                set local_rpc_target <= None;
+                set remote_rpc_target <= None;
+                set remote_rpc_authority <= None;
                 set command_kind <= None;
                 set command_state <= None;
-                set cancel_requested <= false;
-            }
-
-            rule start_local_rpc0 when matches!(action, SystemAction::Operation(OperationPlaneAction::StartLocalRpc(ServiceAtom::Service0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && prev.bound_services.contains(&ServiceAtom::Service0)
-                && matches!(prev.service0, ServiceLifecyclePhase::Running)
-                && prev.local_rpc_target.is_none()
-                && prev.remote_rpc_target.is_none() => {
-                set local_rpc_target <= Some(ServiceAtom::Service0);
-                set last_rpc_outcome <= RpcOutcome::None;
-            }
-
-            rule start_local_rpc1 when matches!(action, SystemAction::Operation(OperationPlaneAction::StartLocalRpc(ServiceAtom::Service1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && prev.bound_services.contains(&ServiceAtom::Service1)
-                && matches!(prev.service1, ServiceLifecyclePhase::Running)
-                && prev.local_rpc_target.is_none()
-                && prev.remote_rpc_target.is_none() => {
-                set local_rpc_target <= Some(ServiceAtom::Service1);
-                set last_rpc_outcome <= RpcOutcome::None;
-            }
-
-            rule complete_local_rpc0 when matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteLocalRpc(ServiceAtom::Service0)))
-                && prev.local_rpc_target == Some(ServiceAtom::Service0) => {
-                set local_rpc_target <= None;
-                set last_rpc_outcome <= RpcOutcome::LocalResolved;
-            }
-
-            rule complete_local_rpc1 when matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteLocalRpc(ServiceAtom::Service1)))
-                && prev.local_rpc_target == Some(ServiceAtom::Service1) => {
-                set local_rpc_target <= None;
-                set last_rpc_outcome <= RpcOutcome::LocalResolved;
-            }
-
-            rule deny_local_rpc0 when matches!(action, SystemAction::Operation(OperationPlaneAction::DenyLocalRpc(ServiceAtom::Service0)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && (!prev.bound_services.contains(&ServiceAtom::Service0)
-                    || !matches!(prev.service0, ServiceLifecyclePhase::Running))
-                && prev.local_rpc_target.is_none()
-                && prev.remote_rpc_target.is_none() => {
-                set last_rpc_outcome <= RpcOutcome::LocalDenied;
-            }
-
-            rule deny_local_rpc1 when matches!(action, SystemAction::Operation(OperationPlaneAction::DenyLocalRpc(ServiceAtom::Service1)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && (!prev.bound_services.contains(&ServiceAtom::Service1)
-                    || !matches!(prev.service1, ServiceLifecyclePhase::Running))
-                && prev.local_rpc_target.is_none()
-                && prev.remote_rpc_target.is_none() => {
-                set last_rpc_outcome <= RpcOutcome::LocalDenied;
-            }
-
-            rule start_remote_rpc0 when matches!(action, SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(ServiceAtom::Service0, _)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && prev.bound_services.contains(&ServiceAtom::Service0)
-                && matches!(prev.service0, ServiceLifecyclePhase::Running)
-                && prev.local_rpc_target.is_none()
-                && prev.remote_rpc_target.is_none() => {
-                insert remote_connections <= if matches!(
-                    action,
-                    SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                ) {
-                    RemoteAuthorityAtom::Edge0
-                } else {
-                    RemoteAuthorityAtom::Edge1
-                };
-                set remote_rpc_target <= Some(ServiceAtom::Service0);
-                set remote_rpc_authority <= if matches!(
-                    action,
-                    SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(
-                        ServiceAtom::Service0,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                ) {
-                    Some(RemoteAuthorityAtom::Edge0)
-                } else {
-                    Some(RemoteAuthorityAtom::Edge1)
-                };
-                set last_rpc_outcome <= RpcOutcome::RemoteConnected;
-            }
-
-            rule start_remote_rpc1 when matches!(action, SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(ServiceAtom::Service1, _)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && prev.bound_services.contains(&ServiceAtom::Service1)
-                && matches!(prev.service1, ServiceLifecyclePhase::Running)
-                && prev.local_rpc_target.is_none()
-                && prev.remote_rpc_target.is_none() => {
-                insert remote_connections <= if matches!(
-                    action,
-                    SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(
-                        ServiceAtom::Service1,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                ) {
-                    RemoteAuthorityAtom::Edge0
-                } else {
-                    RemoteAuthorityAtom::Edge1
-                };
-                set remote_rpc_target <= Some(ServiceAtom::Service1);
-                set remote_rpc_authority <= if matches!(
-                    action,
-                    SystemAction::Operation(OperationPlaneAction::StartRemoteRpc(
-                        ServiceAtom::Service1,
-                        RemoteAuthorityAtom::Edge0
-                    ))
-                ) {
-                    Some(RemoteAuthorityAtom::Edge0)
-                } else {
-                    Some(RemoteAuthorityAtom::Edge1)
-                };
-                set last_rpc_outcome <= RpcOutcome::RemoteConnected;
-            }
-
-            rule complete_remote_rpc0_edge0 when matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(ServiceAtom::Service0, RemoteAuthorityAtom::Edge0)))
-                && prev.remote_rpc_target == Some(ServiceAtom::Service0)
-                && prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge0) => {
-                set remote_rpc_target <= None;
-                set remote_rpc_authority <= None;
-                set last_rpc_outcome <= RpcOutcome::RemoteCompleted;
-            }
-
-            rule complete_remote_rpc0_edge1 when matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(ServiceAtom::Service0, RemoteAuthorityAtom::Edge1)))
-                && prev.remote_rpc_target == Some(ServiceAtom::Service0)
-                && prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge1) => {
-                set remote_rpc_target <= None;
-                set remote_rpc_authority <= None;
-                set last_rpc_outcome <= RpcOutcome::RemoteCompleted;
-            }
-
-            rule complete_remote_rpc1_edge0 when matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(ServiceAtom::Service1, RemoteAuthorityAtom::Edge0)))
-                && prev.remote_rpc_target == Some(ServiceAtom::Service1)
-                && prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge0) => {
-                set remote_rpc_target <= None;
-                set remote_rpc_authority <= None;
-                set last_rpc_outcome <= RpcOutcome::RemoteCompleted;
-            }
-
-            rule complete_remote_rpc1_edge1 when matches!(action, SystemAction::Operation(OperationPlaneAction::CompleteRemoteRpc(ServiceAtom::Service1, RemoteAuthorityAtom::Edge1)))
-                && prev.remote_rpc_target == Some(ServiceAtom::Service1)
-                && prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge1) => {
-                set remote_rpc_target <= None;
-                set remote_rpc_authority <= None;
-                set last_rpc_outcome <= RpcOutcome::RemoteCompleted;
-            }
-
-            rule deny_remote_rpc0 when matches!(action, SystemAction::Operation(OperationPlaneAction::DenyRemoteRpc(ServiceAtom::Service0, _)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && (!prev.bound_services.contains(&ServiceAtom::Service0)
-                    || !matches!(prev.service0, ServiceLifecyclePhase::Running))
-                && prev.remote_rpc_target.is_none() => {
-                set last_rpc_outcome <= RpcOutcome::RemoteDenied;
-            }
-
-            rule deny_remote_rpc1 when matches!(action, SystemAction::Operation(OperationPlaneAction::DenyRemoteRpc(ServiceAtom::Service1, _)))
-                && prev.accepts_control
-                && !prev.shutdown_started
-                && (!prev.bound_services.contains(&ServiceAtom::Service1)
-                    || !matches!(prev.service1, ServiceLifecyclePhase::Running))
-                && prev.remote_rpc_target.is_none() => {
-                set last_rpc_outcome <= RpcOutcome::RemoteDenied;
-            }
-
-            rule disconnect_remote0 when matches!(action, SystemAction::Operation(OperationPlaneAction::DisconnectRemote(RemoteAuthorityAtom::Edge0)))
-                && prev.remote_connections.contains(&RemoteAuthorityAtom::Edge0) => {
-                remove remote_connections <= RemoteAuthorityAtom::Edge0;
-                set remote_rpc_target <= if prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge0) {
-                    None
-                } else {
-                    state.remote_rpc_target
-                };
-                set remote_rpc_authority <= if prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge0) {
-                    None
-                } else {
-                    state.remote_rpc_authority
-                };
+                set command_cancel_requested <= false;
+                set manager_shutdown_phase <= ManagerShutdownPhase::StoppingMaintenance;
                 set last_rpc_outcome <= RpcOutcome::RemoteDisconnected;
             }
 
-            rule disconnect_remote1 when matches!(action, SystemAction::Operation(OperationPlaneAction::DisconnectRemote(RemoteAuthorityAtom::Edge1)))
-                && prev.remote_connections.contains(&RemoteAuthorityAtom::Edge1) => {
-                remove remote_connections <= RemoteAuthorityAtom::Edge1;
-                set remote_rpc_target <= if prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge1) {
-                    None
-                } else {
-                    state.remote_rpc_target
-                };
-                set remote_rpc_authority <= if prev.remote_rpc_authority == Some(RemoteAuthorityAtom::Edge1) {
-                    None
-                } else {
-                    state.remote_rpc_authority
-                };
-                set last_rpc_outcome <= RpcOutcome::RemoteDisconnected;
+            rule confirm_maintenance_stopped
+                when matches!(action, SystemEvent::ConfirmMaintenanceStopped)
+                    && prev.manager_shutdown_phase == ManagerShutdownPhase::StoppingMaintenance => {
+                set maintenance_phase <= MaintenancePhase::Stopped;
+            }
+
+            rule complete_shutdown
+                when matches!(action, SystemEvent::CompleteShutdown)
+                    && prev.manager_shutdown_phase == ManagerShutdownPhase::StoppingMaintenance
+                    && prev.maintenance_phase == MaintenancePhase::Stopped => {
+                set manager_phase <= ManagerPhase::Stopped;
+                set manager_shutdown_phase <= ManagerShutdownPhase::Completed;
+                set manager_accepts_control <= false;
             }
         })
     }
 }
 
-#[nirvash_macros::formal_tests(spec = SystemSpec)]
-const _: () = ();
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use nirvash_check as checks;
+    use nirvash_lower::{FrontendSpec, TemporalSpec};
 
-    fn case_by_label(label: &str) -> ModelInstance<SystemState, SystemAction> {
-        SystemSpec::new()
-            .model_instances()
-            .into_iter()
-            .find(|case| case.label() == label)
-            .expect("system case should exist")
-    }
+    #[derive(Debug, Clone, Copy)]
+    struct FocusedParitySpec;
 
-    fn bounded_parity_case(
-        case: ModelInstance<SystemState, SystemAction>,
-    ) -> ModelInstance<SystemState, SystemAction> {
-        let mut config = case.effective_checker_config();
-        let doc_config = case.doc_checker_config().map(|mut config| {
-            config.max_states = Some(64);
-            config.max_transitions = Some(256);
-            config
-        });
-        config.max_states = Some(64);
-        config.max_transitions = Some(256);
-        let case = case.with_checker_config(config);
-        match doc_config {
-            Some(doc_config) => case.with_doc_checker_config(doc_config),
-            None => case,
+    impl FrontendSpec for FocusedParitySpec {
+        type State = SystemState;
+        type Action = SystemAction;
+
+        fn frontend_name(&self) -> &'static str {
+            std::any::type_name::<Self>()
+        }
+
+        fn initial_states(&self) -> Vec<Self::State> {
+            vec![SystemSpec::new().initial_state()]
+        }
+
+        fn actions(&self) -> Vec<Self::Action> {
+            vec![
+                SystemAction::LoadConfig(false),
+                SystemAction::FinishRestore,
+                SystemAction::AcceptSession(SessionId::Session0, TransportPrincipal::Client),
+                SystemAction::AuthenticateSession(SessionId::Session0, SessionRole::Client),
+                SystemAction::RequestMessage(SessionId::Session0, ExternalMessage::HelloNegotiate),
+                SystemAction::CompleteMessage(SessionId::Session0),
+                SystemAction::PrepareService(ServiceId::Service0),
+                SystemAction::CommitService(ServiceId::Service0),
+                SystemAction::PromoteService(ServiceId::Service0),
+                SystemAction::StartService(ServiceId::Service0),
+                SystemAction::RegisterRemoteAuthority(RemoteAuthorityId::Authority0),
+                SystemAction::RequestShutdown,
+                SystemAction::DrainSession(SessionId::Session0),
+                SystemAction::ConfirmSessionsDrained,
+                SystemAction::StopService(ServiceId::Service0),
+                SystemAction::ConfirmServicesStopped,
+                SystemAction::ConfirmMaintenanceStopped,
+                SystemAction::CompleteShutdown,
+            ]
+        }
+
+        fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+            SystemSpec::new().transition_program()
         }
     }
 
-    #[test]
-    fn explicit_and_symbolic_backends_agree() {
-        let spec = SystemSpec::new();
-        let lowered = crate::lowered_spec(&spec);
-        let explicit_case = bounded_parity_case(case_by_label("explicit_control_rpc_focus"));
-        let symbolic_case = bounded_parity_case(case_by_label("symbolic_control_rpc_focus"));
+    impl TemporalSpec for FocusedParitySpec {
+        fn invariants(&self) -> Vec<BoolExpr<Self::State>> {
+            Vec::new()
+        }
+    }
 
-        let explicit_snapshot =
-            checks::ExplicitModelChecker::for_case(&lowered, explicit_case.clone())
-                .reachable_graph_snapshot()
-                .expect("explicit system snapshot");
-        let symbolic_snapshot =
-            checks::SymbolicModelChecker::for_case(&lowered, symbolic_case.clone())
-                .reachable_graph_snapshot()
-                .expect("symbolic system snapshot");
-        assert_eq!(symbolic_snapshot, explicit_snapshot);
+    fn apply_deterministic(
+        spec: &SystemSpec,
+        state: &SystemState,
+        action: SystemAction,
+    ) -> SystemState {
+        let program = spec
+            .transition_program()
+            .expect("system transition program");
+        let successors = program.successors(state, &action);
+        assert_eq!(successors.len(), 1, "action should be deterministic");
+        successors
+            .into_iter()
+            .next()
+            .expect("one deterministic successor")
+            .into_next()
     }
 
     #[test]
-    fn option_surface_is_symbolic_encodable() {
+    fn shutdown_transition_propagates_to_sessions_services_and_rpc() {
         let spec = SystemSpec::new();
-        let program = spec
-            .transition_program()
-            .expect("system should expose a transition program");
+        let mut state = spec.initial_state();
+        state = apply_deterministic(&spec, &state, SystemAction::LoadConfig(false));
+        state = apply_deterministic(&spec, &state, SystemAction::FinishRestore);
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::AcceptSession(SessionId::Session0, TransportPrincipal::Admin),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::AuthenticateSession(SessionId::Session0, SessionRole::Admin),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::PrepareService(ServiceId::Service0),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::CommitService(ServiceId::Service0),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::PromoteService(ServiceId::Service0),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::StartService(ServiceId::Service0),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::VerifyManagerAuth(ServiceId::Service0),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::RegisterRemoteAuthority(RemoteAuthorityId::Authority0),
+        );
+        state = apply_deterministic(
+            &spec,
+            &state,
+            SystemAction::ConnectRemoteRpc(ServiceId::Service0, RemoteAuthorityId::Authority0),
+        );
+        state = apply_deterministic(&spec, &state, SystemAction::RequestShutdown);
+        state = apply_deterministic(&spec, &state, SystemAction::ConfirmSessionsDrained);
+        state = apply_deterministic(&spec, &state, SystemAction::ConfirmServicesStopped);
+        state = apply_deterministic(&spec, &state, SystemAction::ConfirmMaintenanceStopped);
+        state = apply_deterministic(&spec, &state, SystemAction::CompleteShutdown);
 
-        assert!(program.is_ast_native());
-        assert_eq!(program.first_unencodable_symbolic_node(), None);
+        assert_eq!(state.manager_phase, ManagerPhase::Stopped);
+        assert_eq!(
+            state.manager_shutdown_phase,
+            ManagerShutdownPhase::Completed
+        );
+        assert!(!state.active_sessions.contains(&SessionId::Session0));
+        assert!(!state.active_sessions.contains(&SessionId::Session1));
+        assert_eq!(state.session0_auth, SessionAuthState::Drained);
+        assert_eq!(state.service0_lifecycle, ServiceLifecyclePhase::Reaped);
+        assert_eq!(state.remote_rpc_authority, None);
+        assert_eq!(state.remote_rpc_target, None);
+    }
+
+    #[test]
+    fn explicit_and_symbolic_focused_cases_agree() {
+        let spec = FocusedParitySpec;
+        let lowered = crate::lowered_spec(&spec);
+
+        let explicit_snapshot = checks::ExplicitModelChecker::new(&lowered)
+            .check_invariants()
+            .expect("explicit focused invariant check");
+        let symbolic_snapshot = checks::SymbolicModelChecker::new(&lowered)
+            .check_invariants()
+            .expect("symbolic focused invariant check");
+
+        assert_eq!(symbolic_snapshot, explicit_snapshot);
     }
 }
