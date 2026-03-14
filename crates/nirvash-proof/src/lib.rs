@@ -1,7 +1,8 @@
 //! Proof/export surface for `nirvash`.
 //!
 //! `ProofBundleExporter` fail-closes on unsupported fragments and exports proof bundles
-//! from the normalized lowered spec core.
+//! from the normalized lowered spec core. `ProofDischarger` と importer は、その bundle を
+//! `ProofCertificate` へ接続する。
 
 use std::{collections::BTreeSet, path::PathBuf};
 

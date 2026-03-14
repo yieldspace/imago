@@ -18,7 +18,7 @@ authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgra
 - `nirvash-conformance`
   - witness / runtime binding / refinement assert / `proptest` / `loom` / `kani` adapter
 - `nirvash-proof`
-  - `ProofBundleExporter`
+  - `ProofBundleExporter` / `ProofDischarger` / certificate importer
 
 通常の runtime crate は引き続き `nirvash` を起点に authoring できますが、checker / conformance / proof 側は `nirvash-lower` / `nirvash-conformance` / `nirvash-proof` を明示的に参照します。`LoweredSpec` は `core` に加えて `normalized_core()` を公開し、symbolic backend と proof export はこの正規化済み core を意味論の正本として参照します。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
@@ -46,13 +46,13 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
   - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定
   - `parallel = ExplicitParallelOptions { workers }` と `distributed = ExplicitDistributedOptions { shards }` で explicit reachable-graph frontier の local/distributed wave を設定
   - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ExplicitModelChecker::simulate()` の deterministic random walk を設定
-- `ModelInstance::with_claimed_reduction(ClaimedReduction)` で claimed or certified symmetry / quotient / POR を付け、`ModelInstance::with_heuristic_reduction(HeuristicReduction)` で state projection / action pruning を付ける
+- `ModelInstance::with_claimed_reduction(ClaimedReduction)` で claim-based symmetry / quotient / POR を付け、`ModelInstance::with_certified_reduction(CertifiedReduction)` で certificate-based reduction を付ける。`ModelInstance::with_heuristic_reduction(HeuristicReduction)` は state projection / action pruning を付ける
 - `ModelCheckResult` / `ReachableGraphSnapshot` / `DocGraphCase` は `TrustTier = Exact | CertifiedReduction | ClaimedReduction | Heuristic` を持つ
 - `symbolic: SymbolicModelCheckOptions`
   - 現時点では `bridge = RelationalBridgeOptions { strategy = SolverEnumeration }`、`temporal = BoundedLasso | LivenessToSafety`、`safety = Bmc | KInduction | PdrIc3`
   - `k_induction = SymbolicKInductionOptions { max_depth }` と `pdr = SymbolicPdrOptions { max_frames }` で invariant proof engine の bound を設定
 
-これらは current implementation を present tense で表す public contract です。symbolic backend は heuristic reduction とclaimed/certified reduction を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression と reduction tier を同じ config surface で切り替えます。
+これらは current implementation を present tense で表す public contract です。symbolic backend は heuristic reduction、claimed/certified reduction、unsupported normalized fragment を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression と reduction tier を同じ config surface で切り替えます。
 `nirvash-check` は backend 固定の `ExplicitModelChecker` / `SymbolicModelChecker` を正本とします。symbolic-only 利用では `FiniteModelDomain` を持たない state でも lower した `LoweredSpec` を `SymbolicModelChecker` に直接渡せます。
 
 ## What It Provides
