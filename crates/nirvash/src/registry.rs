@@ -15,7 +15,13 @@ pub struct RegisteredProperty {
     pub build: fn() -> Box<dyn Any>,
 }
 
-pub struct RegisteredFairness {
+pub struct RegisteredCoreFairness {
+    pub spec_type_id: fn() -> TypeId,
+    pub name: &'static str,
+    pub build: fn() -> Box<dyn Any>,
+}
+
+pub struct RegisteredExecutableFairness {
     pub spec_type_id: fn() -> TypeId,
     pub name: &'static str,
     pub build: fn() -> Box<dyn Any>,
@@ -61,7 +67,8 @@ pub struct RegisteredSymbolicEffect {
 
 inventory::collect!(RegisteredInvariant);
 inventory::collect!(RegisteredProperty);
-inventory::collect!(RegisteredFairness);
+inventory::collect!(RegisteredCoreFairness);
+inventory::collect!(RegisteredExecutableFairness);
 inventory::collect!(RegisteredStateConstraint);
 inventory::collect!(RegisteredActionConstraint);
 inventory::collect!(RegisteredSymmetry);

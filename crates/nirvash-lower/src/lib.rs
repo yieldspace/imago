@@ -691,7 +691,7 @@ pub struct SystemComposition<S, A> {
     subsystems: Vec<nirvash::RegisteredSubsystemSpec>,
     invariants: Vec<BoolExpr<S>>,
     properties: Vec<Ltl<S, A>>,
-    fairness: Vec<Fairness<S, A>>,
+    core_fairness: Vec<FairnessDecl>,
     model_instances: Vec<ModelInstance<S, A>>,
 }
 
@@ -702,7 +702,7 @@ impl<S, A> SystemComposition<S, A> {
             subsystems: Vec::new(),
             invariants: Vec::new(),
             properties: Vec::new(),
-            fairness: Vec::new(),
+            core_fairness: Vec::new(),
             model_instances: Vec::new(),
         }
     }
@@ -722,8 +722,8 @@ impl<S, A> SystemComposition<S, A> {
         self
     }
 
-    pub fn with_fairness(mut self, fairness: Fairness<S, A>) -> Self {
-        self.fairness.push(fairness);
+    pub fn with_core_fairness(mut self, fairness: FairnessDecl) -> Self {
+        self.core_fairness.push(fairness);
         self
     }
 
@@ -748,8 +748,8 @@ impl<S, A> SystemComposition<S, A> {
         &self.properties
     }
 
-    pub fn fairness(&self) -> &[Fairness<S, A>] {
-        &self.fairness
+    pub fn core_fairness(&self) -> &[FairnessDecl] {
+        &self.core_fairness
     }
 
     pub fn model_instances(&self) -> &[ModelInstance<S, A>] {
@@ -971,7 +971,7 @@ impl<'a, S, A> LoweredSpec<'a, S, A> {
         self.executable.properties.clone()
     }
 
-    pub fn fairness(&self) -> Vec<Fairness<S, A>>
+    pub fn executable_fairness(&self) -> Vec<Fairness<S, A>>
     where
         S: Clone,
         A: Clone,
@@ -1136,7 +1136,7 @@ pub struct SymbolicArtifacts<S, A> {
     transition_program: Option<TransitionProgram<S, A>>,
     invariants: Vec<BoolExpr<S>>,
     properties: Vec<Ltl<S, A>>,
-    fairness: Vec<Fairness<S, A>>,
+    executable_fairness: Vec<Fairness<S, A>>,
     issues: Vec<SymbolicSupportIssue>,
 }
 
@@ -1146,7 +1146,7 @@ impl<S, A> SymbolicArtifacts<S, A> {
         transition_program: Option<TransitionProgram<S, A>>,
         invariants: Vec<BoolExpr<S>>,
         properties: Vec<Ltl<S, A>>,
-        fairness: Vec<Fairness<S, A>>,
+        executable_fairness: Vec<Fairness<S, A>>,
         issues: Vec<SymbolicSupportIssue>,
     ) -> Self {
         Self {
@@ -1154,7 +1154,7 @@ impl<S, A> SymbolicArtifacts<S, A> {
             transition_program,
             invariants,
             properties,
-            fairness,
+            executable_fairness,
             issues,
         }
     }
@@ -1175,8 +1175,8 @@ impl<S, A> SymbolicArtifacts<S, A> {
         &self.properties
     }
 
-    pub fn fairness(&self) -> &[Fairness<S, A>] {
-        &self.fairness
+    pub fn executable_fairness(&self) -> &[Fairness<S, A>] {
+        &self.executable_fairness
     }
 
     pub fn issues(&self) -> &[SymbolicSupportIssue] {
@@ -1294,7 +1294,8 @@ pub trait FrontendSpec {
         let actions = self.actions();
         let invariants = self.invariants();
         let properties = self.properties();
-        let fairness = self.fairness();
+        let core_fairness = self.core_fairness();
+        let executable_fairness = self.executable_fairness();
         let default_model_backend = self.default_model_backend();
         let model_instances = self.model_instances();
         let transition_program = self.transition_program();
@@ -1303,13 +1304,13 @@ pub trait FrontendSpec {
             transition_program.clone(),
             invariants.clone(),
             properties.clone(),
-            fairness.clone(),
+            executable_fairness.clone(),
             collect_symbolic_support_issues(
                 self.frontend_name(),
                 transition_program.as_ref(),
                 &invariants,
                 &properties,
-                &fairness,
+                &core_fairness,
                 lookup_symbolic_state_schema::<Self::State>().is_some(),
             ),
         );
@@ -1320,7 +1321,7 @@ pub trait FrontendSpec {
             transition_program.as_ref(),
             &invariants,
             &properties,
-            &fairness,
+            &core_fairness,
             default_model_backend,
         )?;
         let executable = ExecutableSemantics::new(
@@ -1331,7 +1332,7 @@ pub trait FrontendSpec {
             move |state| self.successors(state),
             invariants,
             properties,
-            fairness,
+            executable_fairness,
             default_model_backend,
         );
         Ok(LoweredSpec::new(
@@ -1353,7 +1354,12 @@ pub trait TemporalSpec: FrontendSpec {
         Vec::new()
     }
 
-    fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
+    fn core_fairness(&self) -> Vec<FairnessDecl> {
+        Vec::new()
+    }
+
+    #[doc(hidden)]
+    fn executable_fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
         Vec::new()
     }
 }
@@ -1381,7 +1387,7 @@ pub trait CheckerSpec {
     fn default_model_backend(&self) -> Option<ModelBackend>;
     fn invariants(&self) -> Vec<BoolExpr<Self::State>>;
     fn properties(&self) -> Vec<Ltl<Self::State, Self::Action>>;
-    fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>>;
+    fn executable_fairness(&self) -> Vec<Fairness<Self::State, Self::Action>>;
     fn symbolic_artifacts(&self) -> &SymbolicArtifacts<Self::State, Self::Action>;
 }
 
@@ -1454,8 +1460,8 @@ where
         LoweredSpec::properties(self)
     }
 
-    fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
-        LoweredSpec::fairness(self)
+    fn executable_fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
+        LoweredSpec::executable_fairness(self)
     }
 
     fn symbolic_artifacts(&self) -> &SymbolicArtifacts<Self::State, Self::Action> {
@@ -1471,7 +1477,7 @@ fn lower_spec_core<S, A>(
     transition_program: Option<&TransitionProgram<S, A>>,
     invariants: &[BoolExpr<S>],
     properties: &[Ltl<S, A>],
-    fairness: &[Fairness<S, A>],
+    fairness: &[FairnessDecl],
     default_model_backend: Option<ModelBackend>,
 ) -> Result<SpecCore, LoweringError>
 where
@@ -1531,19 +1537,17 @@ where
             property.describe(),
         ));
     }
-    for fairness_decl in fairness {
+    for (index, fairness_decl) in fairness.iter().enumerate() {
+        let fairness_label = fairness_decl_label(index, fairness_decl);
         defs.push(definition(
-            format!("fairness::{}", fairness_decl.name()),
-            fairness_decl.name(),
+            format!("fairness::{fairness_label}"),
+            fairness_label,
         ));
     }
 
     let init = lower_init(spec_name, initial_states)?;
     let next = lower_next(spec_name, actions, transition_program);
-    let fairness = fairness
-        .iter()
-        .map(|decl| lower_fairness(spec_name, decl))
-        .collect::<Result<Vec<_>, _>>()?;
+    let fairness = fairness.to_vec();
     let invariants = invariants
         .iter()
         .map(|predicate| lower_bool_expr(spec_name, "invariant", predicate))
@@ -1571,7 +1575,7 @@ fn collect_symbolic_support_issues<S, A>(
     transition_program: Option<&TransitionProgram<S, A>>,
     invariants: &[BoolExpr<S>],
     properties: &[Ltl<S, A>],
-    fairness: &[Fairness<S, A>],
+    _fairness: &[FairnessDecl],
     has_state_schema: bool,
 ) -> Vec<SymbolicSupportIssue>
 where
@@ -1638,18 +1642,6 @@ where
             "direct_smt.temporal",
         );
     }
-    for fairness_decl in fairness {
-        let predicate = fairness_decl.predicate();
-        collect_symbolic_predicate_issue(
-            &mut issues,
-            spec_name,
-            "fairness",
-            fairness_decl.name(),
-            predicate.is_ast_native(),
-            predicate.first_unencodable_symbolic_node(),
-            "direct_smt.fairness",
-        );
-    }
     issues
 }
 
@@ -1709,6 +1701,17 @@ const fn lower_builtin_predicate_op(op: nirvash::BuiltinPredicateOp) -> IrBuilti
         nirvash::BuiltinPredicateOp::Contains => IrBuiltinPredicateOp::Contains,
         nirvash::BuiltinPredicateOp::SubsetOf => IrBuiltinPredicateOp::SubsetOf,
     }
+}
+
+pub fn lower_core_fairness<S, A>(
+    spec_name: &'static str,
+    fairness: &Fairness<S, A>,
+) -> Result<FairnessDecl, LoweringError>
+where
+    S: 'static,
+    A: 'static,
+{
+    lower_fairness(spec_name, fairness)
 }
 
 fn lower_state_value_ast<S: 'static>(ast: &nirvash::ErasedStateExprAst<S>) -> IrValueExpr {
@@ -2249,6 +2252,14 @@ where
     })
 }
 
+fn fairness_decl_label(index: usize, fairness: &FairnessDecl) -> String {
+    let kind = match fairness {
+        FairnessDecl::WF { .. } => "wf",
+        FairnessDecl::SF { .. } => "sf",
+    };
+    format!("{kind}_{index}")
+}
+
 fn lower_ltl<S, A>(
     spec_name: &'static str,
     formula: &Ltl<S, A>,
@@ -2468,12 +2479,15 @@ pub mod registry {
         collections::BTreeSet,
     };
 
-    use super::{ClaimedReduction, FrontendSpec, ModelInstance, ReductionClaim, SymmetryReduction};
+    use super::{
+        ClaimedReduction, FairnessDecl, FrontendSpec, ModelInstance, ReductionClaim,
+        SymmetryReduction, fairness_decl_label, lower_core_fairness,
+    };
     use nirvash::{
         BoolExpr, Fairness, Ltl, SpecVizRegistrationSet, StepExpr,
         registry::{
-            RegisteredActionConstraint, RegisteredFairness, RegisteredInvariant,
-            RegisteredProperty, RegisteredStateConstraint, RegisteredSymmetry,
+            RegisteredActionConstraint, RegisteredCoreFairness, RegisteredExecutableFairness,
+            RegisteredInvariant, RegisteredProperty, RegisteredStateConstraint, RegisteredSymmetry,
         },
     };
 
@@ -2553,7 +2567,8 @@ pub mod registry {
 
     impl_registry_entry!(RegisteredInvariant);
     impl_registry_entry!(RegisteredProperty);
-    impl_registry_entry!(RegisteredFairness);
+    impl_registry_entry!(RegisteredCoreFairness);
+    impl_registry_entry!(RegisteredExecutableFairness);
     impl_registry_entry!(RegisteredStateConstraint);
     impl_registry_entry!(RegisteredActionConstraint);
     impl_registry_entry!(RegisteredSymmetry);
@@ -2635,7 +2650,7 @@ pub mod registry {
         .collect()
     }
 
-    pub fn collect_fairness_for<Spec, State, Action>() -> Vec<Fairness<State, Action>>
+    pub fn collect_core_fairness_for<Spec, State, Action>() -> Vec<FairnessDecl>
     where
         Spec: 'static,
         State: 'static,
@@ -2643,14 +2658,43 @@ pub mod registry {
     {
         let spec_name = type_name::<Spec>();
         sorted_builders::<Spec, _>(
-            nirvash::inventory::iter::<RegisteredFairness>
+            nirvash::inventory::iter::<RegisteredCoreFairness>
                 .into_iter()
                 .map(|entry| (entry as &dyn RegistryEntry, entry.build)),
-            "fairness",
+            "core_fairness",
         )
         .into_iter()
         .map(|(name, build)| {
-            downcast_registered::<Fairness<State, Action>>(build(), spec_name, "fairness", name)
+            let fairness =
+                downcast_registered::<Fairness<State, Action>>(build(), spec_name, "core_fairness", name);
+            lower_core_fairness(spec_name, &fairness).unwrap_or_else(|error| {
+                panic!("registered core_fairness `{name}` for spec `{spec_name}` failed to lower: {error}")
+            })
+        })
+        .collect()
+    }
+
+    pub fn collect_executable_fairness_for<Spec, State, Action>() -> Vec<Fairness<State, Action>>
+    where
+        Spec: 'static,
+        State: 'static,
+        Action: 'static,
+    {
+        let spec_name = type_name::<Spec>();
+        sorted_builders::<Spec, _>(
+            nirvash::inventory::iter::<RegisteredExecutableFairness>
+                .into_iter()
+                .map(|entry| (entry as &dyn RegistryEntry, entry.build)),
+            "executable_fairness",
+        )
+        .into_iter()
+        .map(|(name, build)| {
+            downcast_registered::<Fairness<State, Action>>(
+                build(),
+                spec_name,
+                "executable_fairness",
+                name,
+            )
         })
         .collect()
     }
@@ -2862,9 +2906,10 @@ pub mod registry {
                 .into_iter()
                 .map(|property| property.describe().to_owned())
                 .collect(),
-            fairness: collect_fairness_for::<Spec, State, Action>()
+            fairness: collect_core_fairness_for::<Spec, State, Action>()
                 .into_iter()
-                .map(|fairness| fairness.name().to_owned())
+                .enumerate()
+                .map(|(index, fairness)| fairness_decl_label(index, &fairness))
                 .collect(),
             state_constraints: collect_scoped_state_constraints_for::<Spec, State>()
                 .into_iter()
@@ -2895,13 +2940,22 @@ pub mod registry {
         collect_properties_for::<T, T::State, T::Action>()
     }
 
-    pub fn collect_fairness<T>() -> Vec<Fairness<T::State, T::Action>>
+    pub fn collect_core_fairness<T>() -> Vec<FairnessDecl>
     where
         T: FrontendSpec + 'static,
         T::State: 'static,
         T::Action: 'static,
     {
-        collect_fairness_for::<T, T::State, T::Action>()
+        collect_core_fairness_for::<T, T::State, T::Action>()
+    }
+
+    pub fn collect_executable_fairness<T>() -> Vec<Fairness<T::State, T::Action>>
+    where
+        T: FrontendSpec + 'static,
+        T::State: 'static,
+        T::Action: 'static,
+    {
+        collect_executable_fairness_for::<T, T::State, T::Action>()
     }
 }
 
@@ -2912,7 +2966,7 @@ mod tests {
         FrontendSpec, HeuristicReduction, HeuristicStateProjection, IrStateExpr, LoweringCx, Ltl,
         ModelInstance, ProofObligation, ProofObligationKind, ReductionClaim,
         StateQuotientReduction, StepExpr, TemporalExpr, TemporalSpec, TransitionProgram,
-        TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst, ViewExpr,
+        TransitionRule, UpdateOp, UpdateProgram, UpdateValueExprAst, ViewExpr, lower_core_fairness,
     };
     use nirvash::{GuardExpr, TrustTier};
 
@@ -3035,7 +3089,16 @@ mod tests {
             ]
         }
 
-        fn fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
+        fn core_fairness(&self) -> Vec<FairnessDecl> {
+            self.executable_fairness()
+                .iter()
+                .map(|fairness| {
+                    lower_core_fairness(self.frontend_name(), fairness).expect("fairness lowers")
+                })
+                .collect()
+        }
+
+        fn executable_fairness(&self) -> Vec<Fairness<Self::State, Self::Action>> {
             vec![
                 Fairness::weak(StepExpr::builtin_pure_call_with_paths(
                     "weak_busy",

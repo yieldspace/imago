@@ -966,7 +966,7 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) const fn legacy_state_expr<S, T>(
+pub(crate) const fn rust_fn_state_expr<S, T>(
     name: &'static str,
     eval: fn(&S) -> T,
 ) -> StateExpr<S, T> {
@@ -1605,7 +1605,7 @@ pub struct BoolExpr<S> {
 impl<S: 'static> BoolExpr<S> {
     #[allow(dead_code)]
     pub(crate) const fn new(name: &'static str, test: fn(&S) -> bool) -> Self {
-        legacy_bool_expr(name, test)
+        rust_fn_bool_expr(name, test)
     }
 
     pub const fn literal(name: &'static str, value: bool) -> Self {
@@ -2129,7 +2129,7 @@ impl<S: 'static> BoolExpr<S> {
 }
 
 #[allow(dead_code)]
-pub(crate) const fn legacy_bool_expr<S>(name: &'static str, test: fn(&S) -> bool) -> BoolExpr<S> {
+pub(crate) const fn rust_fn_bool_expr<S>(name: &'static str, test: fn(&S) -> bool) -> BoolExpr<S> {
     BoolExpr {
         name,
         body: BoolExprBody::RustFn(test),
@@ -3642,7 +3642,7 @@ pub struct StepExpr<S, A> {
 impl<S: 'static, A: 'static> StepExpr<S, A> {
     #[allow(dead_code)]
     pub(crate) const fn new(name: &'static str, test: fn(&S, &A, &S) -> bool) -> Self {
-        legacy_step_expr(name, test)
+        rust_fn_step_expr(name, test)
     }
 
     pub const fn literal(name: &'static str, value: bool) -> Self {
@@ -4218,7 +4218,7 @@ impl<S: 'static, A: 'static> StepExpr<S, A> {
 }
 
 #[allow(dead_code)]
-pub(crate) const fn legacy_step_expr<S, A>(
+pub(crate) const fn rust_fn_step_expr<S, A>(
     name: &'static str,
     test: fn(&S, &A, &S) -> bool,
 ) -> StepExpr<S, A> {
@@ -5718,7 +5718,7 @@ pub struct GuardExpr<S, A> {
 impl<S: 'static, A: 'static> GuardExpr<S, A> {
     #[allow(dead_code)]
     pub(crate) const fn new(name: &'static str, eval: fn(&S, &A) -> bool) -> Self {
-        legacy_guard_expr(name, eval)
+        rust_fn_guard_expr(name, eval)
     }
 
     pub const fn literal(name: &'static str, value: bool) -> Self {
@@ -6278,7 +6278,7 @@ impl<S: 'static, A: 'static> GuardExpr<S, A> {
 }
 
 #[allow(dead_code)]
-pub(crate) const fn legacy_guard_expr<S, A>(
+pub(crate) const fn rust_fn_guard_expr<S, A>(
     name: &'static str,
     eval: fn(&S, &A) -> bool,
 ) -> GuardExpr<S, A> {
@@ -7159,7 +7159,7 @@ pub struct UpdateProgram<S, A = ()> {
 impl<S: 'static, A: 'static> UpdateProgram<S, A> {
     #[allow(dead_code)]
     pub(crate) const fn new(name: &'static str, update: fn(&S, &A) -> S) -> Self {
-        legacy_update_program(name, update)
+        rust_fn_update_program(name, update)
     }
 
     pub fn ast(name: &'static str, ops: Vec<UpdateOp<S, A>>) -> Self {
@@ -7233,7 +7233,7 @@ impl<S: 'static, A: 'static> UpdateProgram<S, A> {
 }
 
 #[allow(dead_code)]
-pub(crate) const fn legacy_update_program<S, A>(
+pub(crate) const fn rust_fn_update_program<S, A>(
     name: &'static str,
     update: fn(&S, &A) -> S,
 ) -> UpdateProgram<S, A> {
@@ -7309,7 +7309,7 @@ impl<S: 'static, A: 'static> TransitionRule<S, A> {
         guard: fn(&S, &A) -> bool,
         update: UpdateProgram<S, A>,
     ) -> Self {
-        legacy_transition_rule(name, guard, update)
+        guarded_transition_rule(name, guard, update)
     }
 
     pub const fn ast(
@@ -7449,7 +7449,7 @@ impl<S: 'static, A: 'static> TransitionRule<S, A> {
 }
 
 #[allow(dead_code)]
-pub(crate) const fn legacy_transition_rule<S, A>(
+pub(crate) const fn guarded_transition_rule<S, A>(
     name: &'static str,
     guard: fn(&S, &A) -> bool,
     update: UpdateProgram<S, A>,
@@ -7457,7 +7457,7 @@ pub(crate) const fn legacy_transition_rule<S, A>(
     TransitionRule {
         name,
         body: TransitionRuleBody::Guarded {
-            guard: legacy_guard_expr(name, guard),
+            guard: rust_fn_guard_expr(name, guard),
             update,
         },
     }

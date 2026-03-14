@@ -1681,7 +1681,7 @@ where
         graph: &ReachableGraph<T::State, T::Action>,
     ) -> bool {
         self.spec
-            .fairness()
+            .executable_fairness()
             .into_iter()
             .all(|fairness| self.eval_fairness_graph(trace, graph, fairness))
     }
@@ -1737,7 +1737,7 @@ where
 
     fn trace_satisfies_fairness_lasso(&self, trace: &Trace<T::State, T::Action>) -> bool {
         self.spec
-            .fairness()
+            .executable_fairness()
             .into_iter()
             .all(|fairness| self.eval_fairness_lasso(trace, fairness))
     }

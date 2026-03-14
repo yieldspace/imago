@@ -63,7 +63,7 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
 - `RelAtom` / `RelSet<T>` / `Relation2<A, B>`: relational kernel
 - `TransitionProgram`: frontend DSL の遷移記述 surface
 - `FrontendSpec` / `LoweredSpec`: backend へ渡る lowering boundary
-- `TemporalSpec`: property / fairness provider
+- `TemporalSpec`: property / core fairness provider
 - `Ltl`: `[]`, `<>`, `X`, `U`, `ENABLED`, `~>` を含む Rust DSL
 - `ActionApplier` / `StateObserver`: runtime conformance capability (`nirvash-conformance`)
 - `pred!` / `step!` / `ltl!` と registry macro

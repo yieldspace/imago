@@ -4,8 +4,8 @@ use nirvash::{
 };
 use nirvash_check as checks;
 use nirvash_lower::{
-    FiniteModelDomain, FrontendSpec, LoweringCx, ModelInstance, SymbolicEncoding,
-    SymbolicStateSchema, TemporalSpec,
+    FairnessDecl, FiniteModelDomain, FrontendSpec, LoweringCx, ModelInstance, SymbolicEncoding,
+    SymbolicStateSchema, TemporalSpec, lower_core_fairness,
 };
 use nirvash_macros::{
     FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
@@ -546,7 +546,16 @@ impl TemporalSpec for ChoiceFairnessSpec {
         ]
     }
 
-    fn fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
+    fn core_fairness(&self) -> Vec<FairnessDecl> {
+        self.executable_fairness()
+            .iter()
+            .map(|fairness| {
+                lower_core_fairness(self.frontend_name(), fairness).expect("fairness lowers")
+            })
+            .collect()
+    }
+
+    fn executable_fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
         vec![nirvash::Fairness::weak(choice_busy_step())]
     }
 }
@@ -729,7 +738,11 @@ impl TemporalSpec for PanicDomainSpec {
         vec![nirvash::Ltl::truth()]
     }
 
-    fn fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
+    fn core_fairness(&self) -> Vec<FairnessDecl> {
+        Vec::new()
+    }
+
+    fn executable_fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
         Vec::new()
     }
 }
@@ -1001,7 +1014,16 @@ impl TemporalSpec for MissingFairnessReadPathSpec {
         vec![nirvash::Ltl::truth()]
     }
 
-    fn fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
+    fn core_fairness(&self) -> Vec<FairnessDecl> {
+        self.executable_fairness()
+            .iter()
+            .map(|fairness| {
+                lower_core_fairness(self.frontend_name(), fairness).expect("fairness lowers")
+            })
+            .collect()
+    }
+
+    fn executable_fairness(&self) -> Vec<nirvash::Fairness<Self::State, Self::Action>> {
         vec![nirvash::Fairness::weak(
             nirvash::StepExpr::builtin_pure_call_with_paths(
                 "ready_progress",

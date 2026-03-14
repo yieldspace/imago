@@ -1734,7 +1734,7 @@ where
     }
 
     fn direct_fairness(&self) -> Vec<Fairness<T::State, T::Action>> {
-        self.symbolic_artifacts().fairness().to_vec()
+        self.symbolic_artifacts().executable_fairness().to_vec()
     }
 
     fn ensure_symbolic_schema_covers_program(

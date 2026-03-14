@@ -69,7 +69,7 @@ fn invalid_core_spec() -> LoweredSpec<'static, State, Action> {
     let transition_program = spec.transition_program();
     let invariants = spec.invariants();
     let properties = spec.properties();
-    let fairness = spec.fairness();
+    let fairness = spec.executable_fairness();
     let symbolic_artifacts = SymbolicArtifacts::new(
         lookup_symbolic_state_schema::<State>(),
         transition_program.clone(),
