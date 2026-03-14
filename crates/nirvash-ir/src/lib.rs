@@ -276,6 +276,84 @@ pub struct SpecCore {
     pub temporal_props: Vec<TemporalExpr>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FragmentProfile {
+    pub has_opaque_nodes: bool,
+    pub has_stringly_nodes: bool,
+    pub has_stringly_quantifiers: bool,
+    pub has_temporal_props: bool,
+    pub has_fairness: bool,
+    pub symbolic_supported: bool,
+    pub proof_supported: bool,
+}
+
+impl FragmentProfile {
+    pub fn symbolic_unsupported_reasons(&self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.has_opaque_nodes {
+            reasons.push("opaque nodes");
+        }
+        if self.has_stringly_quantifiers {
+            reasons.push("stringly quantifiers");
+        }
+        reasons
+    }
+
+    pub fn proof_unsupported_reasons(&self) -> Vec<&'static str> {
+        let mut reasons = self.symbolic_unsupported_reasons();
+        if self.has_temporal_props {
+            reasons.push("temporal properties");
+        }
+        if self.has_fairness {
+            reasons.push("fairness obligations");
+        }
+        reasons
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoreNormalizationError {
+    EmptyVariableName { index: usize },
+    EmptyDefinitionName { index: usize },
+}
+
+impl std::fmt::Display for CoreNormalizationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyVariableName { index } => {
+                write!(f, "spec core variable at index {index} must not be empty")
+            }
+            Self::EmptyDefinitionName { index } => {
+                write!(f, "spec core definition at index {index} must not be empty")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CoreNormalizationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedSpecCore {
+    pub core: SpecCore,
+    pub fragment_profile: FragmentProfile,
+}
+
+impl NormalizedSpecCore {
+    pub fn core(&self) -> &SpecCore {
+        &self.core
+    }
+
+    pub fn fragment_profile(&self) -> &FragmentProfile {
+        &self.fragment_profile
+    }
+}
+
+impl AsRef<SpecCore> for NormalizedSpecCore {
+    fn as_ref(&self) -> &SpecCore {
+        self.core()
+    }
+}
+
 impl SpecCore {
     pub fn named(frontend_name: &'static str) -> Self {
         Self::opaque(frontend_name)
@@ -298,6 +376,220 @@ impl SpecCore {
             fairness: Vec::new(),
             invariants: Vec::new(),
             temporal_props: Vec::new(),
+        }
+    }
+
+    pub fn normalize(&self) -> Result<NormalizedSpecCore, CoreNormalizationError> {
+        for (index, decl) in self.vars.iter().enumerate() {
+            if decl.name.is_empty() {
+                return Err(CoreNormalizationError::EmptyVariableName { index });
+            }
+        }
+        for (index, def) in self.defs.iter().enumerate() {
+            if def.name.is_empty() {
+                return Err(CoreNormalizationError::EmptyDefinitionName { index });
+            }
+        }
+
+        let mut fragment_profile = FragmentProfile {
+            has_temporal_props: !self.temporal_props.is_empty(),
+            has_fairness: !self.fairness.is_empty(),
+            ..FragmentProfile::default()
+        };
+        classify_state_expr(&self.init, &mut fragment_profile);
+        classify_action_expr(&self.next, &mut fragment_profile);
+        for fairness in &self.fairness {
+            classify_fairness_decl(fairness, &mut fragment_profile);
+        }
+        for invariant in &self.invariants {
+            classify_state_expr(invariant, &mut fragment_profile);
+        }
+        for property in &self.temporal_props {
+            classify_temporal_expr(property, &mut fragment_profile);
+        }
+
+        fragment_profile.symbolic_supported =
+            !fragment_profile.has_opaque_nodes && !fragment_profile.has_stringly_quantifiers;
+        fragment_profile.proof_supported = fragment_profile.symbolic_supported
+            && !fragment_profile.has_temporal_props
+            && !fragment_profile.has_fairness;
+
+        Ok(NormalizedSpecCore {
+            core: self.clone(),
+            fragment_profile,
+        })
+    }
+}
+
+fn classify_value_expr(expr: &ValueExpr, profile: &mut FragmentProfile) {
+    match expr {
+        ValueExpr::Opaque(_) => profile.has_opaque_nodes = true,
+        ValueExpr::Add(lhs, rhs)
+        | ValueExpr::Sub(lhs, rhs)
+        | ValueExpr::Mul(lhs, rhs)
+        | ValueExpr::Union(lhs, rhs)
+        | ValueExpr::Intersection(lhs, rhs)
+        | ValueExpr::Difference(lhs, rhs) => {
+            classify_value_expr(lhs, profile);
+            classify_value_expr(rhs, profile);
+        }
+        ValueExpr::Neg(value) => classify_value_expr(value, profile),
+        ValueExpr::SequenceUpdate { base, index, value }
+        | ValueExpr::FunctionUpdate {
+            base,
+            key: index,
+            value,
+        } => {
+            classify_value_expr(base, profile);
+            classify_value_expr(index, profile);
+            classify_value_expr(value, profile);
+        }
+        ValueExpr::RecordUpdate { base, value, .. } => {
+            classify_value_expr(base, profile);
+            classify_value_expr(value, profile);
+        }
+        ValueExpr::Comprehension { .. } | ValueExpr::Conditional { .. } => {
+            profile.has_stringly_nodes = true;
+            if let ValueExpr::Conditional {
+                then_branch,
+                else_branch,
+                ..
+            } = expr
+            {
+                classify_value_expr(then_branch, profile);
+                classify_value_expr(else_branch, profile);
+            }
+        }
+        ValueExpr::Unit
+        | ValueExpr::Literal(_)
+        | ValueExpr::Field(_)
+        | ValueExpr::PureCall { .. } => {}
+    }
+}
+
+fn classify_update_expr(expr: &UpdateExpr, profile: &mut FragmentProfile) {
+    match expr {
+        UpdateExpr::Sequence(ops) => {
+            for op in ops {
+                classify_update_op(op, profile);
+            }
+        }
+        UpdateExpr::Choice { .. } => profile.has_stringly_nodes = true,
+    }
+}
+
+fn classify_update_op(op: &UpdateOpDecl, profile: &mut FragmentProfile) {
+    match op {
+        UpdateOpDecl::Assign { value, .. }
+        | UpdateOpDecl::SetInsert { item: value, .. }
+        | UpdateOpDecl::SetRemove { item: value, .. } => classify_value_expr(value, profile),
+        UpdateOpDecl::Effect { .. } => {}
+    }
+}
+
+fn classify_state_expr(expr: &StateExpr, profile: &mut FragmentProfile) {
+    match expr {
+        StateExpr::Eq(lhs, rhs) | StateExpr::In(lhs, rhs) => {
+            classify_state_expr(lhs, profile);
+            classify_state_expr(rhs, profile);
+        }
+        StateExpr::Not(value) => classify_state_expr(value, profile),
+        StateExpr::And(values) | StateExpr::Or(values) => {
+            for value in values {
+                classify_state_expr(value, profile);
+            }
+        }
+        StateExpr::Implies(lhs, rhs) => {
+            classify_state_expr(lhs, profile);
+            classify_state_expr(rhs, profile);
+        }
+        StateExpr::Compare { lhs, rhs, .. } | StateExpr::Builtin { lhs, rhs, .. } => {
+            classify_value_expr(lhs, profile);
+            classify_value_expr(rhs, profile);
+        }
+        StateExpr::Match { .. } => profile.has_stringly_nodes = true,
+        StateExpr::Quantified { .. } => {
+            profile.has_stringly_nodes = true;
+            profile.has_stringly_quantifiers = true;
+        }
+        StateExpr::Forall(_, body) | StateExpr::Exists(_, body) | StateExpr::Choose(_, body) => {
+            classify_state_expr(body, profile);
+        }
+        StateExpr::Opaque(_) => profile.has_opaque_nodes = true,
+        StateExpr::True
+        | StateExpr::False
+        | StateExpr::Var(_)
+        | StateExpr::Ref(_)
+        | StateExpr::Const(_) => {}
+    }
+}
+
+fn classify_action_expr(expr: &ActionExpr, profile: &mut FragmentProfile) {
+    match expr {
+        ActionExpr::Pred(state) => classify_state_expr(state, profile),
+        ActionExpr::And(values) | ActionExpr::Or(values) => {
+            for value in values {
+                classify_action_expr(value, profile);
+            }
+        }
+        ActionExpr::Implies(lhs, rhs) => {
+            classify_action_expr(lhs, profile);
+            classify_action_expr(rhs, profile);
+        }
+        ActionExpr::Exists(_, body) | ActionExpr::Enabled(body) => {
+            classify_action_expr(body, profile);
+        }
+        ActionExpr::Compare { lhs, rhs, .. } | ActionExpr::Builtin { lhs, rhs, .. } => {
+            classify_value_expr(lhs, profile);
+            classify_value_expr(rhs, profile);
+        }
+        ActionExpr::Match { .. } => profile.has_stringly_nodes = true,
+        ActionExpr::Quantified { .. } => {
+            profile.has_stringly_nodes = true;
+            profile.has_stringly_quantifiers = true;
+        }
+        ActionExpr::Rule { guard, update, .. } => {
+            classify_action_expr(guard, profile);
+            classify_update_expr(update, profile);
+        }
+        ActionExpr::BoxAction { action, .. } | ActionExpr::AngleAction { action, .. } => {
+            classify_action_expr(action, profile);
+        }
+        ActionExpr::Opaque(_) => profile.has_opaque_nodes = true,
+        ActionExpr::True | ActionExpr::False | ActionExpr::Ref(_) | ActionExpr::Unchanged(_) => {}
+    }
+}
+
+fn classify_temporal_expr(expr: &TemporalExpr, profile: &mut FragmentProfile) {
+    match expr {
+        TemporalExpr::State(state) => classify_state_expr(state, profile),
+        TemporalExpr::Action(action) | TemporalExpr::Enabled(action) => {
+            classify_action_expr(action, profile)
+        }
+        TemporalExpr::Not(value)
+        | TemporalExpr::Next(value)
+        | TemporalExpr::Always(value)
+        | TemporalExpr::Eventually(value) => classify_temporal_expr(value, profile),
+        TemporalExpr::And(values) | TemporalExpr::Or(values) => {
+            for value in values {
+                classify_temporal_expr(value, profile);
+            }
+        }
+        TemporalExpr::Implies(lhs, rhs)
+        | TemporalExpr::Until(lhs, rhs)
+        | TemporalExpr::LeadsTo(lhs, rhs) => {
+            classify_temporal_expr(lhs, profile);
+            classify_temporal_expr(rhs, profile);
+        }
+        TemporalExpr::Opaque(_) => profile.has_opaque_nodes = true,
+        TemporalExpr::Ref(_) => {}
+    }
+}
+
+fn classify_fairness_decl(fairness: &FairnessDecl, profile: &mut FragmentProfile) {
+    match fairness {
+        FairnessDecl::WF { action, .. } | FairnessDecl::SF { action, .. } => {
+            classify_action_expr(action, profile);
         }
     }
 }

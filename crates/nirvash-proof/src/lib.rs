@@ -1,14 +1,14 @@
 //! Proof/export surface for `nirvash`.
 //!
-//! `PrettySpecExporter` renders readable TLA-style dumps for review and debugging.
-//! `SoundProofExporter` fail-closes on unsupported fragments and exports proof obligations
-//! that are intended to stay sound with respect to the lowered spec core.
+//! `ProofBundleExporter` fail-closes on unsupported fragments and exports proof bundles
+//! from the normalized lowered spec core.
 
 use std::collections::BTreeSet;
 
 use nirvash_ir::{
-    ActionExpr, BuiltinPredicateOp, ComparisonOp, FairnessDecl, QuantifierKind, SpecCore,
-    StateExpr, TemporalExpr, UpdateExpr, UpdateOpDecl, ValueExpr, ViewExpr,
+    ActionExpr, BuiltinPredicateOp, ComparisonOp, CoreNormalizationError, FairnessDecl,
+    NormalizedSpecCore, QuantifierKind, SpecCore, StateExpr, TemporalExpr, UpdateExpr,
+    UpdateOpDecl, ValueExpr, ViewExpr,
 };
 pub use nirvash_ir::{ProofObligation, ProofObligationKind};
 
@@ -48,12 +48,14 @@ pub fn invariant_obligations(spec: &SpecCore) -> Vec<ProofObligation> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofExportError {
+    Normalization(CoreNormalizationError),
     UnsupportedFragment(String),
 }
 
 impl std::fmt::Display for ProofExportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Normalization(error) => write!(f, "{error}"),
             Self::UnsupportedFragment(message) => write!(f, "{message}"),
         }
     }
@@ -61,100 +63,82 @@ impl std::fmt::Display for ProofExportError {
 
 impl std::error::Error for ProofExportError {}
 
-pub fn sound_obligations(
-    spec: &SpecCore,
-    reduction_obligations: &[ProofObligation],
-) -> Result<Vec<ProofObligation>, ProofExportError> {
-    ensure_sound_fragment_supported(spec)?;
-    let mut obligations = invariant_obligations(spec);
-    obligations.extend_from_slice(reduction_obligations);
-    Ok(obligations)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportedArtifactKind {
+    TlaModule,
+    SmtlibObligation,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PrettySpecExporter;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedArtifact {
+    pub label: String,
+    pub kind: ExportedArtifactKind,
+    pub content: String,
+}
 
-impl PrettySpecExporter {
-    pub fn export(&self, spec: &SpecCore, extra_obligations: &[ProofObligation]) -> String {
-        let module_name = module_name(spec);
-        let variables = if spec.vars.is_empty() {
-            "vars".to_owned()
-        } else {
-            spec.vars
-                .iter()
-                .map(|decl| decl.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let invariant_names = invariant_names(spec);
-        let property_names = named_items(spec, "property::", spec.temporal_props.len(), "Property");
-        let fairness_names = fairness_names(spec);
-        let mut obligations = invariant_obligations(spec);
-        obligations.extend_from_slice(extra_obligations);
-
-        let mut lines = vec![
-            format!("---- MODULE {module_name} ----"),
-            "EXTENDS Naturals, Sequences, TLC".to_owned(),
-            format!("VARIABLES {variables}"),
-            String::new(),
-            format!(
-                "Init == {}",
-                render_state_tla(&spec.init, Timepoint::Current)
-            ),
-            format!("Next == {}", render_action_tla(&spec.next)),
-        ];
-
-        for (name, invariant) in invariant_names.iter().zip(spec.invariants.iter()) {
-            lines.push(format!(
-                "{name} == {}",
-                render_state_tla(invariant, Timepoint::Current)
-            ));
+impl ExportedArtifact {
+    pub fn new(
+        label: impl Into<String>,
+        kind: ExportedArtifactKind,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            kind,
+            content: content.into(),
         }
-        for (name, property) in property_names.iter().zip(spec.temporal_props.iter()) {
-            lines.push(format!("{name} == {}", render_temporal_tla(property)));
-        }
-        for (name, fairness) in fairness_names.iter().zip(spec.fairness.iter()) {
-            lines.push(format!("{name} == {}", render_fairness_tla(fairness)));
-        }
-
-        if !obligations.is_empty() {
-            lines.push(String::new());
-            for obligation in obligations {
-                lines.push(obligation.tla_theorem);
-            }
-        }
-
-        lines.push("====".to_owned());
-        lines.join("\n")
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SoundProofExporter;
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProofBundle {
+    pub obligations: Vec<ProofObligation>,
+    pub exported_artifacts: Vec<ExportedArtifact>,
+}
 
-impl SoundProofExporter {
-    pub fn export_obligations(
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProofBundleExporter;
+
+impl ProofBundleExporter {
+    pub fn export(
         &self,
         spec: &SpecCore,
         reduction_obligations: &[ProofObligation],
-    ) -> Result<Vec<ProofObligation>, ProofExportError> {
-        sound_obligations(spec, reduction_obligations)
+    ) -> Result<ProofBundle, ProofExportError> {
+        let normalized = spec.normalize().map_err(ProofExportError::Normalization)?;
+        self.export_normalized(&normalized, reduction_obligations)
     }
 
-    pub fn export_smt_obligation(
+    pub fn export_normalized(
         &self,
-        obligation: &ProofObligation,
-    ) -> Result<String, ProofExportError> {
-        ensure_obligation_supported(obligation)?;
-        Ok(obligation.smtlib.clone())
-    }
+        normalized: &NormalizedSpecCore,
+        reduction_obligations: &[ProofObligation],
+    ) -> Result<ProofBundle, ProofExportError> {
+        ensure_proof_fragment_supported(normalized)?;
+        for obligation in reduction_obligations {
+            ensure_obligation_supported(obligation)?;
+        }
+        let spec = normalized.core();
+        let mut obligations = invariant_obligations(spec);
+        obligations.extend_from_slice(reduction_obligations);
 
-    pub fn export_tla_theorem(
-        &self,
-        obligation: &ProofObligation,
-    ) -> Result<String, ProofExportError> {
-        ensure_obligation_supported(obligation)?;
-        Ok(obligation.tla_theorem.clone())
+        let mut exported_artifacts = vec![ExportedArtifact::new(
+            module_name(spec),
+            ExportedArtifactKind::TlaModule,
+            render_tla_module(spec, reduction_obligations),
+        )];
+        exported_artifacts.extend(obligations.iter().map(|obligation| {
+            ExportedArtifact::new(
+                obligation.label.clone(),
+                ExportedArtifactKind::SmtlibObligation,
+                obligation.smtlib.clone(),
+            )
+        }));
+
+        Ok(ProofBundle {
+            obligations,
+            exported_artifacts,
+        })
     }
 }
 
@@ -173,18 +157,17 @@ impl Timepoint {
     }
 }
 
-fn ensure_sound_fragment_supported(spec: &SpecCore) -> Result<(), ProofExportError> {
-    if !spec.temporal_props.is_empty() {
-        return Err(ProofExportError::UnsupportedFragment(
-            "sound proof export does not support temporal properties".to_owned(),
-        ));
+fn ensure_proof_fragment_supported(
+    normalized: &NormalizedSpecCore,
+) -> Result<(), ProofExportError> {
+    let reasons = normalized.fragment_profile().proof_unsupported_reasons();
+    if reasons.is_empty() {
+        return Ok(());
     }
-    if !spec.fairness.is_empty() {
-        return Err(ProofExportError::UnsupportedFragment(
-            "sound proof export does not support fairness obligations".to_owned(),
-        ));
-    }
-    Ok(())
+    Err(ProofExportError::UnsupportedFragment(format!(
+        "proof bundle export does not support {}",
+        reasons.join(", ")
+    )))
 }
 
 fn ensure_obligation_supported(obligation: &ProofObligation) -> Result<(), ProofExportError> {
@@ -195,6 +178,59 @@ fn ensure_obligation_supported(obligation: &ProofObligation) -> Result<(), Proof
         | ProofObligationKind::VerifiedStateQuotient
         | ProofObligationKind::VerifiedPor => Ok(()),
     }
+}
+
+fn render_tla_module(spec: &SpecCore, extra_obligations: &[ProofObligation]) -> String {
+    let module_name = module_name(spec);
+    let variables = if spec.vars.is_empty() {
+        "vars".to_owned()
+    } else {
+        spec.vars
+            .iter()
+            .map(|decl| decl.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let invariant_names = invariant_names(spec);
+    let property_names = named_items(spec, "property::", spec.temporal_props.len(), "Property");
+    let fairness_names = fairness_names(spec);
+    let mut obligations = invariant_obligations(spec);
+    obligations.extend_from_slice(extra_obligations);
+
+    let mut lines = vec![
+        format!("---- MODULE {module_name} ----"),
+        "EXTENDS Naturals, Sequences, TLC".to_owned(),
+        format!("VARIABLES {variables}"),
+        String::new(),
+        format!(
+            "Init == {}",
+            render_state_tla(&spec.init, Timepoint::Current)
+        ),
+        format!("Next == {}", render_action_tla(&spec.next)),
+    ];
+
+    for (name, invariant) in invariant_names.iter().zip(spec.invariants.iter()) {
+        lines.push(format!(
+            "{name} == {}",
+            render_state_tla(invariant, Timepoint::Current)
+        ));
+    }
+    for (name, property) in property_names.iter().zip(spec.temporal_props.iter()) {
+        lines.push(format!("{name} == {}", render_temporal_tla(property)));
+    }
+    for (name, fairness) in fairness_names.iter().zip(spec.fairness.iter()) {
+        lines.push(format!("{name} == {}", render_fairness_tla(fairness)));
+    }
+
+    if !obligations.is_empty() {
+        lines.push(String::new());
+        for obligation in obligations {
+            lines.push(obligation.tla_theorem);
+        }
+    }
+
+    lines.push("====".to_owned());
+    lines.join("\n")
 }
 
 fn module_name(spec: &SpecCore) -> String {
@@ -1084,8 +1120,8 @@ fn render_unchanged_smt<'a>(env: &mut SmtEnv, vars: impl IntoIterator<Item = &'a
 #[cfg(test)]
 mod tests {
     use super::{
-        PrettySpecExporter, ProofExportError, ProofObligation, ProofObligationKind,
-        SoundProofExporter, invariant_obligations, sound_obligations,
+        ExportedArtifactKind, ProofBundleExporter, ProofExportError, ProofObligation,
+        ProofObligationKind, invariant_obligations,
     };
     use nirvash_ir::{
         ActionExpr, ComparisonOp, FairnessDecl, SpecCore, StateExpr, TemporalExpr, ValueExpr,
@@ -1116,36 +1152,48 @@ mod tests {
     }
 
     #[test]
-    fn exports_tla_module_with_theorem_skeletons() {
+    fn exports_tla_module_artifact_with_theorem_skeletons() {
         let spec = SpecCore {
             init: StateExpr::True,
             next: ActionExpr::BoxAction {
                 action: Box::new(ActionExpr::Ref("NextAction".to_owned())),
                 view: nirvash_ir::ViewExpr::Vars,
             },
-            fairness: vec![nirvash_ir::FairnessDecl::WF {
-                view: nirvash_ir::ViewExpr::Vars,
-                action: ActionExpr::Ref("NextAction".to_owned()),
-            }],
             invariants: vec![StateExpr::Ref("TypeOk".to_owned())],
-            temporal_props: vec![nirvash_ir::TemporalExpr::Ref("EventuallyReady".to_owned())],
             ..SpecCore::named("DemoSpec")
         };
 
-        let text = PrettySpecExporter.export(&spec, &[]);
+        let bundle = ProofBundleExporter
+            .export(&spec, &[])
+            .expect("supported invariant fragment should export");
+        let text = bundle
+            .exported_artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ExportedArtifactKind::TlaModule)
+            .expect("bundle should contain a TLA module artifact")
+            .content
+            .as_str();
         assert!(text.contains("MODULE DemoSpec"));
         assert!(text.contains("Init =="));
         assert!(text.contains("Next =="));
-        assert!(text.contains("WF_vars(NextAction)"));
         assert!(text.contains("THEOREM TypeOk_init"));
-        assert!(text.contains("EventuallyReady"));
     }
 
     #[test]
-    fn sound_exporter_emits_sound_obligations() {
+    fn proof_bundle_exporter_emits_supported_obligations_and_artifacts() {
         let spec = SpecCore {
+            init: StateExpr::True,
+            next: ActionExpr::Unchanged(vec!["vars".to_owned()]),
+            vars: vec![nirvash_ir::VarDecl {
+                name: "vars".to_owned(),
+            }],
+            defs: vec![nirvash_ir::Definition {
+                name: "frontend".to_owned(),
+                body: "DemoSpec".to_owned(),
+            }],
             invariants: vec![StateExpr::Ref("TypeOk".to_owned())],
-            ..SpecCore::named("DemoSpec")
+            fairness: Vec::new(),
+            temporal_props: Vec::new(),
         };
         let reduction = vec![ProofObligation::new(
             "verified_por".to_owned(),
@@ -1153,26 +1201,30 @@ mod tests {
             "THEOREM verified_por == PORSound".to_owned(),
             "(assert PORSound)".to_owned(),
         )];
-        let obligations = SoundProofExporter
-            .export_obligations(&spec, &reduction)
+        let bundle = ProofBundleExporter
+            .export(&spec, &reduction)
             .expect("supported invariant fragment should export");
-        let smt = SoundProofExporter
-            .export_smt_obligation(&obligations[0])
-            .expect("supported obligation should export SMT");
-        let tla = SoundProofExporter
-            .export_tla_theorem(obligations.last().expect("reduction obligation present"))
-            .expect("supported obligation should export TLA");
+        let smt = bundle
+            .exported_artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ExportedArtifactKind::SmtlibObligation)
+            .expect("bundle should include SMT obligation artifacts");
 
-        assert!(smt.contains("TypeOk"));
-        assert!(tla.contains("verified_por"));
+        assert!(smt.content.contains("TypeOk"));
+        assert!(
+            bundle
+                .obligations
+                .iter()
+                .any(|obligation| obligation.tla_theorem.contains("verified_por"))
+        );
         assert_eq!(
-            obligations.last().map(|obligation| obligation.kind),
+            bundle.obligations.last().map(|obligation| obligation.kind),
             Some(ProofObligationKind::VerifiedPor)
         );
     }
 
     #[test]
-    fn sound_exporter_rejects_unsupported_fragments() {
+    fn proof_bundle_exporter_rejects_unsupported_fragments() {
         let spec = SpecCore {
             init: StateExpr::True,
             next: ActionExpr::Unchanged(vec!["vars".to_owned()]),
@@ -1182,11 +1234,18 @@ mod tests {
                 view: ViewExpr::Vars,
                 action: ActionExpr::Ref("NextAction".to_owned()),
             }],
-            ..SpecCore::named("DemoSpec")
+            vars: vec![nirvash_ir::VarDecl {
+                name: "vars".to_owned(),
+            }],
+            defs: vec![nirvash_ir::Definition {
+                name: "frontend".to_owned(),
+                body: "DemoSpec".to_owned(),
+            }],
         };
 
-        let error =
-            sound_obligations(&spec, &[]).expect_err("temporal/fairness fragment is not supported");
+        let error = ProofBundleExporter
+            .export(&spec, &[])
+            .expect_err("temporal/fairness fragment is not supported");
         assert!(matches!(
             error,
             ProofExportError::UnsupportedFragment(message)

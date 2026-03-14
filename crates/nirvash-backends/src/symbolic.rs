@@ -1645,6 +1645,28 @@ where
         self.spec.symbolic_artifacts()
     }
 
+    fn normalized_core(&self) -> Result<&nirvash_lower::NormalizedSpecCore, ModelCheckError> {
+        self.spec.normalized_core().map_err(|err| {
+            self.symbolic_ast_required_error(format!(
+                "symbolic backend failed to normalize spec `{}` core: {err}",
+                self.spec.frontend_name(),
+            ))
+        })
+    }
+
+    fn ensure_normalized_fragment_supported(&self) -> Result<(), ModelCheckError> {
+        let normalized = self.normalized_core()?;
+        let profile = normalized.fragment_profile();
+        if profile.symbolic_supported {
+            return Ok(());
+        }
+        let reasons = profile.symbolic_unsupported_reasons().join(", ");
+        Err(self.symbolic_ast_required_error(format!(
+            "symbolic backend requires spec `{}` normalized core to avoid unsupported fragments: {reasons}",
+            self.spec.frontend_name(),
+        )))
+    }
+
     fn symbolic_support_issue_error(&self, issue: &SymbolicSupportIssue) -> ModelCheckError {
         self.symbolic_ast_required_error(issue.to_string())
     }
@@ -1653,6 +1675,7 @@ where
         &self,
         backend_fragment: &'static str,
     ) -> Result<(), ModelCheckError> {
+        self.ensure_normalized_fragment_supported()?;
         if let Some(issue) = self
             .symbolic_artifacts()
             .first_issue_for_fragment(backend_fragment)
@@ -1691,6 +1714,7 @@ where
     }
 
     fn direct_state_schema(&self) -> Result<SymbolicStateSchema<T::State>, ModelCheckError> {
+        self.ensure_normalized_fragment_supported()?;
         self.symbolic_artifacts().state_schema().cloned().ok_or_else(|| {
             self.symbolic_ast_required_error(format!(
                 "symbolic backend requires state `{}` to implement SymbolicEncoding and lower a symbolic encoding schema",

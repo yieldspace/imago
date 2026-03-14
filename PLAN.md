@@ -1,148 +1,209 @@
-# RFC 0002: `nirvash` における Spec-to-Code Verification と Refinement Checking の導入
+# RFC 0003: `nirvash` における IR-Driven Verification Kernel、Constrained Trace Refinement、Certificate-Based Trust Boundary
 
-## RFC TODO
-
-- [x] RFC TODO 管理の骨格を導入し、実装順で進捗を追跡できるようにする
-- [x] Phase 1A: `nirvash-conformance` に `RefinementMap` trait と `step_refines_relation` を追加する
-- [x] Phase 1B: summary helper / `enabled_from_summary` を relation-aware に整理する
-- [x] Phase 1C: code witness / macro harness を relation API に追従させる
-- [x] Phase 2: `trace_refines` を explicit backend で実装する
-- [x] Phase 3: `ExplicitModelChecker` / `SymbolicModelChecker` へ checker front door を分離する
-- [x] Phase 4: sound reduction と heuristic reduction の API を分離する
-- [x] Phase 5: Rust 検証アダプタ (`proptest-state-machine` / `Kani` / `loom`) を追加する
-- [x] Phase 6: proof export を pretty / sound に分離する
-
-- Status: Implemented (Phase 1-6 complete)
-- Created: 2026-03-13
-- Target crates: `nirvash`, `nirvash-ir`, `nirvash-lower`, `nirvash-check`, `nirvash-backends`, `nirvash-conformance`, `nirvash-proof`
+- Status: Draft
+- Created: 2026-03-14
+- Target: `nirvash` の次段階アーキテクチャ
+- Author: OpenAI
 
 ## 0. 要約
 
-本 RFC は、`nirvash` を **spec authoring / model checking の基盤**から、**spec と Rust 実装の整合性を検証する基盤**へ拡張する提案である。
+本 RFC は、現在の `nirvash` を「frontend/core/lower/check/backends/conformance/proof」に分離したうえで、次に残っている 3 つの seam を埋める提案である。
 
-現行の `nirvash` は、frontend DSL・core IR・lowering・checker front door・backend・conformance・proof export へ crate split されており、explicit reachable graph、direct SMT safety/temporal path、witness/runtime binding、`PrettySpecExporter` / `SoundProofExporter` を提供している。この再編は方向として正しい。
+1. `SpecCore` を checker / proof / symbolic backend の**意味論の正本**にする。
+2. `trace_refines` を explicit candidate trace の一致判定から、**constrained model checking ベースの一般化された trace refinement**へ引き上げる。
+3. `Verified*` や `SoundProofExporter` が暗黙に背負っている trust boundary を、**証明書 (`ProofCertificate`) と trust tier**として型に出す。
 
-Phase 1-6 の実装で解消した主な課題は次のとおりである。
-
-1. `LoweredSpec` は `SpecCore` を持つが、同時に checker-facing な executable/symbolic artifact を保持しており、checker 境界も `CheckerSpec` の operational API を公開している。
-2. `TemporalSpec::fairness()` は依然として legacy fairness surface を返し、IR 側の `WF { view, action } / SF { view, action }` が authoring surface まで届いていない。
-3. checker front door を `ExplicitModelChecker` / `SymbolicModelChecker` に分離し、symbolic-only path から `FiniteModelDomain` 要件を外した。
-4. `ModelInstance::with_state_abstraction` / `with_por` を廃止し、`SoundReduction` / `HeuristicReduction` に置き換えた。
-5. `nirvash-conformance` を deterministic equality 依存から外し、`step_refines_summary` / `step_refines_relation` / `trace_refines` を result-returning API として導入した。
-6. `nirvash-proof` を `PrettySpecExporter` と `SoundProofExporter` に分離し、obligation export と可読 dump の責務を分けた。
-
-本 RFC は、これらを踏まえて、**refinement mapping と trace validation を中心にした code verification layer** を導入する。具体的には、
-
-- refinement map を first-class にする
-- step equality ではなく relation-based refinement を導入する
-- trace validation を constrained model checking として実装する
-- explicit / symbolic checker front door を分離する
-- sound reduction と heuristic reduction を型・API で分離する
-- `proptest-state-machine`, `Kani`, `loom` を `nirvash-conformance` に接続する
-
-という 6 点を提案する。
+本 RFC では、Abadi/Lamport の refinement mapping、TLA+ trace validation を constrained model checking に落とす近年の手法、および Rust 向けの `proptest-state-machine`、Kani、loom、Verus、RefinedRust を、同一の refinement モデルの上に接続する。これにより `nirvash` は「仕様を書く DSL」から、「仕様を正本として Rust 実装を検証する基盤」へ進む。
 
 ## 1. 背景
 
-`nirvash` の README が示すとおり、現在の workspace は `nirvash` を formal frontend DSL、`nirvash-ir` を backend 非依存の `SpecCore`、`nirvash-lower` を lowering boundary、`nirvash-check` を checker front door、`nirvash-backends` を explicit/symbolic backend、`nirvash-conformance` を witness/runtime binding/refinement assert、`nirvash-proof` を SMT-LIB/TLA module export として分離している。また README は、explicit reachable graph を exact BFS、symbolic reachable graph を direct SMT safety path、symbolic bounded lasso を direct SMT temporal path と説明している。<sup>[1]</sup>
+現在の `nirvash` は、README にあるとおり `nirvash` / `nirvash-ir` / `nirvash-lower` / `nirvash-check` / `nirvash-backends` / `nirvash-conformance` / `nirvash-proof` へ分割され、明確な crate split を持つ。README では `nirvash-ir` を backend 非依存の `SpecCore` と位置づけ、`nirvash-check` を explicit / symbolic の typed checker front door、`nirvash-conformance` を witness / runtime binding / refinement assert、`nirvash-proof` を `PrettySpecExporter` と `SoundProofExporter` として公開している。  
+参照: [R1], [R2]
 
-同時に、`nirvash-lower` では `LoweredSpec` が `core: SpecCore` を持ちながら、checker-facing な executable/symbolic artifact を並列に保持し、`TemporalSpec` は `Vec<Fairness<Self::State, Self::Action>>` を返し、`CheckerSpec` も `initial_states()`, `actions()`, `transition_program()` などの operational surface を露出している。<sup>[2]</sup>
+この再編により、少なくとも次の改善はすでに入っている。
 
-現在の `nirvash-check` は `ExplicitModelChecker` と `SymbolicModelChecker` を公開し、symbolic-only path では `FiniteModelDomain` を要求しない。<sup>[3]</sup>
+- `LoweredSpec` が `SpecCore` を保持する。
+- `ExplicitModelChecker` と `SymbolicModelChecker` が front door で分離され、explicit 側だけが `FiniteModelDomain` を要求する。
+- `RefinementMap` と `step_refines_relation` が入り、summary equality 依存だった step-level conformance が relation-based に拡張された。
+- `SoundnessTier = Exact | SoundReduced | Heuristic` が API surface に現れ、exact 検査と reduction/heuristic が区別された。  
+  参照: [R3], [R4], [R5]
 
-`nirvash-conformance` は `ActionApplier` / `StateObserver` に加えて `RefinementMap`, `step_refines_summary`, `step_refines_relation`, `trace_refines` を持ち、runtime 観測と abstract trace validation を result-returning witness API として提供する。<sup>[4]</sup>
+一方で、レビューの観点からは、次の 4 点がまだ architecture 上の未解決課題として残っている。
 
-`nirvash-proof` は `PrettySpecExporter` と `SoundProofExporter` を提供し、可読 dump と sound obligation export を fail-closed に分離している。<sup>[5]</sup>
+### 1.1 `SpecCore` がまだ checker の正本ではない
 
-一方で `nirvash-ir` 自体は、`FairnessDecl::WF { view, action } / SF { view, action }` を持っており、再編の方向は合っている。ただし IR には `Opaque(String)`、`Comprehension { domain: String, body: String }`、`Choice { domain: String, body: String }`、`Quantified { domain: String, body: String }` のような stringly node も残っている。<sup>[6]</sup>
+`LoweredSpec` は `pub core: SpecCore` を持つ一方で、`symbolic_artifacts()` と `executable()` を別に公開している。現状の public boundary では、`SpecCore` は存在していても、checker や backend が常に `core` を正本として読むとは限らない。  
+参照: [R3]
 
-したがって、いま必要なのは crate split の再設計ではなく、**spec から実コードへの検証経路を意味論的に整備すること**である。
+### 1.2 `nirvash-ir` はまだ checker kernel としては浅い
+
+`FairnessDecl::WF { view, action } / SF { view, action }` は良いが、`Quantified { domain: String, body: String }`、`Match { value: String, pattern: String }`、`Opaque(String)` など stringly な節点が残っている。これは interchange/export IR としては許容できるが、checker / proof の正本としては弱い。  
+参照: [R6]
+
+### 1.3 trace refinement が「候補 trace との完全一致」に寄っている
+
+`RefinementMap` 自体は step-level で relation-based だが、`ObservedEvent` は `Action { action, output } | Stutter` に限定されており、trace matching は candidate trace の state length、step length、`loop_start` 一致を要求する。これは sequential deterministic API の validation には有効だが、hidden step、linearization point、部分観測、部分状態観測、非同期 invoke/return を持つ実装には狭い。  
+参照: [R7], [R8], [R9]
+
+### 1.4 trust boundary が still implicit である
+
+`VerifiedSymmetry` / `VerifiedStateQuotient` / `VerifiedPor` は実装上「関数ポインタ + obligation の束」であり、obligation の自動 discharge は存在しない。また `SoundProofExporter` は supported fragment の obligation を export するが、temporal property と fairness を reject する。したがって「Verified」「Sound」という名前は現時点ではやや強い。  
+参照: [R10], [R11]
 
 ## 2. 問題設定
 
-### 2.1 `nirvash` は spec を書けるが、実装が spec を満たすことを十分には検証できない
+本 RFC が扱う問題は、次の一文で要約できる。
 
-TLA+ 系の古典的な立場では、下位仕様や実装が上位仕様を正しく実装していることは refinement mapping によって説明される。Abadi と Lamport は refinement mapping を「低レベル仕様の状態空間から高レベル仕様の状態空間への写像」と位置づけ、必要に応じて auxiliary variable を追加することで refinement mapping の存在を保証できることを示した。<sup>[7]</sup>
+> `nirvash` はすでに優れた formal frontend と checker stack だが、**IR が verification kernel になっていないこと、trace refinement が constrained checking に上がっていないこと、trust boundary が型に出ていないこと**により、spec-to-code verification の核としてはまだ途中段階にある。
 
-この立場に立つと、`nirvash` が次に持つべき第一級の対象は「モデル検査そのもの」ではなく、**implementation state → abstract spec state の写像**である。
+この問題は、文献側から見ると自然である。Abadi/Lamport の refinement mapping は、下位実装状態から上位仕様状態への写像を中心に、step と trace の対応付けを行う。必要なら history / prophecy などの補助変数を加えて refinement mapping を成立させる。  
+参照: [P1]
 
-### 2.2 実装と spec のズレは 1-step equality だけでは捉えられない
+また、TLA+ trace validation の近年の仕事では、実装トレースと高水準 TLA+ 仕様の照合を、**constrained model checking** として扱う。そこでは、完全な abstract state を全て記録するのではなく、仕様変数の一部更新や不完全な観測だけを trace に含め、checker が欠落情報を再構成する。  
+参照: [P2]
 
-分散システムや非決定的 API では、実装が内部状態や補助状態を持つため、観測された 1 ステップが spec の 1 ステップと一対一に対応しないことが多い。TLA+ の trace validation に関する近年の研究では、実行トレースを高水準 TLA+ 仕様と照合する問題を constrained model checking に還元し、完全状態ではなく spec 変数の更新だけを記録した不完全トレースでも有効に検証できることが示されている。<sup>[8]</sup>
-
-したがって、旧 `assert_step_refinement` のような deterministic equality ベースの API は v0 の smoke test としてはよいが、正式な code verification layer の中核にはならない。
-
-### 2.3 Rust 実装の検証は単一のツールでは足りない
-
-Rust 側には用途の異なる複数の検証手法がある。`proptest` の state machine testing は abstract reference state machine と SUT の差分を最小反例に縮約しやすい。`Kani` は proof harness を単位として bounded な網羅検査を行う bit-precise model checker である。`loom` は C11 memory model 下で concurrent execution の並び替えを系統的に探索する。<sup>[9]</sup>
-
-よって `nirvash` 側の API は、これらを一つの refinement model に接続できる形で設計されるべきである。
+したがって `nirvash` でも、step-level の refinement relation に加えて、partial/incomplete trace を扱う constrained checking と、補助状態を持つ refinement map が必要である。
 
 ## 3. 目標
 
-本 RFC の目標は次のとおりである。
+本 RFC の目標は次の 5 つである。
 
-1. `nirvash` において **spec-to-code verification** を第一級機能にする。
-2. deterministic / nondeterministic の両方の spec を扱えるようにする。
-3. hidden step、stuttering、補助状態、線形化点を含む実装を扱えるようにする。
-4. 逐次テスト、bounded exhaustive checking、schedule exploration、deductive verification を一貫した refinement API に接続する。
-5. 既存の authoring surface (`pred!`, `step!`, `ltl!`, `TransitionProgram`) と crate split を大きく壊さない。
+1. `SpecCore` を checker / proof / symbolic backend の**正本**にする。
+2. stringly な IR を直ちに全廃せずとも、checker/proof が依存できる**正規化済み core**を導入する。
+3. `trace_refines` を generic refinement map と partial observation を扱える trace-level API に拡張する。
+4. reduction / proof export / external verifier の trust basis を `ProofCertificate` と tier で明示する。
+5. `proptest-state-machine`、Kani、loom、Verus、RefinedRust を、共通の refinement モデルの上に接続する。
 
 ## 4. 非目標
 
-本 RFC は以下を目標としない。
+本 RFC の非目標は次のとおりである。
 
-1. 任意の Rust crate を自動的に完全証明すること。
-2. TLAPS 相当の proof manager を全面再実装すること。
-3. refinement map を完全自動合成すること。
-4. heuristics を完全に禁止すること。
+- TLA+ 全構文の完全な re-parser / re-checker をこの RFC だけで完成させること。
+- TLAPS 相当の proof assistant を Rust で全面再実装すること。
+- すべての Rust 実装を単一ツールだけで証明すること。
+- current explicit candidate matching を即時撤廃すること。
+
+本 RFC は、**現行実装を壊さずに verification kernel を強くする**ことを目的とする。
 
 ## 5. 提案
 
-## 5.1 refinement map を first-class にする
+### 5.1 `SpecCore` の正本化と `NormalizedSpecCore`
 
-`nirvash-conformance` に、実装状態と抽象状態の対応を表す trait を導入する。
+#### 5.1.1 提案
+
+`LoweredSpec` を current shape のまま残しつつ、`SpecCore` と `NormalizedSpecCore` を意味論の中心に据える。
 
 ```rust
-pub trait RefinementMap<Spec: FrontendSpec> {
-    type ImplState;
-    type ImplInput;
-    type ImplOutput;
-    type AuxState;
+pub struct LoweredSpec<'a, S, A> {
+    pub core: SpecCore,
+    normalized_core: OnceCell<Result<Arc<NormalizedSpecCore>, CoreNormalizationError>>,
+    symbolic_artifacts: SymbolicArtifacts<S, A>,
+    executable: ExecutableSemantics<'a, S, A>,
+    // ...
+}
 
-    fn abstract_state(&self, c: &Self::ImplState, aux: &Self::AuxState) -> Spec::State;
+impl<'a, S, A> LoweredSpec<'a, S, A> {
+    pub const fn core(&self) -> &SpecCore { &self.core }
+    pub fn normalized_core(&self) -> Result<&NormalizedSpecCore, CoreNormalizationError> { /* ... */ }
+}
+```
 
-    fn candidate_actions(
-        &self,
-        before: &Self::ImplState,
-        input: &Self::ImplInput,
-        output: &Self::ImplOutput,
-        after: &Self::ImplState,
-        aux: &Self::AuxState,
-    ) -> Vec<Spec::Action>;
+`NormalizedSpecCore` は checker/proof が依存する正規化済み AST であり、次を満たす。
 
-    fn abstract_output(
-        &self,
-        _output: &Self::ImplOutput,
-        _aux: &Self::AuxState,
-    ) -> Option<SpecOutput> {
-        None
+- binders / domains / bodies が構造化されている
+- `Opaque(String)` や stringly `Quantified` を残さない
+- backend が fail-closed できる fragment metadata を持つ
+
+```rust
+pub struct FragmentProfile {
+    pub has_opaque_nodes: bool,
+    pub has_stringly_quantifiers: bool,
+    pub has_temporal_props: bool,
+    pub has_fairness: bool,
+    pub symbolic_supported: bool,
+    pub proof_supported: bool,
+}
+```
+
+#### 5.1.2 根拠
+
+現状、`LoweredSpec` は `core` を持ちながら、`symbolic_artifacts()` と `executable()` を parallel に保持している。これ自体は pragmatic だが、verification kernel を `SpecCore` に置くなら、direct SMT path と proof export path は **必ず core から出発**すべきである。  
+参照: [R3]
+
+また、`SpecCore` には `WF/SF(view, action)` がすでに存在するが、他の節点には stringly なノードが残る。したがって、既存 `SpecCore` を捨てるのではなく、**checker/proof 専用の正規化結果**を重ねるのが現実的である。  
+参照: [R6]
+
+#### 5.1.3 期待効果
+
+- symbolic backend / proof exporter / doc graph が同一の core を見る
+- unsupported fragment を `FragmentProfile` で早期に fail-closed できる
+- operational DSL 由来の `executable` と意味論の正本が分離される
+
+### 5.2 fairness authoring surface の追加
+
+IR 側には `FairnessDecl::WF { view, action } / SF { view, action }` があるが、authoring surface では `view` を明示する道が薄い。したがって、legacy `TemporalSpec::fairness()` を残しつつ、core fairness を直接返す surface を追加する。
+
+```rust
+pub trait CoreTemporalSpec: FrontendSpec {
+    fn core_fairness(&self) -> Vec<FairnessDecl> {
+        Vec::new()
     }
+}
+```
 
-    fn init_aux(&self, _c: &Self::ImplState) -> Self::AuxState;
+legacy fairness は lowering で `ViewExpr::Vars` に落とす default とし、core fairness を与えた spec ではそれを優先する。
 
-    fn update_aux(
+#### 根拠
+
+IR では `view` が first-class なのに、authoring surface で書けないのは中途半端である。現在の実装は view を IR に導入する段階までは進んでいるため、次はそれを authoring に引き上げるべきである。  
+参照: [R6]
+
+### 5.3 generic trace refinement の導入
+
+#### 5.3.1 新しい trait
+
+現行の `RefinementMap` は step-level では十分有用だが、trace-level では `AuxState` の逐次更新、partial observation、hidden step の扱いが不足している。そこで新しく `TraceRefinementMap` を導入する。
+
+```rust
+pub trait TraceRefinementMap<Spec: FrontendSpec> {
+    type ImplState;
+    type ImplEvent;
+    type AuxState: Clone;
+
+    fn init_aux(&self, initial: &Self::ImplState) -> Self::AuxState;
+
+    fn next_aux(
         &self,
         before: &Self::ImplState,
-        input: &Self::ImplInput,
-        output: &Self::ImplOutput,
+        event: &Self::ImplEvent,
         after: &Self::ImplState,
         aux: &Self::AuxState,
     ) -> Self::AuxState;
 
+    fn abstract_state(&self, state: &Self::ImplState, aux: &Self::AuxState) -> Spec::State;
+
+    fn candidate_actions(
+        &self,
+        before: &Self::ImplState,
+        event: &Self::ImplEvent,
+        after: &Self::ImplState,
+        aux: &Self::AuxState,
+    ) -> Vec<Spec::Action>;
+
+    fn output_matches(
+        &self,
+        spec: &Spec,
+        action: &Spec::Action,
+        abstract_before: &Spec::State,
+        abstract_after: &Spec::State,
+        event: &Self::ImplEvent,
+        aux: &Self::AuxState,
+    ) -> bool;
+
     fn hidden_step(
         &self,
         _before: &Self::ImplState,
+        _event: &Self::ImplEvent,
         _after: &Self::ImplState,
         _aux: &Self::AuxState,
     ) -> bool {
@@ -151,464 +212,388 @@ pub trait RefinementMap<Spec: FrontendSpec> {
 }
 ```
 
-ここで `AuxState` は history / prophecy / ghost state 相当を表す。これにより、実装の内部キュー、pending request、linearization point、batching 状態を abstract state へ押し込まずに扱える。
+現行 `RefinementMap` は `TraceRefinementMap` の restricted form として残し、後方互換ラッパで持ち上げる。
 
-### 5.1.1 理由
+#### 5.3.2 event model の拡張
 
-Abadi/Lamport の refinement mapping は、低レベル状態から高レベル状態への写像に auxiliary variable を組み合わせる考え方を与える。<sup>[7]</sup> また TLAPS は標準的な safety proof と step simulation を扱う。<sup>[10]</sup> したがって `nirvash` でも、counterexample witness より前に refinement map そのものを明示的に持つ方が自然である。
-
-## 5.2 step refinement を equality ではなく relation にする
-
-旧 `assert_step_refinement` は
+現行の `ObservedEvent` は `Action | Stutter` に限られる。これを次へ広げる。
 
 ```rust
-expected_next = transition(before, action)
-assert_eq!(projected_after, expected_next)
+pub enum ObservedEvent<A, O, I = ()> {
+    Invoke { input: I },
+    Return { output: O },
+    Action { action: A, output: O },
+    Internal,
+    Stutter,
+}
 ```
 
-という deterministic equality ベースである。<sup>[4]</sup>
+Sequential deterministic API では `Action` だけで十分だが、concurrent / async 実装では `Invoke` / `Return` / `Internal` が必要になる。
 
-これを relation-based API に置き換える。
+#### 5.3.3 observation model の拡張
+
+現在の `ObservedTrace` は「state 列 + event 列 + loop_start」という完全観測前提に近い。これを partial/incomplete 観測へ広げる。
 
 ```rust
-pub fn step_refines_relation<Spec, R>(
-    spec: &Spec,
-    map: &R,
-    before: &R::ImplState,
-    input: &R::ImplInput,
-    output: &R::ImplOutput,
-    after: &R::ImplState,
-    aux: &R::AuxState,
-) -> Result<StepRefinementWitness<Spec>, StepRefinementError>
-where
-    Spec: FrontendSpec,
-    R: RefinementMap<Spec>;
+pub enum StateObservation<S> {
+    Full(S),
+    Partial(S),
+    Unknown,
+}
+
+pub struct ObservedTrace<S, E> {
+    pub states: Vec<StateObservation<S>>,
+    pub events: Vec<E>,
+    pub loop_start: Option<usize>,
+}
 ```
 
-意味論は次とする。
+`Partial(S)` は summary/projection を意味し、checker 側が欠落情報を補完する。
 
-- `a ∈ candidate_actions(...)` のいずれかが選べること
-- `r(before)` から `a` により許される abstract successor が存在すること
-- `r(after)` がその successor の一つであること
-- 必要なら hidden/stuttering step を有限回挟めること
+#### 根拠
 
-これにより nondeterministic spec、retry、idempotent API、実装内の micro-step を吸収できる。
+Abadi/Lamport の refinement mapping は、必要に応じて auxiliary variable を導入して抽象仕様と具体実装を結びつける枠組みを与える。`AuxState` を trace-level で進めるのは、この系譜に一致する。  
+参照: [P1]
 
-## 5.3 trace refinement を導入する
+また、TLA+ trace validation は、完全 state ではなく「仕様変数の一部更新」だけを観測し、それを constrained model checking で補完する。`nirvash` の summary-based runtime conformance を一般化する際、この設計は直接の参照先になる。  
+参照: [P2]
 
-`nirvash-conformance` に次の API を導入する。
+### 5.4 `TraceRefinementEngine` と `constrained_trace_refines`
+
+現行の trace refinement は explicit candidate trace との一致判定が本体である。これを次の 3 エンジンへ分割する。
 
 ```rust
-pub struct ObservedEvent<I, O, C> {
-    pub before: C,
-    pub input: I,
-    pub output: O,
-    pub after: C,
+pub enum TraceRefinementEngine {
+    ExplicitCandidate,
+    ExplicitConstrained,
+    SymbolicConstrained,
 }
 
 pub struct TraceRefinementConfig {
-    pub allow_stuttering: bool,
-    pub max_hidden_steps_per_event: usize,
-    pub require_initial_refinement: bool,
-    pub explain_with_counterexample: bool,
+    pub engine: TraceRefinementEngine,
+    pub max_hidden_steps_between_observations: usize,
+    pub require_total_observation: bool,
+    pub allow_lasso: bool,
 }
+```
 
-pub fn trace_refines<Spec, R>(
+新しい front door は次の形とする。
+
+```rust
+pub fn constrained_trace_refines<Spec, R>(
     spec: &Spec,
     map: &R,
-    trace: &[ObservedEvent<R::ImplInput, R::ImplOutput, R::ImplState>],
-    cfg: &TraceRefinementConfig,
-) -> Result<TraceRefinementWitness<Spec>, TraceRefinementError>
+    observed: &ObservedTrace<R::ImplState, R::ImplEvent>,
+    config: TraceRefinementConfig,
+) -> Result<TraceRefinementWitness<Spec::State, Spec::Action>, TraceRefinementError<Spec::State, Spec::Action>>
 where
-    Spec: FrontendSpec + TemporalSpec,
-    R: RefinementMap<Spec>;
+    Spec: FrontendSpec,
+    R: TraceRefinementMap<Spec>;
 ```
 
-### 5.3.1 実装方針
+#### 5.4.1 engine semantics
 
-これは TLC ベースの trace validation の発想と同様に、**observed trace を制約として与えた constrained model checking** として実装する。<sup>[8]</sup>
+- `ExplicitCandidate`  
+  現在の実装を fast path として残す。完全観測トレースに対して最速。
 
-高レベルには次を解く。
+- `ExplicitConstrained`  
+  観測トレースを constraint として、explicit product search を行う。hidden step を bounded に挿入できる。
 
-1. 初期抽象状態 `s0` が spec の初期状態集合に入る。
-2. 各観測イベント `ei` について、candidate action のいずれかと hidden step の有限列が存在し、観測された before/after の抽象像と整合する。
-3. 必要なら出力制約も満たす。
-4. 必要なら fairness/liveness に関する制約も付加する。
+- `SymbolicConstrained`  
+  `SpecCore` / `NormalizedSpecCore` から、`s0, s1, ...` と observation constraint を SMT に落とす。partial trace、部分観測、hidden step、bounded lasso を扱う。
 
-初期実装では explicit backend を使った constrained search で十分である。symbolic backend はその後 `SpecCore` を直接使う BMC path と接続する。
+#### 5.4.2 SMT 側の基本形
 
-### 5.3.2 不完全トレース
-
-trace validation 論文では、完全状態ではなく spec 変数の更新のみを記録した不完全トレースでも有効に検証できることが示されている。<sup>[8]</sup>
-
-そのため `ObservedEvent` は将来的に
-
-```rust
-pub enum Observation<C> {
-    Full(C),
-    Partial(Vec<FieldConstraint>),
-}
-```
-
-へ拡張可能な形にしておく。
-
-## 5.4 checker front door を explicit / symbolic で分離する
-
-checker front door の分離は Phase 3 で実装済みであり、explicit と symbolic は型境界ごとに分離されている。<sup>[3]</sup>
-
-これを次のように分ける。
-
-```rust
-pub struct ExplicitModelChecker<'a, T: CheckerSpec>(...);
-pub struct SymbolicModelChecker<'a, T: CheckerSpec>(...);
-
-impl<'a, T> ExplicitModelChecker<'a, T>
-where
-    T: CheckerSpec,
-    T::State: PartialEq + FiniteModelDomain + Send + Sync,
-    T::Action: PartialEq + Send + Sync,
-{ ... }
-
-impl<'a, T> SymbolicModelChecker<'a, T>
-where
-    T: CheckerSpec,
-    T::Action: PartialEq + Send + Sync,
-{ ... }
-```
-
-cleanup では public `ModelChecker` façade も削除し、workspace 全体を `ExplicitModelChecker` / `SymbolicModelChecker` へ移行した。
-
-## 5.5 sound reduction と heuristic reduction を分離する
-
-旧 API では reachable-graph dedup / branch pruning を `with_state_abstraction` と `with_por` で公開していたが、Phase 4 でそれらは `HeuristicReduction` へ統合された。<sup>[1][11]</sup>
-
-このままでは、意味論保存な reduction と単なる探索ヒューリスティックが区別されない。
-
-そのため API を次の二層に分ける。
-
-```rust
-pub enum ReductionMode<S, A> {
-    Sound(SoundReduction<S, A>),
-    Heuristic(HeuristicReduction<S, A>),
-}
-
-pub struct SoundReduction<S, A> {
-    pub symmetry: Option<VerifiedSymmetry<S>>,
-    pub quotient: Option<VerifiedStateQuotient<S>>,
-    pub por: Option<VerifiedPor<S, A>>,
-}
-
-pub struct HeuristicReduction<S, A> {
-    pub state_projection: Option<HeuristicStateProjection<S>>,
-    pub action_pruning: Option<HeuristicActionPruning<S, A>>,
-}
-```
-
-そして `ModelCheckResult` / `Counterexample` / docs 出力に **soundness tier** を載せる。
-
-- `Exact`
-- `SoundReduced`
-- `Heuristic`
-
-これにより、ユーザは「これは exact result か」「探索補助であり soundness を弱めるか」を見分けられる。
-
-## 5.6 `nirvash-proof` を pretty export と sound export に分離する
-
-`nirvash-proof` は現在 `PrettySpecExporter` と `SoundProofExporter` を同一 crate に持ち、前者が可読 dump、後者が sound obligation export を担う。<sup>[5]</sup>
-
-本 RFC では次を提案する。
-
-### 5.6.1 `PrettySpecExporter`
-
-目的は可読な dump、デバッグ、レビューである。旧 `TlaModuleExporter` の責務はここへ移した。
-
-### 5.6.2 `SoundProofExporter`
-
-目的は proof obligation export である。対象 fragment を明示し、未対応 fragment は fail-closed とする。初期対象は
-
-- invariants
-- step simulation
-- non-temporal state/action fragment
-
-に限定する。
-
-この方針は、TLAPS が proof manager により proof obligations を backend provers に分配し、標準 safety proof と step simulation を扱うという構造とも整合する。<sup>[10]</sup>
-
-## 5.7 Rust 検証アダプタを追加する
-
-`nirvash-conformance` の refinement API を、Rust の既存検証ツールへ接続する。
-
-### 5.7.1 `proptest-state-machine`
-
-逐次 API の SUT と `nirvash` spec を並走させ、最小 failing trace を得るアダプタを提供する。
-
-```rust
-pub fn run_proptest_state_machine<Spec, R, Sut>(...) -> TestCaseResult;
-```
-
-`proptest` の state machine testing は abstract reference state machine と SUT を比較し、壊れる transition sequence を縮約する用途に適している。<sup>[12]</sup>
-
-### 5.7.2 `Kani`
-
-小さい有限領域の pure / semi-pure コアには `#[kani::proof]` harness を自動生成または補助生成する。
-
-```rust
-#[kani::proof]
-fn step_refines_insert() {
-    let before = kani::any::<ImplState>();
-    let input = kani::any::<Input>();
-    kani::assume(concrete_inv(&before));
-    let after = sut_step(before.clone(), input.clone());
-    assert!(step_refines_relation(&SPEC, &MAP, &before, &input, &(), &after, &AUX).is_ok());
-}
-```
-
-Kani は proof harness を最小検証単位として扱う bit-precise model checker である。<sup>[13]</sup>
-
-### 5.7.3 `loom`
-
-並行実装では実装イベント列を `ObservedEvent` へ変換し、各 schedule について `trace_refines` を走らせる。
-
-```rust
-loom::model(|| {
-    let trace = run_concurrent_scenario_and_collect_trace();
-    assert!(trace_refines(&SPEC, &MAP, &trace, &CFG).is_ok());
-});
-```
-
-`loom` は C11 memory model 下で concurrent execution の順序を繰り返し入れ替えて探索する。<sup>[14]</sup>
-
-## 5.8 `SpecCore` を checker の正本へさらに寄せる
-
-本 RFC の主眼は code verification だが、その前提として `SpecCore` の source-of-truth 化を一段進める。
-
-具体的には、
-
-- `CheckerSpec::core() -> &SpecCore` を追加する
-- direct SMT path と proof export は `SpecCore` を第一入力にする
-- `FrontendSpec` / `TransitionProgram` は lowering source として残す
-- trace refinement backend も可能な限り `SpecCore` から制約を組む
-
-という方針をとる。
-
-これは `nirvash-ir` がすでに `WF/SF`、`[A]_v` 相当の `BoxAction` / `AngleAction` を持っていることとも整合する。<sup>[6]</sup>
-
-## 6. 詳細設計
-
-## 6.1 検証モード
-
-`nirvash-conformance` は次の 4 モードを持つ。
-
-1. `InitRefinement`
-2. `StepRefinement`
-3. `TraceRefinement`
-4. `TraceRefinementWithTemporalChecks`
-
-`TraceRefinementWithTemporalChecks` は trace が safety だけでなく fairness/liveness assumption と両立するかを確認するモードである。ただし初期実装では optional にする。
-
-## 6.2 返却値
-
-単なる `bool` や panic ではなく、diagnostic を持つ result を返す。
-
-```rust
-pub enum RefinementError<S, A> {
-    InitialStateMismatch,
-    NoMatchingAbstractAction,
-    NoMatchingAbstractSuccessor,
-    OutputMismatch,
-    HiddenStepBudgetExceeded,
-    TemporalAssumptionViolated,
-    HeuristicReductionActive,
-    Backend(ModelCheckError),
-}
-
-pub struct StepRefinementWitness<S, A> {
-    pub abstract_before: S,
-    pub chosen_action: A,
-    pub abstract_after: S,
-    pub hidden_steps: usize,
-}
-
-pub struct TraceRefinementWitness<S, A> {
-    pub abstract_states: Vec<S>,
-    pub abstract_actions: Vec<Option<A>>,
-    pub hidden_step_counts: Vec<usize>,
-}
-```
-
-これにより、失敗時の counterexample が「なぜ失敗したか」を説明できる。
-
-## 6.3 hidden/stuttering step の扱い
-
-初期版では、各 observed event の前後に有限個の hidden/stuttering step を挿入できるモデルに限定する。
+観測点 `obs_i` の間に最大 `k` 個の hidden step を許すなら、典型的には次の形を使う。
 
 ```text
-r(c_i) --(hidden/stutter)*--> s_i --a_i--> s'_i --(hidden/stutter)*--> r(c_{i+1})
+Init(s_0)
+ObsState(0, s_0)
+StepOrHidden(s_0, s_1)
+...
+ObsEvent(0, s_j, a_j, s_{j+1})
+ObsState(1, s_{j+1})
+...
 ```
 
-`hidden_step` 判定は refinement map が持つ。`allow_stuttering` と `max_hidden_steps_per_event` は config で制御する。
+このとき `ObsState` は partial summary constraint、`ObsEvent` は observed action/output/invoke-return との整合制約である。
 
-## 6.4 nondeterministic output の扱い
+#### 根拠
 
-`ProtocolConformanceSpec` は現状 `ExpectedOutput` を持つが、将来的には出力 refinement も relation にする。
+TLA+ trace validation の文献は、まさにこの問題を constrained model checking として扱っている。現在の `trace_refines_summary_with_label` が要求する「長さ一致」「loop_start 一致」「candidate trace と prefix state 一致」は、完全観測・完全同期の特殊ケースにすぎない。  
+参照: [R9], [P2]
+
+### 5.5 trust boundary の型化
+
+#### 5.5.1 `ProofCertificate`
+
+現在の `VerifiedSymmetry` / `VerifiedStateQuotient` / `VerifiedPor` は、proof obligation を添付できるが、その obligation が discharge 済みかどうかは型に出ていない。これを次で明示する。
 
 ```rust
-fn output_refines(
-    &self,
-    action: &Spec::Action,
-    concrete_output: &ImplOutput,
-    aux: &AuxState,
-) -> bool;
+pub enum ProofBackendId {
+    Tlaps,
+    Smt,
+    Kani,
+    Verus,
+    RefinedRust,
+    External(String),
+}
+
+pub struct ProofCertificate {
+    pub backend: ProofBackendId,
+    pub obligation_hash: String,
+    pub artifact_hash: String,
+    pub artifact_path: Option<PathBuf>,
+}
 ```
 
-これにより、レスポンス本文の一部だけが spec に現れるケース、乱数や時間の影響を auxiliary state へ退避するケースを扱える。
+#### 5.5.2 claim と certificate の分離
+
+`Verified*` を直ちに消すのではなく、semantic には次の 2 層へ分ける。
+
+```rust
+pub struct ReductionClaim<T> {
+    pub value: T,
+    pub obligations: Vec<ProofObligation>,
+}
+
+pub struct Certified<T> {
+    pub value: T,
+    pub certificate: ProofCertificate,
+}
+```
+
+これにより `VerifiedSymmetry` は deprecated alias とし、将来的に
+
+- `ClaimedSymmetry`
+- `CertifiedSymmetry`
+
+へ移行できる。
+
+#### 5.5.3 tier の再定義
+
+`SoundnessTier` は current implementation では useful だが、「claimed reduction」と「certificate 付き reduction」を区別しない。したがって次へ変更する。
+
+```rust
+pub enum TrustTier {
+    Exact,
+    CertifiedReduction,
+    ClaimedReduction,
+    Heuristic,
+}
+```
+
+既存 `SoundnessTier` は deprecated alias とする。
+
+#### 根拠
+
+現在の reduction types は obligation を保持するが、その discharge までは表現しない。したがって「Verified」という命名は強い。proof/export 側も `SoundProofExporter` が temporal/fairness を reject する supported fragment exporter として振る舞っているため、信頼境界は still implicit である。  
+参照: [R10], [R11]
+
+### 5.6 `nirvash-proof` の二段化
+
+`nirvash-proof` は次の 2 段に整理する。
+
+1. `ProofBundleExporter`  
+   `SpecCore` / `NormalizedSpecCore` と reduction claim から obligations と exported artifacts を生成する。
+
+2. `ProofDischarger`  
+   TLAPS / SMT / Kani / Verus / RefinedRust / external script 等を通じて obligation を discharge し、`ProofCertificate` を返す。
+
+```rust
+pub struct ProofBundle {
+    pub obligations: Vec<ProofObligation>,
+    pub exported_artifacts: Vec<ExportedArtifact>,
+}
+
+pub trait ProofDischarger {
+    fn discharge(&self, bundle: &ProofBundle) -> Result<ProofCertificate, ProofDischargeError>;
+}
+```
+
+現行 `PrettySpecExporter` はこの構造の pretty/export 部分に自然に収まり、現行 `SoundProofExporter` は supported fragment checked exporter へ再定義される。
+
+## 6. Rust 向け検証スタックとの接続
+
+本 RFC では、Rust 向けの複数の verification/testing tool を、**同一の refinement interface** に接続する。
+
+### 6.1 `proptest-state-machine`
+
+`proptest-state-machine` は、抽象 reference state machine と SUT を並走させ、反例シーケンスを shrink できる。これは sequential API の spec-to-code divergence を見つける入口として最も費用対効果が高い。  
+参照: [P3]
+
+提案:
+
+- `nirvash-conformance-proptest` feature を追加する
+- `TraceRefinementMap` または restricted `RefinementMap` から `ReferenceStateMachine` / `StateMachineTest` を自動生成する
+- 失敗時は `TraceRefinementWitness` と shrink 済み command sequence を返す
+
+### 6.2 Kani
+
+Kani は proof harness を用いる Rust 向けモデルチェッカであり、モデル検査により safety/correctness を自動検査し、counterexample を返せる。bounded な pure / semi-pure core に対して、step refinement を全件探索するのに適している。  
+参照: [P4]
+
+提案:
+
+- `nirvash-conformance-kani` feature を追加する
+- `step_refines_relation` から Kani proof harness を生成する
+- harness を discharge した結果を `ProofCertificate { backend: Kani, ... }` として取り込めるようにする
+
+### 6.3 loom
+
+loom は C11 memory model の下で concurrent execution の順序を網羅的に近く探索する test tool である。Kani 自身は concurrency が未充足であるため、並行実装の schedule exploration には loom を用い、その観測 event trace を `constrained_trace_refines` に流すのが自然である。  
+参照: [P4], [P5]
+
+提案:
+
+- `nirvash-conformance-loom` feature を追加する
+- 各 loom schedule から `ObservedTrace` を組み立てる helper を提供する
+- `Invoke` / `Return` / `Internal` event を trace engine に流す
+
+### 6.4 Verus / RefinedRust
+
+Verus は Rust 言語内で仕様と proof を記述し、線形 ghost type を用いて Rust プログラムの正しさを検証する。RefinedRust は Coq 上で sound な refinement type system を持ち、安全/unsafe Rust の機能的正しさを対象とする。これらは `nirvash` の checker を置き換えるものではなく、**危険な実装境界に対する stronger certificate source** として扱うべきである。  
+参照: [P6], [P7]
+
+提案:
+
+- `ProofBackendId::Verus` / `ProofBackendId::RefinedRust` を追加する
+- external proof artifact hash を `ProofCertificate` に取り込めるようにする
+- reduction claim や code-level invariant の certificate source として利用する
 
 ## 7. 互換性
 
-- `assert_step_refinement` は削除し、`step_refines_summary` / `step_refines_relation` を正本にした。
-- `ModelChecker` façade は削除し、`ExplicitModelChecker` / `SymbolicModelChecker` のみを public checker front door にした。
-- `with_state_abstraction` / `with_por` は削除し、`HeuristicReduction` / `SoundReduction` 側へ統合した。
-- `nirvash-proof` は crate 名を維持してよいが、module を `pretty` と `sound` に分ける。
+本 RFC は大きな再編ではあるが、互換性を次のように守る。
+
+- `LoweredSpec { core, symbolic_artifacts, executable }` は維持する
+- current `RefinementMap` / `step_refines_relation` は維持し、`TraceRefinementMap` への adapter を提供する
+- current `ObservedEvent::Action | Stutter` は新 enum の subset として動かす
+- current candidate-based `trace_refines` は `TraceRefinementEngine::ExplicitCandidate` に残す
+- `Verified*` と `SoundnessTier` は deprecated alias として一定期間残す
 
 ## 8. 実装計画
 
-### Phase 1
+### Phase 1: core の正本化
 
-#### Phase 1A
+- `LoweredSpec::core()` / `normalized_core()` を追加
+- symbolic backend を `normalized_core()` first へ寄せる
+- `nirvash-proof` を `ProofBundleExporter` 化する
 
-- `nirvash-conformance` に `RefinementMap` trait を追加
-- `step_refines_relation` を実装し、nondeterministic successor を relation として受理する
-- `StepRefinementWitness` / `StepRefinementError` を導入し、result-returning API を正本にする
+### Phase 2: trace refinement trait の一般化
 
-#### Phase 1B
+- `TraceRefinementMap` を追加
+- `ObservedEvent` を拡張
+- `ObservedTrace` に partial observation を追加
+- current summary API を compatibility wrapper 化する
 
-- [x] `enabled_from_summary` を relation-aware に整理する
-- [x] `step_refines_summary` を追加し、`StepRefinementWitness` / `StepRefinementError` を既存 conformance helper と整合させる
+### Phase 3: constrained engine 実装
 
-#### Phase 1C
+- `ExplicitConstrained` を product search として実装
+- `SymbolicConstrained` を direct SMT/BMC として実装
+- partial trace / hidden step / bounded lasso を順次対応する
 
-- [x] code witness / generated macro harness の deterministic 仮定を relation API へ追従させる
-- [x] `code_tests` / `code_witness_tests` の integration test と trybuild fixture を追加し、nondeterministic spec を誤って reject しない境界へ移行する
+### Phase 4: trust boundary の明文化
 
-### Phase 2
+- `ReductionClaim<T>` / `Certified<T>` / `ProofCertificate` を追加
+- `SoundnessTier` を `TrustTier` へ置換
+- reduction / proof export / external verifier を certificate で接続する
 
-- [x] `trace_refines` を explicit backend により実装
-- [x] `ObservedEvent` と witness/result 型を導入
-- [x] 反例整形を追加
+### Phase 5: tool adapter の統合
 
-### Phase 3
+- `proptest` adapter
+- Kani harness generator
+- loom trace adapter
+- Verus / RefinedRust certificate importer
 
-- [x] `ExplicitModelChecker` / `SymbolicModelChecker` を導入
-- [x] public `ModelChecker` façade を削除し、workspace を typed checker へ移行
-- [x] symbolic path から `FiniteModelDomain` 要件を外す
+## 9. 受け入れ基準
 
-### Phase 4
+本 RFC は、次の条件を満たしたときに完了とみなす。
 
-- [x] sound / heuristic reduction の API 分離
-- [x] `ModelCheckResult` に soundness tier を追加
+1. symbolic backend と proof exporter が `normalized_core()` から直接動作する。
+2. partial observation を含む `ObservedTrace` に対し、`constrained_trace_refines` が witness または counterexample を返す。
+3. `ObservedEvent` が `Invoke | Return | Internal | Action | Stutter` を扱える。
+4. reduction claim と certificate の区別が API に現れる。
+5. `proptest` / Kani / loom adapter が同じ refinement model に乗る。
+6. current exact candidate engine は regress せず fast path として残る。
 
-### Phase 5
+## 10. 欠点とトレードオフ
 
-- [x] `proptest-state-machine` adapter を追加
-- [x] `Kani` harness helper を追加
-- [x] `loom` trace adapter を追加
+- `NormalizedSpecCore` を追加すると、IR の二重管理コストが増える。
+- constrained trace checking は explicit candidate match より重い。
+- certificate model を入れると API がやや複雑になる。
+- Verus / RefinedRust integration は外部ツール依存を導入する。
 
-### Phase 6
+ただし、これらはすべて「verification kernel を強くする」ためのコストであり、現在の曖昧さを減らす効果の方が大きい。
 
-- [x] `PrettySpecExporter` と `SoundProofExporter` を分離
-- [x] obligation fragment を明文化
-- [x] unsupported fragment を fail-closed
+## 11. 代替案
 
-## 9. 想定ワークフロー
+### 11.1 現状の candidate trace matching を維持する
 
-### 9.1 逐次 API
+これは実装コストが最も低いが、partial trace、hidden step、invoke/return、linearization point を扱いにくい。TLA+ trace validation が constrained model checking を採用している理由と逆行する。  
+参照: [P2]
 
-1. `nirvash` で abstract spec を書く
-2. `RefinementMap` を実装する
-3. `proptest-state-machine` adapter で public API 列を生成する
-4. 失敗時は `TraceRefinementWitness` と最小 failing sequence を比較する
+### 11.2 `SpecCore` を export 専用 IR のままにする
 
-### 9.2 有限領域コア
+これは operational DSL と backend の coupling を温存する。`nirvash` を spec-to-code verification kernel として説明しにくくなる。
 
-1. `Kani` harness を書く
-2. input/state を `kani::any()` で生成する
-3. `step_refines_relation` または短い `trace_refines` を assert する
+### 11.3 `Verified*` の命名をそのまま維持する
 
-### 9.3 並行データ構造 / actor runtime
+利用者にとっては簡単だが、claim と certificate を区別できず、trust boundary が不透明なまま残る。
 
-1. `loom` で実行順序を列挙する
-2. schedule ごとに実装イベントトレースを収集する
-3. `trace_refines` を実行する
-4. 必要なら `AuxState` に linearization bookkeeping を持たせる
+## 12. 未解決事項
 
-## 10. 代替案
+- `NormalizedSpecCore` を `nirvash-ir` に置くか、別 crate に置くか。
+- partial state observation を `StateObservation::Partial(Summary)` で十分とするか、predicate/constraint object にするか。
+- `ProofCertificate` の hash 対象を obligation 単位にするか、bundle 単位にするか。
+- `SoundProofExporter` の rename を直ちに行うか、deprecation を挟むか。
+- fairness / temporal property を symbolic constrained trace engine の初期スコープへ入れるか、まず safety に限定するか。
 
-### 10.1 旧 `assert_step_refinement` を拡張し続ける
+## 13. 結論
 
-一見簡単だが、deterministic equality 前提が深く残るため、nondeterminism や hidden step を自然に扱えない。
+現在の `nirvash` は、frontend / lower / check / backends / conformance / proof を分離した点で、すでにかなり良い位置にある。しかし、次の段階に進むには、**IR を verification kernel にし、trace refinement を constrained checking に上げ、trust boundary を証明書として型に出すこと**が必要である。
 
-### 10.2 すべてを `Kani` で検証する
+本 RFC は、そのための最小限かつ実装可能な道筋を与える。current implementation を壊さずに、`nirvash` を「Rust-native な TLA+/refinement ベースの spec-to-code verification 基盤」として一段引き上げることができる。
 
-bounded bug finding には強いが、分散・並行・長期トレース・unsafe proof まで一つで担うのは不自然である。`nirvash` 側の refinement API があれば、Kani はその一つの backend で済む。
+## 14. 参考文献
 
-### 10.3 TLAPS 相当をすぐ再実装する
+### Repository / current implementation
 
-proof management の実装コストが高く、本 RFC の主眼である spec-to-code verification より優先度が低い。
+- [R1] `crates/nirvash/README.md` (crate split と backend contract)  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash/README.md>
+- [R2] `crates/nirvash/README.md` の crate split と semantics セクション  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash/README.md#crate-split>
+- [R3] `crates/nirvash-lower/src/lib.rs`: `LoweredSpec` が `core` と `symbolic_artifacts` / `executable` を併せ持つ  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-lower/src/lib.rs>
+- [R4] `crates/nirvash-check/src/lib.rs`: `ExplicitModelChecker` と `SymbolicModelChecker` の分離  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-check/src/lib.rs>
+- [R5] `crates/nirvash-conformance/src/lib.rs`: `RefinementMap` と `step_refines_relation`  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-conformance/src/lib.rs>
+- [R6] `crates/nirvash-ir/src/lib.rs`: `SpecCore`, `FairnessDecl`, stringly quantifier / match / opaque nodes  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-ir/src/lib.rs>
+- [R7] `crates/nirvash-conformance/src/lib.rs`: `ObservedEvent` が `Action | Stutter` に限定される  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-conformance/src/lib.rs>
+- [R8] `crates/nirvash-conformance/src/lib.rs`: `trace_refines_summary_with_label` の shape / loop 一致前提  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-conformance/src/lib.rs>
+- [R9] `crates/nirvash-conformance/src/lib.rs`: candidate trace ベースの error reporting  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-conformance/src/lib.rs>
+- [R10] `crates/nirvash-lower/src/lib.rs`: `VerifiedSymmetry` / `VerifiedStateQuotient` / `VerifiedPor`  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-lower/src/lib.rs>
+- [R11] `crates/nirvash-proof/src/lib.rs`: `SoundProofExporter` と supported fragment 制約  
+  <https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-proof/src/lib.rs>
 
-## 11. 欠点とリスク
+### Papers / formal basis
 
-1. `RefinementMap` 設計が抽象的すぎるとユーザ負担が大きい。
-2. trace validation は hidden step 探索が爆発しやすい。
-3. `loom` と `trace_refines` の組み合わせはテスト時間が長くなりうる。
-4. `loom` と reduction/export の組み合わせは導入時の契約整理コストが高い。
-
-これらに対しては、
-
-- good default config
-- budget と timeout
-- minimal adapter template
-- representative examples
-
-で対処する。
-
-## 12. 結論
-
-再編後の `nirvash` は、formal frontend / core IR / lowering / checker / backend / conformance / proof export の分離という点で、すでに良い基盤になっている。<sup>[1]</sup>
-
-次に必要なのは、モデル検査機能を増やすことそのものではなく、**spec と実 Rust 実装をどう結びつけるかを、refinement mapping と trace validation の観点から明文化すること**である。Abadi/Lamport の refinement mapping、TLA+ の trace validation、Kani / proptest / loom の各ツールは、そのための十分に強い理論的・実務的基盤を与えている。<sup>[7][8][9]</sup>
-
-本 RFC を実装すれば、`nirvash` は「TLA+ 風の Rust-native spec/checker stack」から一段進み、**spec-to-code verification を中核に持つ Rust-native formal platform** になる。
-
-## 参考文献
-
-[1] `nirvash` README（crate split と backend semantics）  
-https://github.com/yieldspace/imago/tree/codex/tla-formal-controls/crates/nirvash
-
-[2] `nirvash-lower`（`LoweredSpec`, `TemporalSpec`, `CheckerSpec`）  
-https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-lower/src/lib.rs
-
-[3] `nirvash-check`（typed checker front door と backend 分離）  
-https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-check/src/lib.rs
-
-[4] `nirvash-conformance`（`step_refines_summary`, `step_refines_relation`, `trace_refines`）  
-https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-conformance/src/lib.rs
-
-[5] `nirvash-proof`（TLA exporter / SMT-LIB exporter）  
-https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-proof/src/lib.rs
-
-[6] `nirvash-ir`（`SpecCore`, `FairnessDecl`, stringly node 群）  
-https://github.com/yieldspace/imago/blob/codex/tla-formal-controls/crates/nirvash-ir/src/lib.rs
-
-[7] Martín Abadi, Leslie Lamport, *The Existence of Refinement Mappings*  
-https://www.microsoft.com/en-us/research/publication/the-existence-of-refinement-mappings/
-
-[8] Horatiu Cirstea, Markus A. Kuppe, Benjamin Loillier, Stephan Merz, *Validating Traces of Distributed Programs Against TLA+ Specifications*  
-https://arxiv.org/abs/2404.16075
-
-[9] Tool references
-- Proptest state machine testing: https://proptest-rs.github.io/proptest/proptest/state-machine.html
-- Kani: https://model-checking.github.io/kani/
-- Loom: https://docs.rs/loom/latest/loom/
-
-[10] Kaustuv Chaudhuri, Damien Doligez, Leslie Lamport, Stephan Merz, *Verifying Safety Properties With the TLA+ Proof System*  
-https://arxiv.org/abs/1011.2560
+- [P1] Martín Abadi, Leslie Lamport, *The Existence of Refinement Mappings*  
+  <https://lamport.azurewebsites.net/pubs/abadi-existence.pdf>
+- [P2] Horatiu Cirstea, Markus A. Kuppe, Benjamin Loillier, Stephan Merz, *Validating Traces of Distributed Programs Against TLA+ Specifications*  
+  <https://arxiv.org/abs/2404.16075>
+- [P3] Proptest documentation, *State Machine testing*  
+  <https://proptest-rs.github.io/proptest/proptest/state-machine.html>
+- [P4] Kani documentation, *Getting started*  
+  <https://model-checking.github.io/kani/>
+- [P5] loom documentation  
+  <https://docs.rs/loom/latest/loom/>
+- [P6] Andrea Lattuada et al., *Verus: Verifying Rust Programs using Linear Ghost Types*  
+  <https://dl.acm.org/doi/10.1145/3586037>
+- [P7] RefinedRust project page / paper  
+  <https://plv.mpi-sws.org/refinedrust/>

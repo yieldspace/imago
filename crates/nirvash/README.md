@@ -18,9 +18,9 @@ authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgra
 - `nirvash-conformance`
   - witness / runtime binding / refinement assert / `proptest` / `loom` / `kani` adapter
 - `nirvash-proof`
-  - `PrettySpecExporter` と `SoundProofExporter`
+  - `ProofBundleExporter`
 
-通常の runtime crate は引き続き `nirvash` を起点に authoring できますが、checker / conformance / proof 側は `nirvash-lower` / `nirvash-conformance` / `nirvash-proof` を明示的に参照します。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
+通常の runtime crate は引き続き `nirvash` を起点に authoring できますが、checker / conformance / proof 側は `nirvash-lower` / `nirvash-conformance` / `nirvash-proof` を明示的に参照します。`LoweredSpec` は `core` に加えて `normalized_core()` を公開し、symbolic backend と proof export はこの正規化済み core を意味論の正本として参照します。`z3` は `nirvash-backends` の通常依存として formal stack に常設されますが、`imagod` の通常依存木には入れません。
 
 現状の backend semantics は次のとおりです。
 

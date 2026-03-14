@@ -3487,7 +3487,10 @@ name = "nirvash-backends"
 version = "0.2.0"
 dependencies = [
  "nirvash",
+ "nirvash-check",
+ "nirvash-ir",
  "nirvash-lower",
+ "nirvash-macros",
  "serde",
  "serde_json",
  "z3",

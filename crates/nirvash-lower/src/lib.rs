@@ -1,6 +1,9 @@
 //! Lowering boundary and checker-facing public API surface for `nirvash`.
 
-use std::fmt::{self, Debug, Display};
+use std::{
+    fmt::{self, Debug, Display},
+    sync::OnceLock,
+};
 
 pub use nirvash::{
     ActionVocabulary, BoolExpr, BoolExprAst, Counterexample, CounterexampleKind,
@@ -26,9 +29,10 @@ pub use nirvash_foundation::{
 };
 pub use nirvash_ir::{
     ActionExpr, BuiltinPredicateOp as IrBuiltinPredicateOp, ComparisonOp as IrComparisonOp,
-    FairnessDecl, ProofObligation, ProofObligationKind, QuantifierKind as IrQuantifierKind,
-    SpecCore, StateExpr as IrStateExpr, TemporalExpr, UpdateExpr as IrUpdateExpr,
-    UpdateOpDecl as IrUpdateOpDecl, ValueExpr as IrValueExpr, ViewExpr,
+    CoreNormalizationError, FairnessDecl, FragmentProfile, NormalizedSpecCore, ProofObligation,
+    ProofObligationKind, QuantifierKind as IrQuantifierKind, SpecCore, StateExpr as IrStateExpr,
+    TemporalExpr, UpdateExpr as IrUpdateExpr, UpdateOpDecl as IrUpdateOpDecl,
+    ValueExpr as IrValueExpr, ViewExpr,
 };
 
 #[derive(Debug)]
@@ -710,6 +714,7 @@ impl<'a, S, A> ExecutableSemantics<'a, S, A> {
 pub struct LoweredSpec<'a, S, A> {
     name: &'static str,
     pub core: SpecCore,
+    normalized_core: OnceLock<Result<NormalizedSpecCore, CoreNormalizationError>>,
     model_instances: Vec<ModelInstance<S, A>>,
     state_ty: &'static str,
     action_ty: &'static str,
@@ -726,6 +731,7 @@ where
         f.debug_struct("LoweredSpec")
             .field("name", &self.name)
             .field("core", &self.core)
+            .field("normalized_core", &self.normalized_core.get())
             .field("model_instances", &self.model_instances)
             .field("state_ty", &self.state_ty)
             .field("action_ty", &self.action_ty)
@@ -748,6 +754,7 @@ impl<'a, S, A> LoweredSpec<'a, S, A> {
         Self {
             name,
             core,
+            normalized_core: OnceLock::new(),
             model_instances,
             state_ty,
             action_ty,
@@ -766,6 +773,17 @@ impl<'a, S, A> LoweredSpec<'a, S, A> {
 
     pub const fn action_ty(&self) -> &'static str {
         self.action_ty
+    }
+
+    pub fn core(&self) -> &SpecCore {
+        &self.core
+    }
+
+    pub fn normalized_core(&self) -> Result<&NormalizedSpecCore, CoreNormalizationError> {
+        self.normalized_core
+            .get_or_init(|| self.core.normalize())
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     pub fn symbolic_artifacts(&self) -> &SymbolicArtifacts<S, A> {
@@ -1239,6 +1257,8 @@ pub trait CheckerSpec {
     type Action: Clone + Debug + Eq + 'static;
 
     fn frontend_name(&self) -> &'static str;
+    fn core(&self) -> &SpecCore;
+    fn normalized_core(&self) -> Result<&NormalizedSpecCore, CoreNormalizationError>;
     fn initial_states(&self) -> Vec<Self::State>;
     fn actions(&self) -> Vec<Self::Action>;
     fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>>;
@@ -1269,6 +1289,14 @@ where
 
     fn frontend_name(&self) -> &'static str {
         LoweredSpec::frontend_name(self)
+    }
+
+    fn core(&self) -> &SpecCore {
+        LoweredSpec::core(self)
+    }
+
+    fn normalized_core(&self) -> Result<&NormalizedSpecCore, CoreNormalizationError> {
+        LoweredSpec::normalized_core(self)
     }
 
     fn initial_states(&self) -> Vec<Self::State> {
