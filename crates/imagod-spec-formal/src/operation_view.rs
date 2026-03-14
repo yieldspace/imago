@@ -2,10 +2,10 @@ use imagod_spec::{
     CommandLifecycleState, OperationPermission, RpcOutcome, SystemEvent, SystemStateFragment,
 };
 use nirvash::BoolExpr;
-use nirvash_lower::ModelInstance;
+use nirvash_lower::{DocStateProjection, ModelInstance};
 use nirvash_macros::{invariant, nirvash_expr, nirvash_step_expr};
 
-use crate::system::{SystemAction, SystemSpec, SystemState};
+use crate::system::{SystemAction, SystemState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationViewState {
@@ -22,11 +22,21 @@ pub fn project(state: &SystemStateFragment) -> OperationViewState {
     }
 }
 
+fn summarize_doc_state(state: &SystemState) -> nirvash::DocGraphState {
+    nirvash::summarize_doc_graph_state(&project(state))
+}
+
 pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     vec![
         ModelInstance::new("explicit_operation_view")
             .with_checker_config(nirvash::ModelCheckConfig::reachable_graph())
+            .with_doc_checker_config(crate::bounds::doc_cap_focus())
             .with_check_deadlocks(false)
+            .with_doc_surface("Operation View")
+            .with_doc_state_projection(DocStateProjection::new(
+                "OperationViewState",
+                summarize_doc_state,
+            ))
             .with_action_constraint(
                 nirvash_step_expr! { explicit_operation_view_actions(_prev, action, _next) =>
                     matches!(action,
@@ -52,7 +62,7 @@ pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     ]
 }
 
-#[invariant(SystemSpec)]
+#[invariant(crate::system::SystemSpec)]
 fn stopped_manager_has_no_running_command() -> BoolExpr<SystemState> {
     nirvash_expr! { stopped_manager_has_no_running_command(state) =>
         state.manager_phase != imagod_spec::ManagerPhase::Stopped

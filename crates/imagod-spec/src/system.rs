@@ -1,5 +1,7 @@
 //! Canonical system-core state and daemon-visible events.
 
+use std::any::{Any, TypeId};
+
 use nirvash::RelSet;
 use nirvash_macros::{
     ActionVocabulary, FiniteModelDomain as FormalFiniteModelDomain, RelationalState,
@@ -24,33 +26,356 @@ use crate::{
     Debug, Clone, PartialEq, Eq, FormalFiniteModelDomain, FormalSymbolicEncoding, ActionVocabulary,
 )]
 pub enum SystemEvent {
+    /// Load manager configuration and record whether defaults were created.
+    #[viz(compact_label = "load-config", scenario_priority = 100)]
     LoadConfig(bool),
+    /// Finish manager restore and begin accepting control traffic.
+    #[viz(compact_label = "restore", scenario_priority = 95)]
     FinishRestore,
+    /// Accept a transport session from the given principal.
+    #[viz(compact_label = "accept-session", scenario_priority = 80)]
     AcceptSession(SessionId, TransportPrincipal),
+    /// Bind an authenticated role to an accepted session.
+    #[viz(compact_label = "auth-session", scenario_priority = 78)]
     AuthenticateSession(SessionId, SessionRole),
+    /// Drain a session as part of shutdown or admission control.
+    #[viz(compact_label = "drain-session", scenario_priority = 52)]
     DrainSession(SessionId),
+    /// Submit an external control-plane message on a session.
+    #[viz(compact_label = "request-msg", scenario_priority = 70)]
     RequestMessage(SessionId, ExternalMessage),
+    /// Complete the currently active message on a session.
+    #[viz(compact_label = "complete-msg", scenario_priority = 68)]
     CompleteMessage(SessionId),
+    /// Materialize a service candidate before activation.
+    #[viz(compact_label = "prepare-svc", scenario_priority = 60)]
     PrepareService(ServiceId),
+    /// Commit a prepared service candidate.
+    #[viz(compact_label = "commit-svc", scenario_priority = 58)]
     CommitService(ServiceId),
+    /// Promote a committed service candidate to the active revision.
+    #[viz(compact_label = "promote-svc", scenario_priority = 56)]
     PromoteService(ServiceId),
+    /// Start a promoted service runtime.
+    #[viz(compact_label = "start-svc", scenario_priority = 54)]
     StartService(ServiceId),
+    /// Stop a running service runtime.
+    #[viz(compact_label = "stop-svc", scenario_priority = 50)]
     StopService(ServiceId),
+    /// Verify manager authorization for a service actor.
+    #[viz(compact_label = "verify-auth", scenario_priority = 48)]
     VerifyManagerAuth(ServiceId),
+    /// Grant a binding between service interfaces.
+    #[viz(compact_label = "grant-bind", scenario_priority = 46)]
     GrantBinding(BindingGrantId),
+    /// Register a trusted remote authority for cross-node RPC.
+    #[viz(compact_label = "register-authz", scenario_priority = 44)]
     RegisterRemoteAuthority(RemoteAuthorityId),
+    /// Start a command lifecycle slot.
+    #[viz(compact_label = "start-cmd", scenario_priority = 42)]
     StartCommand(CommandKind),
+    /// Request cancellation of the active command slot.
+    #[viz(compact_label = "cancel-cmd", scenario_priority = 40)]
     RequestCommandCancel,
+    /// Finish the active command slot with a terminal outcome.
+    #[viz(compact_label = "finish-cmd", scenario_priority = 38)]
     FinishCommand(CommandTerminalState),
+    /// Invoke a local RPC between two services.
+    #[viz(compact_label = "rpc-local", scenario_priority = 36)]
     InvokeLocalRpc(ServiceId, ServiceId, InterfaceId),
+    /// Establish a remote RPC connection for a service actor.
+    #[viz(compact_label = "rpc-connect", scenario_priority = 34)]
     ConnectRemoteRpc(ServiceId, RemoteAuthorityId),
+    /// Invoke a remote RPC through a trusted authority.
+    #[viz(compact_label = "rpc-remote", scenario_priority = 32)]
     InvokeRemoteRpc(ServiceId, RemoteAuthorityId, ServiceId, InterfaceId),
+    /// Disconnect a service from its remote RPC authority.
+    #[viz(compact_label = "rpc-disconnect", scenario_priority = 30)]
     DisconnectRemoteRpc(ServiceId),
+    /// Request manager shutdown.
+    #[viz(compact_label = "shutdown", scenario_priority = 28)]
     RequestShutdown,
+    /// Confirm that all sessions have drained.
+    #[viz(compact_label = "sessions-drained", scenario_priority = 24)]
     ConfirmSessionsDrained,
+    /// Confirm that all services have stopped.
+    #[viz(compact_label = "services-stopped", scenario_priority = 22)]
     ConfirmServicesStopped,
+    /// Confirm that maintenance work has stopped.
+    #[viz(compact_label = "maintenance-stopped", scenario_priority = 20)]
     ConfirmMaintenanceStopped,
+    /// Complete manager shutdown and enter the stopped phase.
+    #[viz(compact_label = "shutdown-complete", scenario_priority = 18)]
     CompleteShutdown,
+}
+
+fn session_actor_name(session: SessionId) -> &'static str {
+    match session {
+        SessionId::Session0 => "Session0",
+        SessionId::Session1 => "Session1",
+    }
+}
+
+fn service_actor_name(service: ServiceId) -> &'static str {
+    match service {
+        ServiceId::Service0 => "Service0",
+        ServiceId::Service1 => "Service1",
+    }
+}
+
+fn authority_actor_name(authority: RemoteAuthorityId) -> &'static str {
+    match authority {
+        RemoteAuthorityId::Authority0 => "Authority0",
+        RemoteAuthorityId::Authority1 => "Authority1",
+    }
+}
+
+fn external_message_label(message: ExternalMessage) -> &'static str {
+    match message {
+        ExternalMessage::HelloNegotiate => "hello.negotiate",
+        ExternalMessage::DeployPrepare => "deploy.prepare",
+        ExternalMessage::ArtifactPush => "artifact.push",
+        ExternalMessage::ArtifactCommit => "artifact.commit",
+        ExternalMessage::CommandStart => "command.start",
+        ExternalMessage::ServicesList => "services.list",
+        ExternalMessage::StateRequest => "state.request",
+        ExternalMessage::CommandCancel => "command.cancel",
+        ExternalMessage::LogsRequest => "logs.request",
+        ExternalMessage::RpcInvoke => "rpc.invoke",
+        ExternalMessage::BindingsCertUpload => "bindings.cert.upload",
+    }
+}
+
+fn interface_label(interface: InterfaceId) -> &'static str {
+    match interface {
+        InterfaceId::ControlApi => "control-api",
+        InterfaceId::LogsApi => "logs-api",
+    }
+}
+
+fn manager_do(
+    label: impl Into<String>,
+    compact_label: &'static str,
+    scenario_priority: i32,
+) -> nirvash::DocGraphActionPresentation {
+    let label = label.into();
+    nirvash::DocGraphActionPresentation::with_steps(
+        label.clone(),
+        Vec::new(),
+        vec![nirvash::DocGraphProcessStep::for_actor(
+            "Manager",
+            nirvash::DocGraphProcessKind::Do,
+            label,
+        )],
+    )
+    .with_compact_label(compact_label)
+    .with_scenario_priority(scenario_priority)
+}
+
+fn interaction_presentation(
+    label: impl Into<String>,
+    compact_label: &'static str,
+    scenario_priority: i32,
+    from: impl Into<String>,
+    to: impl Into<String>,
+) -> nirvash::DocGraphActionPresentation {
+    let label = label.into();
+    let from = from.into();
+    let to = to.into();
+    nirvash::DocGraphActionPresentation::with_steps(
+        label.clone(),
+        vec![nirvash::DocGraphInteractionStep::between(
+            from.clone(),
+            to.clone(),
+            label.clone(),
+        )],
+        vec![
+            nirvash::DocGraphProcessStep::for_actor(
+                from,
+                nirvash::DocGraphProcessKind::Send,
+                label.clone(),
+            ),
+            nirvash::DocGraphProcessStep::for_actor(
+                to,
+                nirvash::DocGraphProcessKind::Receive,
+                label,
+            ),
+        ],
+    )
+    .with_compact_label(compact_label)
+    .with_scenario_priority(scenario_priority)
+}
+
+fn system_event_type_id() -> TypeId {
+    TypeId::of::<SystemEvent>()
+}
+
+fn system_event_presentation(value: &dyn Any) -> Option<nirvash::DocGraphActionPresentation> {
+    let event = value
+        .downcast_ref::<SystemEvent>()
+        .expect("registered system event presentation downcast");
+
+    Some(match event {
+        SystemEvent::LoadConfig(created_default) => manager_do(
+            if *created_default {
+                "Manager loads config and creates defaults"
+            } else {
+                "Manager loads existing config"
+            },
+            "load-config",
+            100,
+        ),
+        SystemEvent::FinishRestore => manager_do("Manager finishes restore", "finish-restore", 95),
+        SystemEvent::AcceptSession(session, principal) => interaction_presentation(
+            format!("accept {:?} transport", principal),
+            "accept-session",
+            80,
+            session_actor_name(*session),
+            "Manager",
+        ),
+        SystemEvent::AuthenticateSession(session, role) => interaction_presentation(
+            format!("authenticate {:?} session", role),
+            "auth-session",
+            78,
+            session_actor_name(*session),
+            "Manager",
+        ),
+        SystemEvent::DrainSession(session) => interaction_presentation(
+            "drain session",
+            "drain-session",
+            52,
+            "Manager",
+            session_actor_name(*session),
+        ),
+        SystemEvent::RequestMessage(session, message) => interaction_presentation(
+            external_message_label(*message),
+            "request-msg",
+            70,
+            session_actor_name(*session),
+            "Manager",
+        ),
+        SystemEvent::CompleteMessage(session) => interaction_presentation(
+            "complete message",
+            "complete-msg",
+            68,
+            "Manager",
+            session_actor_name(*session),
+        ),
+        SystemEvent::PrepareService(service) => manager_do(
+            format!("prepare {}", service_actor_name(*service)),
+            "prepare-svc",
+            60,
+        ),
+        SystemEvent::CommitService(service) => manager_do(
+            format!("commit {}", service_actor_name(*service)),
+            "commit-svc",
+            58,
+        ),
+        SystemEvent::PromoteService(service) => manager_do(
+            format!("promote {}", service_actor_name(*service)),
+            "promote-svc",
+            56,
+        ),
+        SystemEvent::StartService(service) => manager_do(
+            format!("start {}", service_actor_name(*service)),
+            "start-svc",
+            54,
+        ),
+        SystemEvent::StopService(service) => manager_do(
+            format!("stop {}", service_actor_name(*service)),
+            "stop-svc",
+            50,
+        ),
+        SystemEvent::VerifyManagerAuth(service) => manager_do(
+            format!("verify manager auth for {}", service_actor_name(*service)),
+            "verify-auth",
+            48,
+        ),
+        SystemEvent::GrantBinding(grant) => {
+            manager_do(format!("grant binding {:?}", grant), "grant-binding", 46)
+        }
+        SystemEvent::RegisterRemoteAuthority(authority) => manager_do(
+            format!("register {}", authority_actor_name(*authority)),
+            "register-authority",
+            44,
+        ),
+        SystemEvent::StartCommand(kind) => {
+            manager_do(format!("start {:?} command", kind), "start-cmd", 42)
+        }
+        SystemEvent::RequestCommandCancel => manager_do("request command cancel", "cancel-cmd", 40),
+        SystemEvent::FinishCommand(state) => {
+            manager_do(format!("finish command as {:?}", state), "finish-cmd", 38)
+        }
+        SystemEvent::InvokeLocalRpc(from, to, interface) => interaction_presentation(
+            format!("invoke local {}", interface_label(*interface)),
+            "rpc-local",
+            36,
+            service_actor_name(*from),
+            service_actor_name(*to),
+        ),
+        SystemEvent::ConnectRemoteRpc(service, authority) => interaction_presentation(
+            "connect remote rpc",
+            "rpc-connect",
+            34,
+            service_actor_name(*service),
+            authority_actor_name(*authority),
+        ),
+        SystemEvent::InvokeRemoteRpc(service, authority, target, interface) => {
+            let label = format!("invoke remote {}", interface_label(*interface));
+            nirvash::DocGraphActionPresentation::with_steps(
+                label.clone(),
+                vec![nirvash::DocGraphInteractionStep::between(
+                    service_actor_name(*service),
+                    authority_actor_name(*authority),
+                    label.clone(),
+                )],
+                vec![
+                    nirvash::DocGraphProcessStep::for_actor(
+                        service_actor_name(*service),
+                        nirvash::DocGraphProcessKind::Send,
+                        label.clone(),
+                    ),
+                    nirvash::DocGraphProcessStep::for_actor(
+                        authority_actor_name(*authority),
+                        nirvash::DocGraphProcessKind::Receive,
+                        label.clone(),
+                    ),
+                    nirvash::DocGraphProcessStep::for_actor(
+                        service_actor_name(*target),
+                        nirvash::DocGraphProcessKind::Do,
+                        format!("handle {}", interface_label(*interface)),
+                    ),
+                ],
+            )
+            .with_compact_label("rpc-remote")
+            .with_scenario_priority(32)
+        }
+        SystemEvent::DisconnectRemoteRpc(service) => interaction_presentation(
+            "disconnect remote rpc",
+            "rpc-disconnect",
+            30,
+            service_actor_name(*service),
+            "Authority",
+        ),
+        SystemEvent::RequestShutdown => manager_do("request shutdown", "shutdown", 28),
+        SystemEvent::ConfirmSessionsDrained => {
+            manager_do("confirm sessions drained", "sessions-drained", 24)
+        }
+        SystemEvent::ConfirmServicesStopped => {
+            manager_do("confirm services stopped", "services-stopped", 22)
+        }
+        SystemEvent::ConfirmMaintenanceStopped => {
+            manager_do("confirm maintenance stopped", "maintenance-stopped", 20)
+        }
+        SystemEvent::CompleteShutdown => manager_do("complete shutdown", "shutdown-complete", 18),
+    })
+}
+
+nirvash::inventory::submit! {
+    nirvash::RegisteredActionDocPresentation {
+        value_type_id: system_event_type_id,
+        format: system_event_presentation,
+    }
 }
 
 #[derive(

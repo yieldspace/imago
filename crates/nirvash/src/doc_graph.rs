@@ -301,6 +301,8 @@ pub struct SpecVizCaseStats {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpecVizCase {
     pub label: String,
+    pub surface: Option<String>,
+    pub projection: Option<String>,
     pub backend: ModelBackend,
     pub graph: DocGraphSnapshot,
     pub reduced_graph: ReducedDocGraph,
@@ -377,6 +379,8 @@ pub struct DocGraphSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocGraphCase {
     pub label: String,
+    pub surface: Option<String>,
+    pub projection: Option<String>,
     pub backend: ModelBackend,
     pub soundness_tier: SoundnessTier,
     pub graph: DocGraphSnapshot,
@@ -713,6 +717,8 @@ impl SpecVizCase {
     fn from_doc_graph_case(policy: &VizPolicy, case: DocGraphCase) -> Self {
         let DocGraphCase {
             label,
+            surface,
+            projection,
             backend,
             soundness_tier: _,
             graph,
@@ -734,6 +740,8 @@ impl SpecVizCase {
 
         Self {
             label,
+            surface,
+            projection,
             backend,
             graph,
             reduced_graph,
@@ -1506,6 +1514,8 @@ mod tests {
                         relation_schema: Vec::new(),
                         cases: vec![SpecVizCase {
                             label: "default".to_owned(),
+                            surface: None,
+                            projection: None,
                             backend: ModelBackend::Explicit,
                             graph: DocGraphSnapshot {
                                 states: Vec::new(),

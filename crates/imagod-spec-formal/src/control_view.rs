@@ -2,10 +2,10 @@ use imagod_spec::{
     SessionAuthState, SessionId, SessionRequestState, SystemEvent, SystemStateFragment,
 };
 use nirvash::BoolExpr;
-use nirvash_lower::ModelInstance;
+use nirvash_lower::{DocStateProjection, ModelInstance};
 use nirvash_macros::{invariant, nirvash_expr, nirvash_step_expr};
 
-use crate::system::{SystemAction, SystemSpec, SystemState};
+use crate::system::{SystemAction, SystemState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlViewState {
@@ -33,11 +33,21 @@ pub fn project(state: &SystemStateFragment) -> ControlViewState {
     }
 }
 
+fn summarize_doc_state(state: &SystemState) -> nirvash::DocGraphState {
+    nirvash::summarize_doc_graph_state(&project(state))
+}
+
 pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     vec![
         ModelInstance::new("explicit_control_view")
             .with_checker_config(nirvash::ModelCheckConfig::reachable_graph())
+            .with_doc_checker_config(crate::bounds::doc_cap_focus())
             .with_check_deadlocks(false)
+            .with_doc_surface("Control View")
+            .with_doc_state_projection(DocStateProjection::new(
+                "ControlViewState",
+                summarize_doc_state,
+            ))
             .with_action_constraint(
                 nirvash_step_expr! { explicit_control_view_actions(_prev, action, _next) =>
                     matches!(action,
@@ -56,7 +66,7 @@ pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     ]
 }
 
-#[invariant(SystemSpec)]
+#[invariant(crate::system::SystemSpec)]
 fn drained_sessions_are_quiescent() -> BoolExpr<SystemState> {
     nirvash_expr! { drained_sessions_are_quiescent(state) =>
         (state.session0_auth != SessionAuthState::Drained || state.session0_request == SessionRequestState::Idle)

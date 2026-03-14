@@ -1052,6 +1052,10 @@ impl FrontendSpec for SystemSpec {
     }
 }
 
+#[cfg(not(test))]
+#[nirvash_macros::formal_tests(spec = SystemSpec)]
+const _: () = ();
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1192,6 +1196,125 @@ mod tests {
         assert_eq!(state.service0_lifecycle, ServiceLifecyclePhase::Reaped);
         assert_eq!(state.remote_rpc_authority, None);
         assert_eq!(state.remote_rpc_target, None);
+    }
+
+    #[test]
+    fn system_event_doc_presentation_uses_canonical_actors() {
+        let request = nirvash::describe_doc_graph_action(&SystemAction::RequestMessage(
+            SessionId::Session0,
+            ExternalMessage::RpcInvoke,
+        ));
+        assert_eq!(request.label, "rpc.invoke");
+        assert_eq!(
+            request.interaction_steps,
+            vec![nirvash::DocGraphInteractionStep::between(
+                "Session0",
+                "Manager",
+                "rpc.invoke",
+            )]
+        );
+
+        let local_rpc = nirvash::describe_doc_graph_action(&SystemAction::InvokeLocalRpc(
+            ServiceId::Service0,
+            ServiceId::Service1,
+            InterfaceId::ControlApi,
+        ));
+        assert_eq!(local_rpc.label, "invoke local control-api");
+        assert_eq!(
+            local_rpc.interaction_steps,
+            vec![nirvash::DocGraphInteractionStep::between(
+                "Service0",
+                "Service1",
+                "invoke local control-api",
+            )]
+        );
+
+        let remote_rpc = nirvash::describe_doc_graph_action(&SystemAction::InvokeRemoteRpc(
+            ServiceId::Service0,
+            RemoteAuthorityId::Authority0,
+            ServiceId::Service1,
+            InterfaceId::LogsApi,
+        ));
+        assert_eq!(remote_rpc.label, "invoke remote logs-api");
+        assert_eq!(
+            remote_rpc.interaction_steps,
+            vec![nirvash::DocGraphInteractionStep::between(
+                "Service0",
+                "Authority0",
+                "invoke remote logs-api",
+            )]
+        );
+        assert!(remote_rpc.process_steps.iter().any(|step| {
+            step.actor.as_deref() == Some("Service1")
+                && matches!(step.kind, nirvash::DocGraphProcessKind::Do)
+                && step.label == "handle logs-api"
+        }));
+
+        let shutdown = nirvash::describe_doc_graph_action(&SystemAction::RequestShutdown);
+        assert_eq!(shutdown.label, "request shutdown");
+        assert!(shutdown.interaction_steps.is_empty());
+        assert_eq!(
+            shutdown.process_steps,
+            vec![nirvash::DocGraphProcessStep::for_actor(
+                "Manager",
+                nirvash::DocGraphProcessKind::Do,
+                "request shutdown",
+            )]
+        );
+    }
+
+    #[test]
+    fn view_model_cases_use_projected_doc_state() {
+        let mut state = SystemSpec::new().initial_state();
+        state.manager_phase = ManagerPhase::Listening;
+        state.manager_accepts_control = true;
+        state.session0_auth = SessionAuthState::Authenticated;
+        state.service0_lifecycle = ServiceLifecyclePhase::Running;
+        state.last_message_decision = AuthorizationDecision::Allow;
+        state.last_operation_decision = AuthorizationDecision::Allow;
+
+        let cases = [
+            (
+                "Manager View",
+                "ManagerViewState",
+                crate::manager_view::model_cases(),
+            ),
+            (
+                "Control View",
+                "ControlViewState",
+                crate::control_view::model_cases(),
+            ),
+            (
+                "Service View",
+                "ServiceViewState",
+                crate::service_view::model_cases(),
+            ),
+            (
+                "Operation View",
+                "OperationViewState",
+                crate::operation_view::model_cases(),
+            ),
+            (
+                "Authorization View",
+                "AuthzViewState",
+                crate::authz_view::model_cases(),
+            ),
+        ];
+
+        for (surface, projection, cases) in cases {
+            let case = cases
+                .into_iter()
+                .next()
+                .expect("view should expose at least one model case");
+            assert_eq!(case.doc_surface(), Some(surface));
+            let projection_fn = case
+                .doc_state_projection()
+                .expect("view should expose doc projection");
+            assert_eq!(projection_fn.label, projection);
+            let projected = projection_fn.summarize(&state);
+            assert!(projected.full.contains(projection));
+            assert!(!projected.full.contains("SystemStateFragment"));
+        }
     }
 
     #[test]

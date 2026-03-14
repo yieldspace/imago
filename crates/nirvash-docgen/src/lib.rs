@@ -524,7 +524,7 @@ impl SourceCollector {
             let key = path_key(&registration.target_spec);
             let Some(spec) = by_path.get_mut(&key) else {
                 return Err(err(format!(
-                    "registration `{}` targets unknown spec `{}`",
+                    "registration `{}` targets unknown spec `{}`; nirvash-docgen does not resolve `use` aliases here, so registration targets must use a fully-qualified path such as `crate::system::SystemSpec`",
                     registration.function_name, key
                 )));
             };
@@ -573,6 +573,12 @@ impl SourceCollector {
                 viz_dir.display()
             ))
         })?;
+        let active_names = runtime_bundles
+            .iter()
+            .map(|bundle| bundle.spec_name.clone())
+            .collect::<BTreeSet<_>>();
+        remove_stale_generated_outputs(&doc_dir, "md", &active_names)?;
+        remove_stale_generated_outputs(&viz_dir, "json", &active_names)?;
 
         let mut fragments = Vec::new();
         for bundle in &runtime_bundles {
@@ -723,6 +729,10 @@ fn generate_at(manifest_dir: &Path, out_dir: &Path) -> Result<GenerationOutput, 
     collector
         .rerun_if_changed
         .insert(manifest_dir.join("Cargo.toml"));
+    collector
+        .rerun_if_changed
+        .insert(manifest_dir.join("build.rs"));
+    collector.rerun_if_changed.insert(manifest_dir.join("src"));
     collector.finish(manifest_dir, out_dir)
 }
 
@@ -1516,6 +1526,26 @@ fn build_viz_page(bundle: &nirvash::SpecVizBundle, catalog: &BundleCatalog<'_>) 
     }
 }
 
+fn bundle_case_groups(
+    bundle: &nirvash::SpecVizBundle,
+) -> Vec<(String, Vec<&nirvash::SpecVizCase>)> {
+    let mut groups = Vec::<(String, Vec<&nirvash::SpecVizCase>)>::new();
+    for case in &bundle.cases {
+        let surface = case.surface.clone().unwrap_or_else(|| "System".to_owned());
+        if let Some((_, grouped_cases)) = groups.iter_mut().find(|(name, _)| *name == surface) {
+            grouped_cases.push(case);
+        } else {
+            groups.push((surface, vec![case]));
+        }
+    }
+    groups
+}
+
+fn bundle_has_surface_groups(bundle: &nirvash::SpecVizBundle) -> bool {
+    matches!(bundle.metadata.kind, Some(nirvash::SpecVizKind::System))
+        && bundle.cases.iter().any(|case| case.surface.is_some())
+}
+
 fn render_viz_page(page: &VizPage) -> String {
     let mut output = String::new();
     for (index, section) in page.sections.iter().enumerate() {
@@ -1579,12 +1609,30 @@ fn build_system_map_section(
                     resolve_spec_link(catalog, subsystem.spec_id.as_str(), &subsystem.label)
                 })
                 .collect::<Vec<_>>();
-            navigation.push_str("### Subsystems\n\n");
-            if subsystem_links.is_empty() {
-                navigation.push_str("- none\n");
+            if bundle_has_surface_groups(bundle) {
+                navigation.push_str("### Views\n\n");
+                for (surface, cases) in bundle_case_groups(bundle) {
+                    let projections = cases
+                        .iter()
+                        .filter_map(|case| case.projection.as_deref())
+                        .collect::<BTreeSet<_>>();
+                    if projections.is_empty() {
+                        navigation.push_str(&format!("- `{surface}`\n"));
+                    } else {
+                        navigation.push_str(&format!(
+                            "- `{surface}`: projection `{}`\n",
+                            projections.into_iter().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                }
             } else {
-                for link in subsystem_links {
-                    navigation.push_str(&format!("- {}\n", link.markdown()));
+                navigation.push_str("### Subsystems\n\n");
+                if subsystem_links.is_empty() {
+                    navigation.push_str("- none\n");
+                } else {
+                    for link in subsystem_links {
+                        navigation.push_str(&format!("- {}\n", link.markdown()));
+                    }
                 }
             }
 
@@ -1645,40 +1693,48 @@ fn build_system_map_section(
 
 fn build_scenario_atlas_section(bundle: &nirvash::SpecVizBundle) -> PageSection {
     let mut blocks = Vec::new();
-    for case in &bundle.cases {
-        let mut heading = format!(
-            "### {}\n\n- backend: `{}`\n- representative traces: `{}`\n",
-            case.label,
-            render_model_backend(case.backend),
-            case.scenarios.len()
-        );
-        if case.stats.truncated {
-            heading.push_str("- checker note: truncated by checker limits\n");
+    let grouped = bundle_has_surface_groups(bundle);
+    for (surface, cases) in bundle_case_groups(bundle) {
+        if grouped {
+            blocks.push(PageBlock::Markdown(format!("### {surface}\n")));
         }
-        if case.stats.stutter_omitted {
-            heading.push_str("- checker note: stutter omitted from rendered edges\n");
-        }
-        blocks.push(PageBlock::Markdown(heading));
-        if case.scenarios.is_empty() {
-            blocks.push(PageBlock::Markdown(
-                "No representative traces selected.".to_owned(),
-            ));
-            continue;
-        }
-        for scenario in ordered_viz_scenarios(&case.scenarios) {
-            blocks.push(PageBlock::Markdown(format!(
-                "#### {}\n\n- class: `{}`\n- priority: `{}`\n- path: `{}`\n",
-                scenario.label,
-                scenario_atlas_label(scenario.kind),
-                scenario_max_priority(scenario),
-                scenario_path_label(&scenario.state_path)
-            )));
-            if scenario.actors.len() >= 2 {
-                blocks.push(PageBlock::Mermaid(render_viz_sequence_diagram_mermaid(
-                    bundle, case, scenario,
+        for case in cases {
+            let mut heading = format!(
+                "{} {}\n\n- backend: `{}`\n- representative traces: `{}`\n",
+                if grouped { "####" } else { "###" },
+                case.label,
+                render_model_backend(case.backend),
+                case.scenarios.len()
+            );
+            if case.stats.truncated {
+                heading.push_str("- checker note: truncated by checker limits\n");
+            }
+            if case.stats.stutter_omitted {
+                heading.push_str("- checker note: stutter omitted from rendered edges\n");
+            }
+            blocks.push(PageBlock::Markdown(heading));
+            if case.scenarios.is_empty() {
+                blocks.push(PageBlock::Markdown(
+                    "No representative traces selected.".to_owned(),
+                ));
+                continue;
+            }
+            for scenario in ordered_viz_scenarios(&case.scenarios) {
+                blocks.push(PageBlock::Markdown(format!(
+                    "{} {}\n\n- class: `{}`\n- priority: `{}`\n- path: `{}`\n",
+                    if grouped { "#####" } else { "####" },
+                    scenario.label,
+                    scenario_atlas_label(scenario.kind),
+                    scenario_max_priority(scenario),
+                    scenario_path_label(&scenario.state_path)
                 )));
-            } else {
-                blocks.push(PageBlock::Markdown(render_viz_step_table(scenario)));
+                if scenario.actors.len() >= 2 {
+                    blocks.push(PageBlock::Mermaid(render_viz_sequence_diagram_mermaid(
+                        bundle, case, scenario,
+                    )));
+                } else {
+                    blocks.push(PageBlock::Markdown(render_viz_step_table(scenario)));
+                }
             }
         }
     }
@@ -1690,20 +1746,33 @@ fn build_scenario_atlas_section(bundle: &nirvash::SpecVizBundle) -> PageSection 
 
 fn build_actor_flows_section(bundle: &nirvash::SpecVizBundle) -> PageSection {
     let mut blocks = Vec::new();
-    for case in &bundle.cases {
-        blocks.push(PageBlock::Markdown(format!("### {}\n", case.label)));
-        let scenarios = ordered_viz_scenarios(&case.scenarios);
-        let actors = collect_actor_flow_actors(case, &scenarios);
-        for actor in actors {
-            blocks.push(PageBlock::Markdown(format!("#### `{actor}`\n")));
-            blocks.push(PageBlock::Mermaid(render_actor_flow_mermaid(
-                &actor, &scenarios,
-            )));
+    let grouped = bundle_has_surface_groups(bundle);
+    for (surface, cases) in bundle_case_groups(bundle) {
+        if grouped {
+            blocks.push(PageBlock::Markdown(format!("### {surface}\n")));
         }
-        blocks.push(PageBlock::Details {
-            summary: format!("{} process text fallback", case.label),
-            body: render_code_block("text", &render_case_process_view(case)),
-        });
+        for case in cases {
+            blocks.push(PageBlock::Markdown(format!(
+                "{} {}\n",
+                if grouped { "####" } else { "###" },
+                case.label
+            )));
+            let scenarios = ordered_viz_scenarios(&case.scenarios);
+            let actors = collect_actor_flow_actors(case, &scenarios);
+            for actor in actors {
+                blocks.push(PageBlock::Markdown(format!(
+                    "{} `{actor}`\n",
+                    if grouped { "#####" } else { "####" }
+                )));
+                blocks.push(PageBlock::Mermaid(render_actor_flow_mermaid(
+                    &actor, &scenarios,
+                )));
+            }
+            blocks.push(PageBlock::Details {
+                summary: format!("{} process text fallback", case.label),
+                body: render_code_block("text", &render_case_process_view(case)),
+            });
+        }
     }
     PageSection {
         title: "Actor Flows",
@@ -1714,72 +1783,83 @@ fn build_actor_flows_section(bundle: &nirvash::SpecVizBundle) -> PageSection {
 fn build_state_space_section(bundle: &nirvash::SpecVizBundle) -> PageSection {
     let mut blocks = Vec::new();
     let threshold = bundle.metadata.policy.large_graph_threshold;
-    for case in &bundle.cases {
-        let mut heading = format!(
-            "### {}\n\n- states: full=`{}`, reduced=`{}`, focus=`{}`\n- edges: full=`{}`, reduced=`{}`\n",
-            case.label,
-            case.stats.full_state_count,
-            case.stats.reduced_state_count,
-            case.stats.focus_state_count,
-            case.stats.full_edge_count,
-            case.stats.reduced_edge_count
-        );
-        if case.stats.truncated {
-            heading.push_str("- checker note: truncated by checker limits\n");
+    let grouped = bundle_has_surface_groups(bundle);
+    for (surface, cases) in bundle_case_groups(bundle) {
+        if grouped {
+            blocks.push(PageBlock::Markdown(format!("### {surface}\n")));
         }
-        if case.stats.stutter_omitted {
-            heading.push_str("- checker note: stutter omitted from rendered edges\n");
-        }
-        blocks.push(PageBlock::Markdown(heading));
+        for case in cases {
+            let mut heading = format!(
+                "{} {}\n\n- states: full=`{}`, reduced=`{}`, focus=`{}`\n- edges: full=`{}`, reduced=`{}`\n",
+                if grouped { "####" } else { "###" },
+                case.label,
+                case.stats.full_state_count,
+                case.stats.reduced_state_count,
+                case.stats.focus_state_count,
+                case.stats.full_edge_count,
+                case.stats.reduced_edge_count
+            );
+            if case.stats.truncated {
+                heading.push_str("- checker note: truncated by checker limits\n");
+            }
+            if case.stats.stutter_omitted {
+                heading.push_str("- checker note: stutter omitted from rendered edges\n");
+            }
+            blocks.push(PageBlock::Markdown(heading));
 
-        if case.reduced_graph.states.len() <= threshold {
-            blocks.push(PageBlock::Markdown(
-                "Rendered graph: reduced reachable graph.".to_owned(),
-            ));
-            blocks.push(PageBlock::Mermaid(render_viz_state_graph_mermaid(
-                bundle,
-                case,
-                &case.reduced_graph,
-                &visible_reduced_edges(&case.reduced_graph),
-            )));
-            blocks.push(PageBlock::Details {
-                summary: "State legend".to_owned(),
-                body: render_state_legend(&case.reduced_graph),
-            });
-            continue;
-        }
+            if case.reduced_graph.states.len() <= threshold {
+                blocks.push(PageBlock::Markdown(
+                    "Rendered graph: reduced reachable graph.".to_owned(),
+                ));
+                blocks.push(PageBlock::Mermaid(render_viz_state_graph_mermaid(
+                    bundle,
+                    case,
+                    &case.reduced_graph,
+                    &visible_reduced_edges(&case.reduced_graph),
+                )));
+                blocks.push(PageBlock::Details {
+                    summary: "State legend".to_owned(),
+                    body: render_state_legend(&case.reduced_graph),
+                });
+                continue;
+            }
 
-        if let Some(focus_graph) = case.focus_graph.as_ref()
-            && focus_graph.states.len() <= threshold
-        {
+            if let Some(focus_graph) = case.focus_graph.as_ref()
+                && focus_graph.states.len() <= threshold
+            {
+                blocks.push(PageBlock::Markdown(format!(
+                    "Reduced graph omitted because {} reduced states exceed limit {}. Rendering focus graph selected from representative scenarios.",
+                    case.reduced_graph.states.len(),
+                    threshold
+                )));
+                blocks.push(PageBlock::Mermaid(render_viz_state_graph_mermaid(
+                    bundle,
+                    case,
+                    focus_graph,
+                    &visible_reduced_edges(focus_graph),
+                )));
+                blocks.push(PageBlock::Details {
+                    summary: "Focus state legend".to_owned(),
+                    body: render_state_legend(focus_graph),
+                });
+                continue;
+            }
+
             blocks.push(PageBlock::Markdown(format!(
-                "Reduced graph omitted because {} reduced states exceed limit {}. Rendering focus graph selected from representative scenarios.",
+                "Reduced graph omitted because {} reduced states exceed limit {}. Focus graph also exceeds the inline threshold, so scenario mini diagrams are shown instead.",
                 case.reduced_graph.states.len(),
                 threshold
             )));
-            blocks.push(PageBlock::Mermaid(render_viz_state_graph_mermaid(
-                bundle,
-                case,
-                focus_graph,
-                &visible_reduced_edges(focus_graph),
-            )));
-            blocks.push(PageBlock::Details {
-                summary: "Focus state legend".to_owned(),
-                body: render_state_legend(focus_graph),
-            });
-            continue;
-        }
-
-        blocks.push(PageBlock::Markdown(format!(
-            "Reduced graph omitted because {} reduced states exceed limit {}. Focus graph also exceeds the inline threshold, so scenario mini diagrams are shown instead.",
-            case.reduced_graph.states.len(),
-            threshold
-        )));
-        for scenario in ordered_viz_scenarios(&case.scenarios) {
-            blocks.push(PageBlock::Markdown(format!("#### {}\n", scenario.label)));
-            blocks.push(PageBlock::Mermaid(render_scenario_state_space_mermaid(
-                case, scenario,
-            )));
+            for scenario in ordered_viz_scenarios(&case.scenarios) {
+                blocks.push(PageBlock::Markdown(format!(
+                    "{} {}\n",
+                    if grouped { "#####" } else { "####" },
+                    scenario.label
+                )));
+                blocks.push(PageBlock::Mermaid(render_scenario_state_space_mermaid(
+                    case, scenario,
+                )));
+            }
         }
     }
     PageSection {
@@ -2047,23 +2127,39 @@ fn render_system_map_mermaid(
 
     match bundle.metadata.kind {
         Some(nirvash::SpecVizKind::System) => {
-            let subsystem_labels = bundle
-                .metadata
-                .subsystems
-                .iter()
-                .map(|subsystem| subsystem.label.clone())
-                .collect::<Vec<_>>();
-            let subsystem_aliases = MermaidAliasMap::new(&subsystem_labels, "SUB");
-            for subsystem in &bundle.metadata.subsystems {
-                output.push_str(&format!(
-                    "{}[\"{}<br/>subsystem\"]\n",
-                    subsystem_aliases.id(&subsystem.label),
-                    escape_mermaid_label(&subsystem.label)
-                ));
-                output.push_str(&format!(
-                    "CURRENT --> {}\n",
-                    subsystem_aliases.id(&subsystem.label)
-                ));
+            if bundle_has_surface_groups(bundle) {
+                let views = bundle_case_groups(bundle)
+                    .into_iter()
+                    .map(|(surface, _)| surface)
+                    .collect::<Vec<_>>();
+                let view_aliases = MermaidAliasMap::new(&views, "VIEW");
+                for view in &views {
+                    output.push_str(&format!(
+                        "{}[\"{}<br/>view\"]\n",
+                        view_aliases.id(view),
+                        escape_mermaid_label(view)
+                    ));
+                    output.push_str(&format!("CURRENT --> {}\n", view_aliases.id(view)));
+                }
+            } else {
+                let subsystem_labels = bundle
+                    .metadata
+                    .subsystems
+                    .iter()
+                    .map(|subsystem| subsystem.label.clone())
+                    .collect::<Vec<_>>();
+                let subsystem_aliases = MermaidAliasMap::new(&subsystem_labels, "SUB");
+                for subsystem in &bundle.metadata.subsystems {
+                    output.push_str(&format!(
+                        "{}[\"{}<br/>subsystem\"]\n",
+                        subsystem_aliases.id(&subsystem.label),
+                        escape_mermaid_label(&subsystem.label)
+                    ));
+                    output.push_str(&format!(
+                        "CURRENT --> {}\n",
+                        subsystem_aliases.id(&subsystem.label)
+                    ));
+                }
             }
 
             let actors = collect_bundle_actors(bundle);
@@ -2130,6 +2226,43 @@ fn render_system_map_mermaid(
     }
 
     output
+}
+
+fn remove_stale_generated_outputs(
+    dir: &Path,
+    extension: &str,
+    active_names: &BTreeSet<String>,
+) -> Result<(), DynError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)
+        .map_err(|error| err(format!("failed to read {}: {error}", dir.display())))?
+    {
+        let entry =
+            entry.map_err(|error| err(format!("failed to inspect {}: {error}", dir.display())))?;
+        let path = entry.path();
+        let Some(file_extension) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if file_extension != extension {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !active_names.contains(stem) {
+            fs::remove_file(&path).map_err(|error| {
+                err(format!(
+                    "failed to remove stale generated output {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 fn ordered_viz_scenarios(scenarios: &[nirvash::VizScenario]) -> Vec<&nirvash::VizScenario> {
@@ -2920,6 +3053,8 @@ mod tests {
     fn demo_graph_case(label: &str) -> nirvash::DocGraphCase {
         nirvash::DocGraphCase {
             label: label.to_owned(),
+            surface: None,
+            projection: None,
             backend: nirvash::ModelBackend::Explicit,
             soundness_tier: nirvash::SoundnessTier::Exact,
             graph: nirvash::DocGraphSnapshot {
@@ -3301,6 +3436,8 @@ fn system_model_cases() -> Vec<nirvash_lower::ModelInstance<SystemState, SystemA
             output.rerun_if_changed,
             vec![
                 manifest_dir.join("Cargo.toml"),
+                manifest_dir.join("build.rs"),
+                manifest_dir.join("src"),
                 src_dir.join("child.rs"),
                 src_dir.join("lib.rs"),
                 src_dir.join("system.rs"),
@@ -3381,6 +3518,89 @@ impl FrontendSpec for DuplicateSpec {
     }
 
     #[test]
+    fn generate_removes_stale_plane_outputs_when_system_spec_replaces_them() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path();
+        let src_dir = manifest_dir.join("src");
+        let out_dir = manifest_dir.join("out");
+        let doc_dir = out_dir.join("nirvash-doc");
+        let viz_dir = out_dir.join("viz");
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
+
+        fs::create_dir_all(&src_dir).expect("src");
+        fs::create_dir_all(&doc_dir).expect("doc dir");
+        fs::create_dir_all(&viz_dir).expect("viz dir");
+        fs::write(doc_dir.join("ManagerPlaneSpec.md"), "stale manager").expect("stale manager doc");
+        fs::write(doc_dir.join("ControlPlaneSpec.md"), "stale control").expect("stale control doc");
+        fs::write(viz_dir.join("ManagerPlaneSpec.json"), "{}").expect("stale manager viz");
+        fs::write(viz_dir.join("ControlPlaneSpec.json"), "{}").expect("stale control viz");
+
+        fs::write(
+            manifest_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"demo-doc-cleanup\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[build-dependencies]\nnirvash-docgen = {{ path = \"{}\" }}\n\n[dependencies]\nnirvash = {{ path = \"{}\" }}\nnirvash-lower = {{ path = \"{}\" }}\nnirvash-macros = {{ path = \"{}\" }}\n",
+                workspace_root.join("crates/nirvash-docgen").display(),
+                workspace_root.join("crates/nirvash").display(),
+                workspace_root.join("crates/nirvash-lower").display(),
+                workspace_root.join("crates/nirvash-macros").display(),
+            ),
+        )
+        .expect("Cargo.toml");
+        fs::write(
+            src_dir.join("lib.rs"),
+            r#"
+use nirvash::TransitionProgram;
+use nirvash_lower::FrontendSpec;
+use nirvash_macros::{nirvash_transition_program, system_spec};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemState;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemAction;
+pub struct SystemSpec;
+
+#[system_spec]
+impl FrontendSpec for SystemSpec {
+    type State = SystemState;
+    type Action = SystemAction;
+
+    fn initial_states(&self) -> Vec<Self::State> { vec![SystemState] }
+    fn actions(&self) -> Vec<Self::Action> { vec![SystemAction] }
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule step when true => {
+                set self <= SystemState;
+            }
+        })
+    }
+}
+"#,
+        )
+        .expect("lib.rs");
+
+        let output = generate_at(manifest_dir, &out_dir).expect("docgen succeeds");
+
+        assert!(!doc_dir.join("ManagerPlaneSpec.md").exists());
+        assert!(!doc_dir.join("ControlPlaneSpec.md").exists());
+        assert!(!viz_dir.join("ManagerPlaneSpec.json").exists());
+        assert!(!viz_dir.join("ControlPlaneSpec.json").exists());
+        assert!(doc_dir.join("SystemSpec.md").exists());
+        assert!(viz_dir.join("SystemSpec.json").exists());
+        assert_eq!(
+            output
+                .fragments
+                .iter()
+                .map(|fragment| fragment.env_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["NIRVASH_DOC_FRAGMENT_SYSTEM_SPEC"]
+        );
+    }
+
+    #[test]
     fn render_fragment_uses_system_first_sections() {
         let fragment = render_fragment(&SpecDoc {
             kind: Some(SpecKind::Subsystem),
@@ -3399,6 +3619,8 @@ impl FrontendSpec for DuplicateSpec {
             ]),
             doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
+                surface: None,
+                projection: None,
                 backend: nirvash::ModelBackend::Explicit,
                 soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
@@ -3459,6 +3681,41 @@ impl FrontendSpec for DuplicateSpec {
     }
 
     #[test]
+    fn render_system_fragment_groups_surface_views() {
+        let bundle = demo_bundle(
+            "SystemSpec",
+            "crate::system::SystemSpec",
+            Some(nirvash::SpecVizKind::System),
+            vec![
+                demo_graph_case("default"),
+                nirvash::DocGraphCase {
+                    label: "explicit_manager_view".to_owned(),
+                    surface: Some("Manager View".to_owned()),
+                    projection: Some("ManagerViewState".to_owned()),
+                    ..demo_graph_case("manager_view")
+                },
+                nirvash::DocGraphCase {
+                    label: "explicit_control_view".to_owned(),
+                    surface: Some("Control View".to_owned()),
+                    projection: Some("ControlViewState".to_owned()),
+                    ..demo_graph_case("control_view")
+                },
+            ],
+        );
+
+        let fragment = render_viz_fragment(&bundle);
+
+        assert!(fragment.contains("### Views"));
+        assert!(fragment.contains("`Manager View`: projection `ManagerViewState`"));
+        assert!(fragment.contains("`Control View`: projection `ControlViewState`"));
+        assert!(fragment.contains("### System"));
+        assert!(fragment.contains("### Manager View"));
+        assert!(fragment.contains("### Control View"));
+        assert!(fragment.contains("#### explicit_manager_view"));
+        assert!(fragment.contains("#### explicit_control_view"));
+    }
+
+    #[test]
     fn render_fragment_includes_relation_schema_and_relation_notation() {
         let fragment = render_fragment(&SpecDoc {
             kind: Some(SpecKind::Subsystem),
@@ -3471,6 +3728,8 @@ impl FrontendSpec for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
+                surface: None,
+                projection: None,
                 backend: nirvash::ModelBackend::Explicit,
                 soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
@@ -3593,6 +3852,8 @@ impl FrontendSpec for DuplicateSpec {
             registrations: BTreeMap::new(),
             doc_graphs: vec![nirvash::DocGraphCase {
                 label: "default".to_owned(),
+                surface: None,
+                projection: None,
                 backend: nirvash::ModelBackend::Explicit,
                 soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {
@@ -3696,6 +3957,8 @@ impl FrontendSpec for DuplicateSpec {
             },
             vec![nirvash::DocGraphCase {
                 label: "large".to_owned(),
+                surface: None,
+                projection: None,
                 backend: nirvash::ModelBackend::Explicit,
                 soundness_tier: nirvash::SoundnessTier::Exact,
                 graph: nirvash::DocGraphSnapshot {

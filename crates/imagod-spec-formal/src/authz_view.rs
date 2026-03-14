@@ -3,10 +3,10 @@ use imagod_spec::{
     SystemStateFragment, TransportPrincipal,
 };
 use nirvash::BoolExpr;
-use nirvash_lower::ModelInstance;
+use nirvash_lower::{DocStateProjection, ModelInstance};
 use nirvash_macros::{invariant, nirvash_expr, nirvash_step_expr};
 
-use crate::system::{SystemAction, SystemSpec, SystemState};
+use crate::system::{SystemAction, SystemState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthzViewState {
@@ -21,11 +21,21 @@ pub fn project(state: &SystemStateFragment) -> AuthzViewState {
     }
 }
 
+fn summarize_doc_state(state: &SystemState) -> nirvash::DocGraphState {
+    nirvash::summarize_doc_graph_state(&project(state))
+}
+
 pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     vec![
         ModelInstance::new("explicit_authz_view")
             .with_checker_config(nirvash::ModelCheckConfig::reachable_graph())
+            .with_doc_checker_config(crate::bounds::doc_cap_focus())
             .with_check_deadlocks(false)
+            .with_doc_surface("Authorization View")
+            .with_doc_state_projection(DocStateProjection::new(
+                "AuthzViewState",
+                summarize_doc_state,
+            ))
             .with_action_constraint(nirvash_step_expr! { explicit_authz_view_actions(_prev, action, _next) =>
                 matches!(action,
                     SystemEvent::LoadConfig(_)
@@ -49,7 +59,13 @@ pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
                 backend: Some(nirvash::ModelBackend::Symbolic),
                 ..nirvash::ModelCheckConfig::reachable_graph()
             })
+            .with_doc_checker_config(crate::bounds::doc_cap_focus())
             .with_check_deadlocks(false)
+            .with_doc_surface("Authorization View")
+            .with_doc_state_projection(DocStateProjection::new(
+                "AuthzViewState",
+                summarize_doc_state,
+            ))
             .with_action_constraint(nirvash_step_expr! { symbolic_authz_view_actions(_prev, action, _next) =>
                 matches!(action,
                     SystemEvent::LoadConfig(_)
@@ -63,7 +79,7 @@ pub(crate) fn model_cases() -> Vec<ModelInstance<SystemState, SystemAction>> {
     ]
 }
 
-#[invariant(SystemSpec)]
+#[invariant(crate::system::SystemSpec)]
 fn unknown_principal_never_gets_privileged_allow() -> BoolExpr<SystemState> {
     nirvash_expr! { unknown_principal_never_gets_privileged_allow(state) =>
         !(
@@ -79,7 +95,7 @@ fn unknown_principal_never_gets_privileged_allow() -> BoolExpr<SystemState> {
     }
 }
 
-#[invariant(SystemSpec)]
+#[invariant(crate::system::SystemSpec)]
 fn remote_invoke_allow_implies_non_client_runner_role() -> BoolExpr<SystemState> {
     nirvash_expr! { remote_invoke_allow_implies_non_client_runner_role(state) =>
         state.last_operation_permission != Some(OperationPermission::RemoteInvoke)

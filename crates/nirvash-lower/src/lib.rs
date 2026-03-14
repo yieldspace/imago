@@ -360,6 +360,32 @@ pub struct ModelPresentationConfig<S> {
     pub doc_checker: Option<ModelCheckConfig>,
     pub doc_graph: DocGraphPolicy<S>,
     pub viz: Option<VizPolicy>,
+    pub doc_surface: Option<&'static str>,
+    pub doc_state_projection: Option<DocStateProjection<S>>,
+}
+
+#[derive(Debug)]
+pub struct DocStateProjection<S> {
+    pub label: &'static str,
+    pub summarize: fn(&S) -> nirvash::DocGraphState,
+}
+
+impl<S> Copy for DocStateProjection<S> {}
+
+impl<S> Clone for DocStateProjection<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> DocStateProjection<S> {
+    pub const fn new(label: &'static str, summarize: fn(&S) -> nirvash::DocGraphState) -> Self {
+        Self { label, summarize }
+    }
+
+    pub fn summarize(&self, state: &S) -> nirvash::DocGraphState {
+        (self.summarize)(state)
+    }
 }
 
 impl<S> Default for ModelPresentationConfig<S> {
@@ -368,6 +394,8 @@ impl<S> Default for ModelPresentationConfig<S> {
             doc_checker: None,
             doc_graph: DocGraphPolicy::default(),
             viz: None,
+            doc_surface: None,
+            doc_state_projection: None,
         }
     }
 }
@@ -452,6 +480,19 @@ impl<S, A> ModelInstance<S, A> {
         self
     }
 
+    pub fn with_doc_surface(mut self, doc_surface: &'static str) -> Self {
+        self.presentation.doc_surface = Some(doc_surface);
+        self
+    }
+
+    pub fn with_doc_state_projection(
+        mut self,
+        doc_state_projection: DocStateProjection<S>,
+    ) -> Self {
+        self.presentation.doc_state_projection = Some(doc_state_projection);
+        self
+    }
+
     pub fn with_resolved_backend(mut self, default_backend: ModelBackend) -> Self {
         self.checker_config.backend = self.checker_config.backend.or(Some(default_backend));
         if let Some(mut doc_checker) = self.presentation.doc_checker.take() {
@@ -517,6 +558,14 @@ impl<S, A> ModelInstance<S, A> {
 
     pub fn viz_policy(&self) -> VizPolicy {
         self.presentation.viz.clone().unwrap_or_default()
+    }
+
+    pub const fn doc_surface(&self) -> Option<&'static str> {
+        self.presentation.doc_surface
+    }
+
+    pub fn doc_state_projection(&self) -> Option<DocStateProjection<S>> {
+        self.presentation.doc_state_projection.clone()
     }
 }
 

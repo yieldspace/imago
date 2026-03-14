@@ -4690,14 +4690,25 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                             .then_some(state_index)
                                     })
                                     .collect::<::std::vec::Vec<_>>();
+                                let doc_surface = model_case.doc_surface().map(::std::borrow::ToOwned::to_owned);
+                                let doc_projection = model_case
+                                    .doc_state_projection()
+                                    .map(|projection| projection.label.to_owned());
                                 ::nirvash::DocGraphCase {
                                     label,
+                                    surface: doc_surface,
+                                    projection: doc_projection,
                                     backend,
                                     soundness_tier: snapshot.soundness_tier,
                                     graph: ::nirvash::DocGraphSnapshot {
                                         states: states
                                             .into_iter()
-                                            .map(|state| ::nirvash::summarize_doc_graph_state(&state))
+                                            .map(|state| {
+                                                model_case
+                                                    .doc_state_projection()
+                                                    .map(|projection| projection.summarize(&state))
+                                                    .unwrap_or_else(|| ::nirvash::summarize_doc_graph_state(&state))
+                                            })
                                             .collect(),
                                         edges,
                                         initial_indices: snapshot.initial_indices,
