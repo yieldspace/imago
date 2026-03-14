@@ -4619,11 +4619,39 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                                     (true, false) => format!("case-{index}"),
                                     (true, true) => format!("case-{index}/{}", model_case.label()),
                                 };
-                                let checker = ::nirvash_check::ModelChecker::for_case(&lowered, model_case.clone());
-                                let backend = checker.doc_backend();
-                                let snapshot = checker
-                                    .reachable_graph_snapshot()
-                                    .expect("reachable graph snapshot should build for docs");
+                                let resolved_model_case = model_case
+                                    .clone()
+                                    .with_resolved_backend(
+                                        lowered
+                                            .default_model_backend()
+                                            .unwrap_or(::nirvash::ModelBackend::Explicit),
+                                    );
+                                let backend = resolved_model_case
+                                    .doc_checker_config()
+                                    .and_then(|config| config.backend)
+                                    .unwrap_or_else(|| {
+                                        resolved_model_case
+                                            .effective_checker_config()
+                                            .backend
+                                            .unwrap_or(::nirvash::ModelBackend::Explicit)
+                                    });
+                                let snapshot = match backend {
+                                    ::nirvash::ModelBackend::Explicit => {
+                                        ::nirvash_check::ExplicitModelChecker::for_case(
+                                            &lowered,
+                                            resolved_model_case.clone(),
+                                        )
+                                        .reachable_graph_snapshot()
+                                    }
+                                    ::nirvash::ModelBackend::Symbolic => {
+                                        ::nirvash_check::SymbolicModelChecker::for_case(
+                                            &lowered,
+                                            resolved_model_case.clone(),
+                                        )
+                                        .reachable_graph_snapshot()
+                                    }
+                                }
+                                .expect("reachable graph snapshot should build for docs");
                                 let states = snapshot.states;
                                 let edges = snapshot
                                     .edges
@@ -4798,7 +4826,7 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                 model_case: GeneratedModelCase,
             ) -> ::nirvash::ReachableGraphSnapshot<GeneratedState, GeneratedAction> {
                 let lowered = generated_lowered(spec);
-                ::nirvash_check::ModelChecker::for_case(
+                ::nirvash_check::ExplicitModelChecker::for_case(
                     &lowered,
                     generated_explicit_fallback_model_case(model_case),
                 )
@@ -4917,14 +4945,39 @@ fn expand_formal_tests(args: TestArgs) -> syn::Result<proc_macro2::TokenStream> 
                     return;
                 };
                 let lowered = generated_lowered(&spec);
-                let checker = ::nirvash_check::ModelChecker::for_case(&lowered, model_case.clone());
-                let result = match checker.check_all() {
+                let resolved_model_case = model_case
+                    .clone()
+                    .with_resolved_backend(
+                        lowered
+                            .default_model_backend()
+                            .unwrap_or(::nirvash::ModelBackend::Explicit),
+                    );
+                let backend = resolved_model_case
+                    .effective_checker_config()
+                    .backend
+                    .unwrap_or(::nirvash::ModelBackend::Explicit);
+                let result = match match backend {
+                    ::nirvash::ModelBackend::Explicit => {
+                        ::nirvash_check::ExplicitModelChecker::for_case(
+                            &lowered,
+                            resolved_model_case.clone(),
+                        )
+                        .check_all()
+                    }
+                    ::nirvash::ModelBackend::Symbolic => {
+                        ::nirvash_check::SymbolicModelChecker::for_case(
+                            &lowered,
+                            resolved_model_case.clone(),
+                        )
+                        .check_all()
+                    }
+                } {
                     ::core::result::Result::Ok(result) => result,
                     ::core::result::Result::Err(::nirvash::ModelCheckError::UnsupportedConfiguration(_))
-                        if checker.backend() == ::nirvash::ModelBackend::Symbolic =>
+                        if backend == ::nirvash::ModelBackend::Symbolic =>
                     {
                         let lowered = generated_lowered(&spec);
-                        ::nirvash_check::ModelChecker::for_case(
+                        ::nirvash_check::ExplicitModelChecker::for_case(
                             &lowered,
                             generated_explicit_fallback_model_case(model_case),
                         )
@@ -5078,7 +5131,7 @@ fn expand_code_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::TokenStream
                 ::std::vec::Vec<::std::vec::Vec<GeneratedPrefixStep>>,
             ) {
                 let lowered = generated_lowered(spec);
-                let snapshot = ::nirvash_check::ModelChecker::for_case(&lowered, model_case)
+                let snapshot = ::nirvash_check::ExplicitModelChecker::for_case(&lowered, model_case)
                     .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];
@@ -5593,7 +5646,7 @@ fn expand_code_witness_tests(args: CodeTestArgs) -> syn::Result<proc_macro2::Tok
                 ::std::vec::Vec<::std::vec::Vec<GeneratedPrefixStep>>,
             ) {
                 let lowered = generated_lowered(spec);
-                let snapshot = ::nirvash_check::ModelChecker::for_case(&lowered, model_case)
+                let snapshot = ::nirvash_check::ExplicitModelChecker::for_case(&lowered, model_case)
                     .full_reachable_graph_snapshot()
                     .expect("reachable graph snapshot should build");
                 let mut paths = vec![::core::option::Option::None; snapshot.states.len()];

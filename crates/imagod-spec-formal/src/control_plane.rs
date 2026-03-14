@@ -444,7 +444,7 @@ impl FrontendSpec for ControlPlaneSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_check::ModelChecker;
+    use nirvash_check as checks;
 
     fn case_by_label(
         spec: &ControlPlaneSpec,
@@ -481,12 +481,14 @@ mod tests {
         let explicit_case = bounded_parity_case(case_by_label(&spec, "explicit_focus"));
         let symbolic_case = bounded_parity_case(case_by_label(&spec, "symbolic_focus"));
 
-        let explicit_snapshot = ModelChecker::for_case(&lowered, explicit_case.clone())
-            .reachable_graph_snapshot()
-            .expect("explicit control snapshot");
-        let symbolic_snapshot = ModelChecker::for_case(&lowered, symbolic_case.clone())
-            .reachable_graph_snapshot()
-            .expect("symbolic control snapshot");
+        let explicit_snapshot =
+            checks::ExplicitModelChecker::for_case(&lowered, explicit_case.clone())
+                .reachable_graph_snapshot()
+                .expect("explicit control snapshot");
+        let symbolic_snapshot =
+            checks::SymbolicModelChecker::for_case(&lowered, symbolic_case.clone())
+                .reachable_graph_snapshot()
+                .expect("symbolic control snapshot");
         assert_eq!(symbolic_snapshot, explicit_snapshot);
     }
 }

@@ -2,5 +2,5 @@ mod checker;
 mod smt;
 mod symbolic;
 
-pub use checker::ExplicitModelChecker;
-pub use symbolic::SymbolicModelChecker;
+pub type ExplicitModelChecker<'a, T> = checker::ExplicitModelChecker<'a, T>;
+pub type SymbolicModelChecker<'a, T> = symbolic::SymbolicModelChecker<'a, T>;

@@ -12,7 +12,7 @@ authoring surface は引き続き `pred!` / `step!` / `ltl!` / `TransitionProgra
 - `nirvash-lower`
   - `FrontendSpec`, `LoweredSpec`, `FiniteModelDomain`, `SymbolicEncoding`, checker-facing config/model boundary
 - `nirvash-check`
-  - `ExplicitModelChecker` / `SymbolicModelChecker` と `ModelChecker` compatibility façade
+  - `ExplicitModelChecker` / `SymbolicModelChecker` の typed checker front door
 - `nirvash-backends`
   - explicit / symbolic backend 実装（`LoweredSpec` を受ける）
 - `nirvash-conformance`
@@ -45,7 +45,7 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
   - 現時点では `state_storage = InMemoryExact | InMemoryFingerprinted`、`compression = None | DomainIndex`、`reachability = BreadthFirst | ParallelFrontier | DistributedFrontier`、`bounded_lasso = EnumeratedPaths`
   - `checkpoint = ExplicitCheckpointOptions { path, save_every_frontiers, resume }` で reachable-graph frontier checkpoint/save-resume を設定
   - `parallel = ExplicitParallelOptions { workers }` と `distributed = ExplicitDistributedOptions { shards }` で explicit reachable-graph frontier の local/distributed wave を設定
-  - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ExplicitModelChecker::simulate()` と explicit に解決された `ModelChecker::simulate()` の deterministic random walk を設定
+  - `simulation = ExplicitSimulationOptions { runs: 1, max_depth: 32, seed: 0 }` で `ExplicitModelChecker::simulate()` の deterministic random walk を設定
 - `ModelInstance::with_sound_reduction(SoundReduction)` で verified symmetry / quotient / POR を付け、`ModelInstance::with_heuristic_reduction(HeuristicReduction)` で state projection / action pruning を付ける
 - `ModelCheckResult` / `ReachableGraphSnapshot` / `DocGraphCase` は `SoundnessTier = Exact | SoundReduced | Heuristic` を持つ
 - `symbolic: SymbolicModelCheckOptions`
@@ -53,13 +53,13 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
   - `k_induction = SymbolicKInductionOptions { max_depth }` と `pdr = SymbolicPdrOptions { max_frames }` で invariant proof engine の bound を設定
 
 これらは current implementation を present tense で表す public contract です。symbolic backend は heuristic reduction と未対応 sound reduction を fail-closed し、explicit backend は checkpoint / parallel / distributed / simulation / compression と reduction tier を同じ config surface で切り替えます。
-`nirvash-check` は backend 固定の `ExplicitModelChecker` / `SymbolicModelChecker` を正本にし、既存 `ModelChecker` は backend-resolving compatibility façade として維持されます。symbolic-only 利用では `FiniteModelDomain` を持たない state でも lower した `LoweredSpec` を `SymbolicModelChecker` に直接渡せます。
+`nirvash-check` は backend 固定の `ExplicitModelChecker` / `SymbolicModelChecker` を正本とします。symbolic-only 利用では `FiniteModelDomain` を持たない state でも lower した `LoweredSpec` を `SymbolicModelChecker` に直接渡せます。
 
 ## What It Provides
 
 - `FiniteModelDomain`: bounded helper 型へ finite domain と値 invariant を与える checker-facing trait
 - `SymbolicEncoding`: symbolic sort / state schema を与える checker-facing trait
-- `ExplicitModelChecker` / `SymbolicModelChecker` / `ModelChecker`: typed checker front door と compatibility façade (`nirvash-check`)
+- `ExplicitModelChecker` / `SymbolicModelChecker`: typed checker front door (`nirvash-check`)
 - `RelAtom` / `RelSet<T>` / `Relation2<A, B>`: relational kernel
 - `TransitionProgram`: frontend DSL の遷移記述 surface
 - `FrontendSpec` / `LoweredSpec`: backend へ渡る lowering boundary
@@ -72,7 +72,7 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
 
 ```rust
 use nirvash::TransitionProgram;
-use nirvash_check::ModelChecker;
+use nirvash_check as checks;
 use nirvash_lower::{FrontendSpec, TemporalSpec};
 use nirvash_macros::{
     FiniteModelDomain as FormalFiniteModelDomain,
@@ -133,6 +133,8 @@ impl TemporalSpec for Spec {
 let spec = Spec::default();
 let mut lowering_cx = nirvash_lower::LoweringCx;
 let lowered = spec.lower(&mut lowering_cx).expect("spec lowers");
-let result = ModelChecker::new(&lowered).check_all().expect("checker runs");
+let result = checks::ExplicitModelChecker::new(&lowered)
+    .check_all()
+    .expect("checker runs");
 assert!(result.is_ok());
 ```

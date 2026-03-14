@@ -282,7 +282,7 @@ const _: () = ();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nirvash_check::ModelChecker;
+    use nirvash_check as checks;
 
     fn case_by_label(
         spec: &ManagerPlaneSpec,
@@ -319,12 +319,14 @@ mod tests {
         let explicit_case = bounded_parity_case(case_by_label(&spec, "explicit_boot_shutdown"));
         let symbolic_case = bounded_parity_case(case_by_label(&spec, "symbolic_boot_shutdown"));
 
-        let explicit_snapshot = ModelChecker::for_case(&lowered, explicit_case.clone())
-            .reachable_graph_snapshot()
-            .expect("explicit manager snapshot");
-        let symbolic_snapshot = ModelChecker::for_case(&lowered, symbolic_case.clone())
-            .reachable_graph_snapshot()
-            .expect("symbolic manager snapshot");
+        let explicit_snapshot =
+            checks::ExplicitModelChecker::for_case(&lowered, explicit_case.clone())
+                .reachable_graph_snapshot()
+                .expect("explicit manager snapshot");
+        let symbolic_snapshot =
+            checks::SymbolicModelChecker::for_case(&lowered, symbolic_case.clone())
+                .reachable_graph_snapshot()
+                .expect("symbolic manager snapshot");
         assert_eq!(symbolic_snapshot, explicit_snapshot);
     }
 }

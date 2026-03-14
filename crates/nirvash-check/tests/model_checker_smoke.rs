@@ -2,7 +2,7 @@ use nirvash::{
     CounterexampleKind, ExprDomain, GuardExpr, ModelBackend, ModelCheckConfig, ModelCheckError,
     SymbolicSort, TransitionProgram, TransitionRule, UpdateProgram,
 };
-use nirvash_check::{ExplicitModelChecker, ModelChecker, SymbolicModelChecker};
+use nirvash_check as checks;
 use nirvash_lower::{
     FiniteModelDomain, FrontendSpec, LoweringCx, ModelInstance, SymbolicEncoding,
     SymbolicStateSchema, TemporalSpec,
@@ -1019,7 +1019,7 @@ impl TemporalSpec for MissingFairnessReadPathSpec {
 #[test]
 fn explicit_snapshot_exposes_states_and_edges() {
     let lowered = lower_spec(&Spec);
-    let snapshot = ModelChecker::new(&lowered)
+    let snapshot = checks::ExplicitModelChecker::new(&lowered)
         .reachable_graph_snapshot()
         .expect("reachable graph should build");
 
@@ -1031,9 +1031,9 @@ fn explicit_snapshot_exposes_states_and_edges() {
 }
 
 #[test]
-fn deadlocks_are_reported_by_frontdoor_checker() {
+fn deadlocks_are_reported_by_explicit_checker() {
     let lowered = lower_spec(&DeadlockSpec);
-    let result = ModelChecker::new(&lowered)
+    let result = checks::ExplicitModelChecker::new(&lowered)
         .check_deadlocks()
         .expect("deadlock check should run");
 
@@ -1042,25 +1042,25 @@ fn deadlocks_are_reported_by_frontdoor_checker() {
 }
 
 #[test]
-fn explicit_typed_checker_matches_frontdoor_checker() {
+fn explicit_checker_builds_expected_snapshot_and_properties() {
     let lowered = lower_spec(&ChoicePropertySpec);
-    let expected_snapshot = ModelChecker::new(&lowered)
+    let expected_snapshot = checks::ExplicitModelChecker::new(&lowered)
         .full_reachable_graph_snapshot()
-        .expect("frontdoor explicit snapshot should build");
-    let actual_snapshot = ExplicitModelChecker::new(&lowered)
+        .expect("explicit snapshot should build");
+    let actual_snapshot = checks::ExplicitModelChecker::new(&lowered)
         .full_reachable_graph_snapshot()
-        .expect("typed explicit snapshot should build");
+        .expect("explicit snapshot should build");
 
     assert_eq!(actual_snapshot, expected_snapshot);
 
     let expected_properties =
-        ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+        checks::ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
             .check_properties()
-            .expect("frontdoor explicit property check should run");
+            .expect("explicit property check should run");
     let actual_properties =
-        ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+        checks::ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
             .check_properties()
-            .expect("typed explicit property check should run");
+            .expect("explicit property check should run");
 
     assert_eq!(actual_properties, expected_properties);
 }
@@ -1068,7 +1068,7 @@ fn explicit_typed_checker_matches_frontdoor_checker() {
 #[test]
 fn symbolic_backend_rejects_specs_without_transition_program() {
     let lowered = lower_spec(&NoProgramSchemaSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1158,10 +1158,10 @@ fn step_pure_call_symbolic_state_paths_include_receiver_paths() {
 #[test]
 fn symbolic_backend_matches_explicit_snapshot_for_manual_whole_state_updates() {
     let lowered = lower_spec(&ManualSchemaSpec);
-    let explicit = ModelChecker::new(&lowered)
+    let explicit = checks::ExplicitModelChecker::new(&lowered)
         .full_reachable_graph_snapshot()
         .expect("explicit snapshot should build");
-    let symbolic = ModelChecker::with_config(
+    let symbolic = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1177,10 +1177,10 @@ fn symbolic_backend_matches_explicit_snapshot_for_manual_whole_state_updates() {
 #[test]
 fn symbolic_backend_matches_explicit_snapshot_for_choice_updates() {
     let lowered = lower_spec(&ChoiceSchemaSpec);
-    let explicit = ModelChecker::new(&lowered)
+    let explicit = checks::ExplicitModelChecker::new(&lowered)
         .full_reachable_graph_snapshot()
         .expect("explicit snapshot should build");
-    let symbolic = ModelChecker::with_config(
+    let symbolic = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1194,14 +1194,18 @@ fn symbolic_backend_matches_explicit_snapshot_for_choice_updates() {
 }
 
 #[test]
-fn symbolic_typed_checker_matches_frontdoor_checker() {
+fn symbolic_checker_matches_explicit_snapshot_and_properties() {
     let lowered = lower_spec(&ChoicePropertySpec);
     let config = ModelCheckConfig {
         backend: Some(ModelBackend::Symbolic),
         ..ModelCheckConfig::bounded_lasso(3)
     };
 
-    let expected_snapshot = ModelChecker::with_config(
+    let expected_snapshot =
+        checks::ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+            .full_reachable_graph_snapshot()
+            .expect("explicit snapshot should build");
+    let actual_snapshot = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1209,25 +1213,17 @@ fn symbolic_typed_checker_matches_frontdoor_checker() {
         },
     )
     .full_reachable_graph_snapshot()
-    .expect("frontdoor symbolic snapshot should build");
-    let actual_snapshot = SymbolicModelChecker::with_config(
-        &lowered,
-        ModelCheckConfig {
-            backend: Some(ModelBackend::Symbolic),
-            ..ModelCheckConfig::reachable_graph()
-        },
-    )
-    .full_reachable_graph_snapshot()
-    .expect("typed symbolic snapshot should build");
+    .expect("symbolic snapshot should build");
 
     assert_eq!(actual_snapshot, expected_snapshot);
 
-    let expected_properties = ModelChecker::with_config(&lowered, config.clone())
+    let expected_properties =
+        checks::ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("explicit property check should run");
+    let actual_properties = checks::SymbolicModelChecker::with_config(&lowered, config)
         .check_properties()
-        .expect("frontdoor symbolic property check should run");
-    let actual_properties = SymbolicModelChecker::with_config(&lowered, config)
-        .check_properties()
-        .expect("typed symbolic property check should run");
+        .expect("symbolic property check should run");
 
     assert_eq!(actual_properties, expected_properties);
 }
@@ -1235,10 +1231,11 @@ fn symbolic_typed_checker_matches_frontdoor_checker() {
 #[test]
 fn symbolic_bounded_lasso_matches_explicit_for_choice_property_violation() {
     let lowered = lower_spec(&ChoicePropertySpec);
-    let explicit = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
-        .check_properties()
-        .expect("explicit bounded lasso should run");
-    let symbolic = ModelChecker::with_config(
+    let explicit =
+        checks::ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("explicit bounded lasso should run");
+    let symbolic = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1256,10 +1253,11 @@ fn symbolic_bounded_lasso_matches_explicit_for_choice_property_violation() {
 #[test]
 fn symbolic_bounded_lasso_matches_explicit_for_choice_fairness_and_enabled() {
     let lowered = lower_spec(&ChoiceFairnessSpec);
-    let explicit = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
-        .check_properties()
-        .expect("explicit bounded lasso should run");
-    let symbolic = ModelChecker::with_config(
+    let explicit =
+        checks::ExplicitModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(3))
+            .check_properties()
+            .expect("explicit bounded lasso should run");
+    let symbolic = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1276,7 +1274,7 @@ fn symbolic_bounded_lasso_matches_explicit_for_choice_fairness_and_enabled() {
 #[test]
 fn symbolic_backend_rejects_states_without_symbolic_encoding() {
     let lowered = lower_spec(&MissingSchemaSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1296,7 +1294,7 @@ fn symbolic_backend_rejects_states_without_symbolic_encoding() {
 #[test]
 fn symbolic_backend_rejects_missing_read_paths_in_state_constraints() {
     let lowered = lower_spec(&MissingReadPathSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1317,7 +1315,7 @@ fn symbolic_backend_rejects_missing_read_paths_in_state_constraints() {
 #[test]
 fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
     let lowered = lower_spec(&PanicDomainSpec);
-    let snapshot = ModelChecker::with_config(
+    let snapshot = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1335,7 +1333,7 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
         ]
     );
     assert!(
-        ModelChecker::with_config(
+        checks::SymbolicModelChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -1347,7 +1345,7 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
         .is_ok()
     );
     assert!(
-        ModelChecker::with_config(
+        checks::SymbolicModelChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -1363,7 +1361,7 @@ fn symbolic_reachable_graph_does_not_call_state_bounded_domain() {
 #[test]
 fn symbolic_typed_checker_works_without_state_finite_model_domain() {
     let lowered = lower_symbolic_spec(&SymbolicOnlySpec);
-    let snapshot = SymbolicModelChecker::with_config(
+    let snapshot = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1381,7 +1379,7 @@ fn symbolic_typed_checker_works_without_state_finite_model_domain() {
         ]
     );
     assert!(
-        SymbolicModelChecker::with_config(
+        checks::SymbolicModelChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -1398,7 +1396,7 @@ fn symbolic_typed_checker_works_without_state_finite_model_domain() {
 fn symbolic_bounded_lasso_does_not_call_state_bounded_domain() {
     let lowered = lower_spec(&PanicDomainSpec);
     assert!(
-        ModelChecker::with_config(
+        checks::SymbolicModelChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -1414,7 +1412,7 @@ fn symbolic_bounded_lasso_does_not_call_state_bounded_domain() {
 #[test]
 fn symbolic_reachable_graph_rejects_registered_effect_updates() {
     let lowered = lower_spec(&RegisteredEffectSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1434,7 +1432,7 @@ fn symbolic_reachable_graph_rejects_registered_effect_updates() {
 #[test]
 fn symbolic_backend_rejects_missing_program_read_path_in_state_schema() {
     let lowered = lower_spec(&MissingProgramReadPathSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1455,7 +1453,7 @@ fn symbolic_backend_rejects_missing_program_read_path_in_state_schema() {
 #[test]
 fn symbolic_backend_rejects_missing_invariant_read_path_in_state_schema() {
     let lowered = lower_spec(&MissingInvariantReadPathSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1476,7 +1474,7 @@ fn symbolic_backend_rejects_missing_invariant_read_path_in_state_schema() {
 #[test]
 fn symbolic_backend_rejects_missing_property_read_path_in_state_schema() {
     let lowered = lower_spec(&MissingPropertyReadPathSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),
@@ -1497,7 +1495,7 @@ fn symbolic_backend_rejects_missing_property_read_path_in_state_schema() {
 #[test]
 fn symbolic_backend_rejects_missing_fairness_read_path_in_state_schema() {
     let lowered = lower_spec(&MissingFairnessReadPathSpec);
-    let err = ModelChecker::with_config(
+    let err = checks::SymbolicModelChecker::with_config(
         &lowered,
         ModelCheckConfig {
             backend: Some(ModelBackend::Symbolic),

@@ -760,23 +760,6 @@ where
     );
 }
 
-pub fn assert_step_refinement<Spec>(
-    spec: &Spec,
-    before_summary: &Spec::SummaryState,
-    action: &Spec::Action,
-    after_summary: &Spec::SummaryState,
-) -> Spec::State
-where
-    Spec: ProtocolConformanceSpec,
-    Spec::State: PartialEq,
-{
-    step_refines_summary(spec, before_summary, action, after_summary)
-        .unwrap_or_else(|error| {
-            panic!("step refinement failed for {action:?} from {before_summary:?}: {error}")
-        })
-        .abstract_after
-}
-
 pub fn assert_output_refinement<Spec>(
     spec: &Spec,
     before_summary: &Spec::SummaryState,
@@ -1754,15 +1737,7 @@ mod tests {
                 abstract_after: DemoState::Next,
             }
         );
-        assert_eq!(
-            assert_step_refinement(
-                &spec,
-                &DemoState::Start,
-                &DemoAction::Advance,
-                &DemoState::Next,
-            ),
-            DemoState::Next
-        );
+        assert_eq!(witness.abstract_after, DemoState::Next);
     }
 
     #[test]

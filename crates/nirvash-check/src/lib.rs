@@ -6,18 +6,6 @@ pub use nirvash_lower::{
 
 type TraceVec<T> = Vec<Trace<<T as CheckerSpec>::State, <T as CheckerSpec>::Action>>;
 
-fn first_model_case<T: CheckerSpec>(spec: &T) -> ModelInstance<T::State, T::Action> {
-    spec.model_instances()
-        .into_iter()
-        .next()
-        .unwrap_or_default()
-}
-
-fn resolved_default_backend<T: CheckerSpec>(spec: &T) -> ModelBackend {
-    spec.default_model_backend()
-        .unwrap_or(ModelBackend::Explicit)
-}
-
 pub struct ExplicitModelChecker<'a, T: CheckerSpec>(nirvash_backends::ExplicitModelChecker<'a, T>);
 
 impl<'a, T> ExplicitModelChecker<'a, T>
@@ -160,137 +148,6 @@ where
     }
 }
 
-pub struct ModelChecker<'a, T: CheckerSpec> {
-    spec: &'a T,
-    model_case: ModelInstance<T::State, T::Action>,
-}
-
-impl<'a, T> ModelChecker<'a, T>
-where
-    T: CheckerSpec,
-    T::State: PartialEq + FiniteModelDomain + Send + Sync,
-    T::Action: PartialEq + Send + Sync,
-{
-    pub fn new(spec: &'a T) -> Self {
-        Self::for_case(spec, first_model_case(spec))
-    }
-
-    pub fn for_case(spec: &'a T, model_case: ModelInstance<T::State, T::Action>) -> Self {
-        Self {
-            spec,
-            model_case: model_case.with_resolved_backend(resolved_default_backend(spec)),
-        }
-    }
-
-    pub fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
-        let check_deadlocks = config.check_deadlocks;
-        let backend = config
-            .backend
-            .or(spec.default_model_backend())
-            .unwrap_or(ModelBackend::Explicit);
-        let model_case = first_model_case(spec)
-            .with_checker_config(ModelCheckConfig {
-                backend: Some(backend),
-                ..config
-            })
-            .with_check_deadlocks(check_deadlocks)
-            .with_resolved_backend(backend);
-        Self { spec, model_case }
-    }
-
-    fn explicit_checker(&self) -> ExplicitModelChecker<'a, T> {
-        ExplicitModelChecker::for_case(self.spec, self.model_case.clone())
-    }
-
-    fn symbolic_checker(&self) -> SymbolicModelChecker<'a, T> {
-        SymbolicModelChecker::for_case(self.spec, self.model_case.clone())
-    }
-
-    pub fn reachable_graph_snapshot(
-        &self,
-    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        match self.doc_backend() {
-            ModelBackend::Explicit => self.explicit_checker().reachable_graph_snapshot(),
-            ModelBackend::Symbolic => self.symbolic_checker().reachable_graph_snapshot(),
-        }
-    }
-
-    pub fn full_reachable_graph_snapshot(
-        &self,
-    ) -> Result<ReachableGraphSnapshot<T::State, T::Action>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().full_reachable_graph_snapshot(),
-            ModelBackend::Symbolic => self.symbolic_checker().full_reachable_graph_snapshot(),
-        }
-    }
-
-    pub fn check_invariants(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().check_invariants(),
-            ModelBackend::Symbolic => self.symbolic_checker().check_invariants(),
-        }
-    }
-
-    pub fn check_deadlocks(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().check_deadlocks(),
-            ModelBackend::Symbolic => self.symbolic_checker().check_deadlocks(),
-        }
-    }
-
-    pub fn check_properties(
-        &self,
-    ) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().check_properties(),
-            ModelBackend::Symbolic => self.symbolic_checker().check_properties(),
-        }
-    }
-
-    pub fn check_all(&self) -> Result<ModelCheckResult<T::State, T::Action>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().check_all(),
-            ModelBackend::Symbolic => self.symbolic_checker().check_all(),
-        }
-    }
-
-    pub fn simulate(&self) -> Result<TraceVec<T>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().simulate(),
-            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
-                "simulation is only supported by the explicit backend",
-            )),
-        }
-    }
-
-    pub fn candidate_traces(&self) -> Result<TraceVec<T>, ModelCheckError> {
-        match self.backend() {
-            ModelBackend::Explicit => self.explicit_checker().candidate_traces(),
-            ModelBackend::Symbolic => Err(ModelCheckError::UnsupportedConfiguration(
-                "candidate trace enumeration is only supported by the explicit backend",
-            )),
-        }
-    }
-
-    pub fn backend(&self) -> ModelBackend {
-        self.model_case
-            .effective_checker_config()
-            .backend
-            .unwrap_or(ModelBackend::Explicit)
-    }
-
-    pub fn doc_backend(&self) -> ModelBackend {
-        self.model_case
-            .doc_checker_config()
-            .and_then(|config| config.backend)
-            .unwrap_or(self.backend())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -299,7 +156,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::ModelChecker;
+    use crate as subject;
     use crate::CounterexampleKind;
     use nirvash::{
         BoolExpr, CounterexampleMinimization, ExplicitCheckpointOptions,
@@ -319,6 +176,138 @@ mod tests {
         FiniteModelDomain as FormalFiniteModelDomain, SymbolicEncoding as FormalSymbolicEncoding,
         nirvash_transition_program,
     };
+
+    enum TestChecker<'a, T: subject::CheckerSpec>
+    where
+        T::State: PartialEq + subject::FiniteModelDomain + Send + Sync + 'static,
+        T::Action: PartialEq + Send + Sync + 'static,
+    {
+        Explicit(subject::ExplicitModelChecker<'a, T>),
+        Symbolic(subject::SymbolicModelChecker<'a, T>),
+    }
+
+    impl<'a, T> TestChecker<'a, T>
+    where
+        T: subject::CheckerSpec,
+        T::State: PartialEq + subject::FiniteModelDomain + Send + Sync + 'static,
+        T::Action: PartialEq + Send + Sync + 'static,
+    {
+        fn with_config(spec: &'a T, config: ModelCheckConfig) -> Self {
+            match config.backend.unwrap_or(
+                spec.default_model_backend()
+                    .unwrap_or(ModelBackend::Explicit),
+            ) {
+                ModelBackend::Explicit => {
+                    Self::Explicit(subject::ExplicitModelChecker::with_config(spec, config))
+                }
+                ModelBackend::Symbolic => {
+                    Self::Symbolic(subject::SymbolicModelChecker::with_config(spec, config))
+                }
+            }
+        }
+
+        fn for_case(
+            spec: &'a T,
+            model_case: ModelInstance<
+                <T as subject::CheckerSpec>::State,
+                <T as subject::CheckerSpec>::Action,
+            >,
+        ) -> Self {
+            let resolved_model_case = model_case.with_resolved_backend(
+                spec.default_model_backend()
+                    .unwrap_or(ModelBackend::Explicit),
+            );
+            match resolved_model_case
+                .effective_checker_config()
+                .backend
+                .unwrap_or(ModelBackend::Explicit)
+            {
+                ModelBackend::Explicit => Self::Explicit(subject::ExplicitModelChecker::for_case(
+                    spec,
+                    resolved_model_case,
+                )),
+                ModelBackend::Symbolic => Self::Symbolic(subject::SymbolicModelChecker::for_case(
+                    spec,
+                    resolved_model_case,
+                )),
+            }
+        }
+
+        fn full_reachable_graph_snapshot(
+            &self,
+        ) -> Result<subject::ReachableGraphSnapshot<T::State, T::Action>, subject::ModelCheckError>
+        {
+            match self {
+                Self::Explicit(checker) => checker.full_reachable_graph_snapshot(),
+                Self::Symbolic(checker) => checker.full_reachable_graph_snapshot(),
+            }
+        }
+
+        fn check_invariants(
+            &self,
+        ) -> Result<subject::ModelCheckResult<T::State, T::Action>, subject::ModelCheckError>
+        {
+            match self {
+                Self::Explicit(checker) => checker.check_invariants(),
+                Self::Symbolic(checker) => checker.check_invariants(),
+            }
+        }
+
+        fn check_deadlocks(
+            &self,
+        ) -> Result<subject::ModelCheckResult<T::State, T::Action>, subject::ModelCheckError>
+        {
+            match self {
+                Self::Explicit(checker) => checker.check_deadlocks(),
+                Self::Symbolic(checker) => checker.check_deadlocks(),
+            }
+        }
+
+        fn check_properties(
+            &self,
+        ) -> Result<subject::ModelCheckResult<T::State, T::Action>, subject::ModelCheckError>
+        {
+            match self {
+                Self::Explicit(checker) => checker.check_properties(),
+                Self::Symbolic(checker) => checker.check_properties(),
+            }
+        }
+
+        fn check_all(
+            &self,
+        ) -> Result<subject::ModelCheckResult<T::State, T::Action>, subject::ModelCheckError>
+        {
+            match self {
+                Self::Explicit(checker) => checker.check_all(),
+                Self::Symbolic(checker) => checker.check_all(),
+            }
+        }
+
+        fn simulate(&self) -> Result<crate::TraceVec<T>, subject::ModelCheckError> {
+            match self {
+                Self::Explicit(checker) => checker.simulate(),
+                Self::Symbolic(_) => Err(subject::ModelCheckError::UnsupportedConfiguration(
+                    "simulation requires the explicit backend",
+                )),
+            }
+        }
+
+        fn candidate_traces(&self) -> Result<crate::TraceVec<T>, subject::ModelCheckError> {
+            match self {
+                Self::Explicit(checker) => checker.candidate_traces(),
+                Self::Symbolic(_) => Err(subject::ModelCheckError::UnsupportedConfiguration(
+                    "candidate trace enumeration requires the explicit backend",
+                )),
+            }
+        }
+
+        fn backend(&self) -> ModelBackend {
+            match self {
+                Self::Explicit(checker) => checker.backend(),
+                Self::Symbolic(checker) => checker.backend(),
+            }
+        }
+    }
 
     macro_rules! frontend_name {
         () => {
@@ -621,7 +610,7 @@ mod tests {
     fn symbolic_backend_accepts_structural_quantifiers() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let checker = ModelChecker::with_config(
+        let checker = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -650,7 +639,7 @@ mod tests {
             .transition_program()
             .expect("option spec should expose a transition program");
         let lowered = lower_spec(&spec);
-        let checker = ModelChecker::with_config(
+        let checker = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -702,7 +691,7 @@ mod tests {
     fn symbolic_k_induction_proves_invariant_without_graph_exploration() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let result = ModelChecker::with_config(
+        let result = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -724,7 +713,7 @@ mod tests {
     fn symbolic_pdr_proves_invariant_without_graph_exploration() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let result = ModelChecker::with_config(
+        let result = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -746,7 +735,7 @@ mod tests {
     fn symbolic_k_induction_finds_invariant_counterexample() {
         let spec = UnsafeInvariantSpec;
         let lowered = lower_spec(&spec);
-        let result = ModelChecker::with_config(
+        let result = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -773,7 +762,7 @@ mod tests {
     fn symbolic_pdr_finds_invariant_counterexample() {
         let spec = UnsafeInvariantSpec;
         let lowered = lower_spec(&spec);
-        let result = ModelChecker::with_config(
+        let result = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -800,7 +789,7 @@ mod tests {
     fn symbolic_bmc_finds_deadlock_without_bridge_graph() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let result = ModelChecker::with_config(
+        let result = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -823,7 +812,7 @@ mod tests {
     fn symbolic_liveness_to_safety_matches_bounded_lasso() {
         let spec = SymbolicTemporalSpec;
         let lowered = lower_spec(&spec);
-        let bounded_lasso = ModelChecker::with_config(
+        let bounded_lasso = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -836,7 +825,7 @@ mod tests {
         )
         .check_properties()
         .expect("bounded lasso should check symbolic temporal properties");
-        let liveness_to_safety = ModelChecker::with_config(
+        let liveness_to_safety = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -1142,13 +1131,13 @@ mod tests {
             .with_simulation(ExplicitSimulationOptions::new(2, 4, 1));
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let left_run = ModelChecker::with_config(&lowered, config.clone())
+        let left_run = TestChecker::with_config(&lowered, config.clone())
             .simulate()
             .expect("explicit simulation should run");
-        let left_run_again = ModelChecker::with_config(&lowered, config)
+        let left_run_again = TestChecker::with_config(&lowered, config)
             .simulate()
             .expect("explicit simulation should be reproducible");
-        let right_run = ModelChecker::with_config(
+        let right_run = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
@@ -1172,7 +1161,7 @@ mod tests {
     fn explicit_candidate_traces_include_terminal_and_looping_paths() {
         let spec = CandidateTraceSpec;
         let lowered = lower_spec(&spec);
-        let traces = ModelChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(2))
+        let traces = TestChecker::with_config(&lowered, ModelCheckConfig::bounded_lasso(2))
             .candidate_traces()
             .expect("explicit candidate traces should enumerate");
 
@@ -1196,10 +1185,10 @@ mod tests {
     fn explicit_reachable_graph_matches_fingerprinted_storage() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+        let exact = TestChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
-        let fingerprinted = ModelChecker::with_config(
+        let fingerprinted = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
@@ -1216,10 +1205,10 @@ mod tests {
     fn explicit_reachable_graph_matches_domain_index_compression() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+        let exact = TestChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
-        let compressed = ModelChecker::with_config(
+        let compressed = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
@@ -1242,10 +1231,10 @@ mod tests {
         );
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let first = ModelChecker::with_config(&lowered, config.clone())
+        let first = TestChecker::with_config(&lowered, config.clone())
             .full_reachable_graph_snapshot()
             .expect("checkpointed snapshot");
-        let second = ModelChecker::with_config(&lowered, config)
+        let second = TestChecker::with_config(&lowered, config)
             .full_reachable_graph_snapshot()
             .expect("resumed checkpointed snapshot");
 
@@ -1266,10 +1255,10 @@ mod tests {
             ));
         let config = ModelCheckConfig::reachable_graph().with_explicit_options(explicit);
 
-        let first = ModelChecker::with_config(&lowered, config.clone())
+        let first = TestChecker::with_config(&lowered, config.clone())
             .full_reachable_graph_snapshot()
             .expect("checkpointed compressed snapshot");
-        let second = ModelChecker::with_config(&lowered, config)
+        let second = TestChecker::with_config(&lowered, config)
             .full_reachable_graph_snapshot()
             .expect("resumed checkpointed compressed snapshot");
 
@@ -1282,10 +1271,10 @@ mod tests {
     fn explicit_reachable_graph_matches_parallel_frontier_strategy() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+        let exact = TestChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
-        let parallel = ModelChecker::with_config(
+        let parallel = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
@@ -1303,10 +1292,10 @@ mod tests {
     fn explicit_reachable_graph_matches_distributed_frontier_strategy() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+        let exact = TestChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
-        let distributed = ModelChecker::with_config(
+        let distributed = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph().with_explicit_options(
                 nirvash::ExplicitModelCheckOptions::current()
@@ -1324,10 +1313,10 @@ mod tests {
     fn explicit_view_abstraction_collapses_equivalent_states() {
         let spec = SimulationSpec;
         let lowered = lower_spec(&spec);
-        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+        let exact = TestChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
-        let reduced = ModelChecker::for_case(
+        let reduced = TestChecker::for_case(
             &lowered,
             ModelInstance::new("collapse_pending").with_heuristic_reduction(
                 HeuristicReduction::new().with_state_projection(HeuristicStateProjection::new(
@@ -1357,10 +1346,10 @@ mod tests {
     fn explicit_partial_order_reduction_prunes_action_branches() {
         let spec = CounterexampleSpec;
         let lowered = lower_spec(&spec);
-        let exact = ModelChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
+        let exact = TestChecker::with_config(&lowered, ModelCheckConfig::reachable_graph())
             .full_reachable_graph_snapshot()
             .expect("exact storage snapshot");
-        let reduced = ModelChecker::for_case(
+        let reduced = TestChecker::for_case(
             &lowered,
             ModelInstance::new("prefer_short_path").with_heuristic_reduction(
                 HeuristicReduction::new().with_action_pruning(HeuristicActionPruning::new(
@@ -1413,10 +1402,10 @@ mod tests {
             ),
         );
 
-        let snapshot = ModelChecker::for_case(&lowered, model_case.clone())
+        let snapshot = TestChecker::for_case(&lowered, model_case.clone())
             .full_reachable_graph_snapshot()
             .expect("sound-reduced snapshot");
-        let result = ModelChecker::for_case(&lowered, model_case)
+        let result = TestChecker::for_case(&lowered, model_case)
             .check_all()
             .expect("sound-reduced check");
 
@@ -1441,7 +1430,7 @@ mod tests {
                 |_state: &SimulationState| true,
             ));
 
-        let err = ModelChecker::for_case(&lowered, model_case)
+        let err = TestChecker::for_case(&lowered, model_case)
             .full_reachable_graph_snapshot()
             .unwrap_err();
 
@@ -1456,7 +1445,7 @@ mod tests {
     fn symbolic_backend_rejects_view_abstraction() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let err = ModelChecker::for_case(
+        let err = TestChecker::for_case(
             &lowered,
             ModelInstance::new("symbolic_view")
                 .with_checker_config(ModelCheckConfig {
@@ -1484,7 +1473,7 @@ mod tests {
     fn symbolic_backend_rejects_partial_order_reduction() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let err = ModelChecker::for_case(
+        let err = TestChecker::for_case(
             &lowered,
             ModelInstance::new("symbolic_por")
                 .with_checker_config(ModelCheckConfig {
@@ -1515,7 +1504,7 @@ mod tests {
     fn symbolic_backend_rejects_sound_reduction() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let err = ModelChecker::for_case(
+        let err = TestChecker::for_case(
             &lowered,
             ModelInstance::new("symbolic_sound_reduction")
                 .with_checker_config(ModelCheckConfig {
@@ -1554,14 +1543,14 @@ mod tests {
     fn counterexample_minimization_prefers_shorter_property_trace() {
         let spec = CounterexampleSpec;
         let lowered = lower_spec(&spec);
-        let without = ModelChecker::with_config(
+        let without = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph()
                 .with_counterexample_minimization(CounterexampleMinimization::None),
         )
         .check_properties()
         .expect("property check should run");
-        let with = ModelChecker::with_config(
+        let with = TestChecker::with_config(
             &lowered,
             ModelCheckConfig::reachable_graph()
                 .with_counterexample_minimization(CounterexampleMinimization::ShortestTrace),
@@ -1587,7 +1576,7 @@ mod tests {
     fn symbolic_backend_rejects_simulation_mode() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let err = ModelChecker::with_config(
+        let err = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
@@ -1608,7 +1597,7 @@ mod tests {
     fn symbolic_backend_rejects_candidate_trace_enumeration() {
         let spec = StructuralQuantifierSpec;
         let lowered = lower_spec(&spec);
-        let err = ModelChecker::with_config(
+        let err = TestChecker::with_config(
             &lowered,
             ModelCheckConfig {
                 backend: Some(ModelBackend::Symbolic),
