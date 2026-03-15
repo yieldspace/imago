@@ -124,13 +124,13 @@ pub struct NormalizedFragmentInfo {
 
 pub trait RuntimeBinding<Spec: SpecOracle>: Sized {
     type Sut;
-    type Fixture: Clone + Send + Sync + 'static;
+    type Fixture: Send + Sync + 'static;
     type Output: Clone + Debug + Send + Sync + 'static;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn create(fixture: &Self::Fixture) -> Result<Self::Sut, Self::Error>;
+    fn create(fixture: Self::Fixture) -> Result<Self::Sut, Self::Error>;
 
-    fn reset(sut: &mut Self::Sut, fixture: &Self::Fixture) -> Result<(), Self::Error> {
+    fn reset(sut: &mut Self::Sut, fixture: Self::Fixture) -> Result<(), Self::Error> {
         *sut = Self::create(fixture)?;
         Ok(())
     }
@@ -274,6 +274,7 @@ pub trait ProtocolInputWitnessCodec<Action>: Clone + Debug {
 }
 
 pub type SharedFixtureValue = Arc<dyn Any + Send + Sync>;
+type SharedFixtureFactory = Arc<dyn Fn() -> SharedFixtureValue + Send + Sync + 'static>;
 
 pub trait SnapshotFixture: Sized {
     fn from_snapshot(value: &Value) -> Result<Self, HarnessError>;
@@ -288,6 +289,39 @@ where
             HarnessError::Binding(format!("failed to decode fixture snapshot: {error}"))
         })
     }
+}
+
+struct SnapshotFixtureProbe<T>(PhantomData<T>);
+
+trait MaybeDecodeSnapshotFixture<T> {
+    fn decode(self, value: &Value) -> Option<Result<T, HarnessError>>;
+}
+
+impl<T> MaybeDecodeSnapshotFixture<T> for &SnapshotFixtureProbe<T>
+where
+    T: SnapshotFixture,
+{
+    fn decode(self, value: &Value) -> Option<Result<T, HarnessError>> {
+        let _ = self;
+        Some(T::from_snapshot(value))
+    }
+}
+
+impl<T> MaybeDecodeSnapshotFixture<T> for &&SnapshotFixtureProbe<T> {
+    fn decode(self, _value: &Value) -> Option<Result<T, HarnessError>> {
+        let _ = self;
+        None
+    }
+}
+
+pub fn decode_snapshot_fixture<T>(value: &Value) -> Result<T, HarnessError> {
+    (&SnapshotFixtureProbe::<T>(PhantomData))
+        .decode(value)
+        .unwrap_or_else(|| {
+            Err(HarnessError::Binding(
+                "snapshot fixture replay requires a deserializable fixture type".to_owned(),
+            ))
+        })
 }
 
 struct DefaultFixtureProbe<T>(PhantomData<T>);
@@ -322,7 +356,7 @@ pub enum FixtureSeed {
     Default,
     Factory(fn() -> SharedFixtureValue),
     Snapshot(Value),
-    Value(SharedFixtureValue),
+    Value(SharedFixtureFactory),
 }
 
 impl Debug for FixtureSeed {
@@ -388,7 +422,7 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.fixture = FixtureSeed::Value(Arc::new(fixture));
+        self.fixture = FixtureSeed::Value(Arc::new(move || Arc::new(fixture.clone())));
         self
     }
 
@@ -516,7 +550,9 @@ where
     where
         T: Clone + Send + Sync + 'static,
     {
-        self.fixture = Some(FixtureSeed::Value(Arc::new(fixture)));
+        self.fixture = Some(FixtureSeed::Value(Arc::new(move || {
+            Arc::new(fixture.clone())
+        })));
         self
     }
 
@@ -1678,6 +1714,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GeneratedSpecMetadata {
     pub spec_name: &'static str,
+    pub spec_slug: &'static str,
     pub export_module: &'static str,
     pub crate_package: &'static str,
     pub crate_manifest_dir: &'static str,
@@ -2315,14 +2352,14 @@ struct ConcurrentExecution<S, A, Output> {
 
 pub fn replay_bundle_path(
     artifact_dir: &ArtifactDirPolicy,
-    spec_name: &str,
+    spec_slug: &str,
     profile: &str,
     engine: &str,
     suffix: &str,
 ) -> PathBuf {
     artifact_dir.base.join("replay").join(format!(
         "{}_{}_{}_{}",
-        sanitize_path(spec_name),
+        sanitize_path(spec_slug),
         sanitize_path(profile),
         sanitize_path(engine),
         suffix
@@ -2331,7 +2368,7 @@ pub fn replay_bundle_path(
 
 pub fn write_replay_bundle<S, A, Output>(
     artifact_dir: &ArtifactDirPolicy,
-    spec_name: &str,
+    spec_slug: &str,
     profile: &str,
     engine: &str,
     bundle: &GeneratedReplayBundle<S, A, Output>,
@@ -2343,7 +2380,7 @@ where
 {
     write_serialized_replay_bundle(
         artifact_dir,
-        spec_name,
+        spec_slug,
         profile,
         engine,
         bundle,
@@ -2353,7 +2390,7 @@ where
 
 fn write_serialized_replay_bundle<S, A, Output>(
     artifact_dir: &ArtifactDirPolicy,
-    spec_name: &str,
+    spec_slug: &str,
     profile: &str,
     engine: &str,
     bundle: &impl Serialize,
@@ -2368,8 +2405,8 @@ where
     fs::create_dir_all(&replay_dir).map_err(|error| {
         HarnessError::Artifact(format!("failed to create replay directory: {error}"))
     })?;
-    let json_path = replay_bundle_path(artifact_dir, spec_name, profile, engine, "bundle.json");
-    let ndjson_path = replay_bundle_path(artifact_dir, spec_name, profile, engine, "bundle.ndjson");
+    let json_path = replay_bundle_path(artifact_dir, spec_slug, profile, engine, "bundle.json");
+    let ndjson_path = replay_bundle_path(artifact_dir, spec_slug, profile, engine, "bundle.ndjson");
     fs::write(
         &json_path,
         serde_json::to_vec_pretty(bundle).map_err(|error| {
@@ -2402,7 +2439,7 @@ where
 pub fn replay_action_trace<Spec, Binding>(
     spec: &Spec,
     action_trace: &ObservedActionTrace<Spec::State, Spec::Action, Spec::ExpectedOutput>,
-    fixture: &Binding::Fixture,
+    fixture: Binding::Fixture,
 ) -> Result<(), HarnessError>
 where
     Spec: SpecOracle,
@@ -2638,10 +2675,10 @@ where
     } else {
         Vec::new()
     };
-    let initial_fixture = resolve_fixture::<Binding, Spec>(&profile.seeds)?;
     let mut rng = Lcg::new(profile.seeds.environment.rng_seed);
     for _case_index in 0..cases {
-        let mut sut = Binding::create(&initial_fixture)
+        let fixture = resolve_fixture::<Binding, Spec>(&profile.seeds)?;
+        let mut sut = Binding::create(fixture)
             .map_err(|error| HarnessError::Binding(format!("failed to create runtime: {error}")))?;
         let mut env = profile.seeds.environment.clone();
         let initial = Binding::project(&sut);
@@ -3258,7 +3295,7 @@ where
     Binding: GeneratedBinding<Spec>,
 {
     let fixture = resolve_fixture::<Binding, Spec>(seeds)?;
-    let mut sut = Binding::create(&fixture)
+    let mut sut = Binding::create(fixture)
         .map_err(|error| HarnessError::Binding(format!("failed to create runtime: {error}")))?;
     let mut env = seeds.environment.clone();
     let mut before = Binding::project(&sut);
@@ -3315,7 +3352,7 @@ where
     Binding: GeneratedBinding<Spec>,
 {
     let fixture = resolve_fixture::<Binding, Spec>(seeds)?;
-    let mut sut = Binding::create(&fixture)
+    let mut sut = Binding::create(fixture)
         .map_err(|error| HarnessError::Binding(format!("failed to create runtime: {error}")))?;
     let mut env = seeds.environment.clone();
     let initial = Binding::project(&sut);
@@ -3453,7 +3490,7 @@ where
                 return;
             }
         };
-        let initial_sut = match Binding::create(&fixture) {
+        let initial_sut = match Binding::create(fixture) {
             Ok(sut) => sut,
             Err(error) => {
                 let mut slot = errors_run.lock().expect("loom error slot");
@@ -3652,7 +3689,7 @@ where
                     return;
                 }
             };
-            let initial_sut = match Binding::create(&fixture) {
+            let initial_sut = match Binding::create(fixture) {
                 Ok(sut) => sut,
                 Err(error) => {
                     let mut slot = errors_run.lock().expect("shuttle error slot");
@@ -3816,7 +3853,7 @@ where
     Binding: GeneratedBinding<Spec> + TraceBinding<Spec>,
 {
     let fixture = resolve_fixture::<Binding, Spec>(seeds)?;
-    let mut sut = Binding::create(&fixture)
+    let mut sut = Binding::create(fixture)
         .map_err(|error| HarnessError::Binding(format!("failed to create runtime: {error}")))?;
     let initial = Binding::project(&sut);
     let valid_initial_states = spec.initial_states();
@@ -3972,16 +4009,29 @@ where
     Binding: GeneratedBinding<Spec>,
 {
     match fixture_seed {
-        FixtureSeed::Value(value) => value
-            .as_ref()
-            .downcast_ref::<Binding::Fixture>()
-            .cloned()
-            .ok_or_else(|| HarnessError::Binding("fixture override had the wrong type".to_owned())),
+        FixtureSeed::Value(factory) => factory()
+            .downcast::<Binding::Fixture>()
+            .map_err(|_| HarnessError::Binding("fixture override had the wrong type".to_owned()))
+            .and_then(|value| {
+                Arc::into_inner(value).ok_or_else(|| {
+                    HarnessError::Binding(
+                        "fixture override returned a shared Arc; expected a fresh fixture value"
+                            .to_owned(),
+                    )
+                })
+            }),
         FixtureSeed::Factory(factory) => factory()
             .downcast::<Binding::Fixture>()
-            .map(|value| (*value).clone())
             .map_err(|_| {
                 HarnessError::Binding("fixture factory returned the wrong type".to_owned())
+            })
+            .and_then(|value| {
+                Arc::into_inner(value).ok_or_else(|| {
+                    HarnessError::Binding(
+                        "fixture factory returned a shared Arc; expected a fresh fixture value"
+                            .to_owned(),
+                    )
+                })
             }),
         FixtureSeed::Snapshot(value) => Binding::generated_snapshot_fixture(value),
         FixtureSeed::Default => Err(HarnessError::Binding(
@@ -4176,7 +4226,7 @@ where
         );
         let _ = write_serialized_replay_bundle(
             artifact_dir,
-            metadata.spec_name,
+            metadata.spec_slug,
             profile.label,
             engine,
             &normalized,
@@ -4185,7 +4235,7 @@ where
     } else {
         let _ = write_replay_bundle(
             artifact_dir,
-            metadata.spec_name,
+            metadata.spec_slug,
             profile.label,
             engine,
             &bundle,
@@ -4237,12 +4287,13 @@ where
     })?;
     let manifest_path = manifest_dir.join(format!(
         "{}__{}__{}.json",
-        sanitize_path(metadata.spec_name),
+        sanitize_path(metadata.spec_slug),
         sanitize_path(binding_name),
         sanitize_path(profile.label),
     ));
     let manifest = json!({
         "spec": metadata.spec_name,
+        "spec_slug": metadata.spec_slug,
         "spec_path": std::any::type_name::<Spec>(),
         "export_module": metadata.export_module,
         "crate_package": metadata.crate_package,
@@ -4283,7 +4334,7 @@ where
     })?;
     let path = replay_bundle_path(
         artifact_dir,
-        metadata.spec_name,
+        metadata.spec_slug,
         profile.label,
         "schedule",
         "json",
@@ -4490,8 +4541,8 @@ mod tests {
         type Output = DemoOutput;
         type Error = DemoError;
 
-        fn create(fixture: &Self::Fixture) -> Result<Self::Sut, Self::Error> {
-            Ok(fixture.clone())
+        fn create(fixture: Self::Fixture) -> Result<Self::Sut, Self::Error> {
+            Ok(fixture)
         }
 
         fn apply(
@@ -4631,8 +4682,8 @@ mod tests {
         type Output = DemoOutput;
         type Error = DemoError;
 
-        fn create(fixture: &Self::Fixture) -> Result<Self::Sut, Self::Error> {
-            let state = if *fixture == 0 {
+        fn create(fixture: Self::Fixture) -> Result<Self::Sut, Self::Error> {
+            let state = if fixture == 0 {
                 DemoState::Idle
             } else {
                 DemoState::Busy
@@ -4741,6 +4792,7 @@ mod tests {
         };
         let metadata = GeneratedSpecMetadata {
             spec_name: "DemoSpec",
+            spec_slug: "DemoSpec",
             export_module: "crate::generated",
             crate_package: "nirvash-conformance",
             crate_manifest_dir: env!("CARGO_MANIFEST_DIR"),
@@ -4772,6 +4824,7 @@ mod tests {
         };
         let metadata = GeneratedSpecMetadata {
             spec_name: "DemoSpec",
+            spec_slug: "DemoSpec",
             export_module: "crate::generated",
             crate_package: "nirvash-conformance",
             crate_manifest_dir: env!("CARGO_MANIFEST_DIR"),
@@ -4810,6 +4863,7 @@ mod tests {
         };
         let metadata = GeneratedSpecMetadata {
             spec_name: "DemoSpec",
+            spec_slug: "DemoSpec",
             export_module: "crate::generated",
             crate_package: "nirvash-conformance",
             crate_manifest_dir: env!("CARGO_MANIFEST_DIR"),
@@ -4858,6 +4912,7 @@ mod tests {
         };
         let metadata = GeneratedSpecMetadata {
             spec_name: "DemoSpec",
+            spec_slug: "DemoSpec",
             export_module: "crate::generated",
             crate_package: "nirvash-conformance",
             crate_manifest_dir: env!("CARGO_MANIFEST_DIR"),
@@ -5128,7 +5183,7 @@ mod tests {
             type Output = DemoOutput;
             type Error = DemoError;
 
-            fn create(_fixture: &Self::Fixture) -> Result<Self::Sut, Self::Error> {
+            fn create(_fixture: Self::Fixture) -> Result<Self::Sut, Self::Error> {
                 Ok(())
             }
 
@@ -5244,6 +5299,7 @@ mod tests {
         };
         let metadata = GeneratedSpecMetadata {
             spec_name: "DemoSpec",
+            spec_slug: "DemoSpec",
             export_module: "crate::generated",
             crate_package: "nirvash-conformance",
             crate_manifest_dir: env!("CARGO_MANIFEST_DIR"),

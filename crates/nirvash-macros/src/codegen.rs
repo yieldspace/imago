@@ -45,32 +45,27 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
         .iter()
         .map(|ident| ident.to_string())
         .collect::<Vec<_>>();
+    let spec_slug = stable_source_slug(item.span(), &spec_ident.to_string());
 
-    let hidden_all = format_ident!(
-        "__nirvash_generated_all_tests_{}",
-        spec_ident.to_string().to_lowercase()
-    );
-    let hidden_tests = format_ident!(
-        "__nirvash_generated_tests_{}",
-        spec_ident.to_string().to_lowercase()
-    );
+    let hidden_all = format_ident!("__nirvash_generated_all_tests_{}", spec_slug.to_lowercase());
+    let hidden_tests = format_ident!("__nirvash_generated_tests_{}", spec_slug.to_lowercase());
     let hidden_unit = format_ident!(
         "__nirvash_generated_unit_tests_{}",
-        spec_ident.to_string().to_lowercase()
+        spec_slug.to_lowercase()
     );
     let hidden_trace = format_ident!(
         "__nirvash_generated_trace_tests_{}",
-        spec_ident.to_string().to_lowercase()
+        spec_slug.to_lowercase()
     );
     let hidden_kani = format_ident!(
         "__nirvash_generated_kani_harnesses_{}",
-        spec_ident.to_string().to_lowercase()
+        spec_slug.to_lowercase()
     );
     let hidden_loom = format_ident!(
         "__nirvash_generated_loom_tests_{}",
-        spec_ident.to_string().to_lowercase()
+        spec_slug.to_lowercase()
     );
-    let sanitized_spec_name = sanitize_file_component(&spec_ident.to_string());
+    let sanitized_spec_name = spec_slug.clone();
     let generated_kani_rel_paths = profile_plan
         .ordered
         .iter()
@@ -146,7 +141,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
             #![allow(unexpected_cfgs)]
             use crate::*;
 
-            type GeneratedSpec = super::#spec_ident;
+            pub type GeneratedSpec = super::#spec_ident;
             type GeneratedState = <GeneratedSpec as ::nirvash_lower::FrontendSpec>::State;
             type GeneratedAction = <GeneratedSpec as ::nirvash_lower::FrontendSpec>::Action;
             type GeneratedExpectedOutput =
@@ -207,6 +202,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 use super::*;
 
                 pub const SPEC_NAME: &str = stringify!(#spec_ident);
+                pub const SPEC_SLUG: &str = #spec_slug;
                 pub const EXPORT_MODULE: &str = super::EXPORT_MODULE_PATH;
                 pub const CRATE_PACKAGE: &str = env!("CARGO_PKG_NAME");
                 pub const CRATE_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
@@ -216,6 +212,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 pub fn spec_metadata() -> ::nirvash_conformance::GeneratedSpecMetadata {
                     ::nirvash_conformance::GeneratedSpecMetadata {
                         spec_name: SPEC_NAME,
+                        spec_slug: SPEC_SLUG,
                         export_module: EXPORT_MODULE,
                         crate_package: CRATE_PACKAGE,
                         crate_manifest_dir: CRATE_MANIFEST_DIR,
@@ -476,12 +473,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                             ::nirvash_conformance::HarnessError::Binding(
                                 "generated fixture factory returned the wrong type".to_owned(),
                             )
+                        })
+                        .and_then(|fixture| {
+                            ::std::sync::Arc::into_inner(fixture).ok_or_else(|| {
+                                ::nirvash_conformance::HarnessError::Binding(
+                                    "generated fixture factory returned a shared Arc; expected a fresh fixture value"
+                                        .to_owned(),
+                                )
+                            })
                         })?;
                     let bundle = load(path)?;
                     ::nirvash_conformance::replay_action_trace::<GeneratedSpec, Binding>(
                         &super::spec(),
                         &bundle.action_trace,
-                        fixture.as_ref(),
+                        fixture,
                     )
                 }
 
@@ -501,7 +506,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     ::nirvash_conformance::replay_action_trace::<GeneratedSpec, Binding>(
                         &super::spec(),
                         &bundle.action_trace,
-                        &fixture,
+                        fixture,
                     )
                 }
 
@@ -524,7 +529,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 {
                     ::nirvash_conformance::write_replay_bundle(
                         &super::plans::artifact_dir(),
-                        super::metadata::SPEC_NAME,
+                        super::metadata::SPEC_SLUG,
                         profile,
                         engine,
                         bundle,
@@ -671,7 +676,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[test]
                         fn generated_all_tests() {
                             let plan = $crate::#export_ident::plans::all_for::<$binding>(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -684,7 +689,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[test]
                         fn generated_all_tests() {
                             let plan = $crate::#export_ident::plans::all_for::<$binding>(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -701,7 +706,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[test]
                         fn generated_tests() {
                             let plan = $crate::#export_ident::plans::from_builders(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                                 vec![$($profile),*],
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
@@ -715,7 +720,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[test]
                         fn generated_tests() {
                             let plan = $crate::#export_ident::plans::from_builders(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                                 vec![$($profile),*],
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
@@ -733,7 +738,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[test]
                         fn generated_unit_tests() {
                             let plan = $crate::#export_ident::plans::unit(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -746,7 +751,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[test]
                         fn generated_unit_tests() {
                             let plan = $crate::#export_ident::plans::unit(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -762,9 +767,9 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ident $(,)?) => {
                         #[test]
                         fn generated_trace_tests() {
-                            let _ = ::nirvash_conformance::require_trace_binding::<crate::#spec_ident, $binding>;
+                            let _ = ::nirvash_conformance::require_trace_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::trace(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -776,9 +781,9 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ty $(,)?) => {
                         #[test]
                         fn generated_trace_tests() {
-                            let _ = ::nirvash_conformance::require_trace_binding::<crate::#spec_ident, $binding>;
+                            let _ = ::nirvash_conformance::require_trace_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::trace(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -821,12 +826,11 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 macro_rules! #hidden_loom {
                     (binding = $binding:ident $(,)?) => {
                         #[allow(unexpected_cfgs)]
-                        #[cfg(feature = "loom")]
                         #[test]
                         fn generated_loom_tests() {
-                            let _ = ::nirvash_conformance::require_concurrent_binding::<crate::#spec_ident, $binding>;
+                            let _ = ::nirvash_conformance::require_concurrent_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::loom(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -837,12 +841,11 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     };
                     (binding = $binding:ty $(,)?) => {
                         #[allow(unexpected_cfgs)]
-                        #[cfg(feature = "loom")]
                         #[test]
                         fn generated_loom_tests() {
-                            let _ = ::nirvash_conformance::require_concurrent_binding::<crate::#spec_ident, $binding>;
+                            let _ = ::nirvash_conformance::require_concurrent_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::loom(
-                                <$binding as ::nirvash_conformance::GeneratedBinding<crate::#spec_ident>>::generated_fixture,
+                                <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
@@ -945,17 +948,8 @@ pub fn expand_binding(attr: TokenStream, item: TokenStream) -> syn::Result<Token
     let create_expr = create.call_expr(&self_ty);
     let fixture_ty = fixture_config.fixture_ty.clone();
     let fixture_expr = fixture_config.fixture_expr();
-    let generated_snapshot_fixture_expr = if same_type(&fixture_ty, &self_ty) {
-        quote! {
-            Err(::nirvash_conformance::HarnessError::Binding(
-                "snapshot fixture replay requires an explicit deserializable fixture type"
-                    .to_owned(),
-            ))
-        }
-    } else {
-        quote! {
-            <Self::Fixture as ::nirvash_conformance::SnapshotFixture>::from_snapshot(value)
-        }
+    let generated_snapshot_fixture_expr = quote! {
+        ::nirvash_conformance::decode_snapshot_fixture::<Self::Fixture>(value)
     };
     let action_ty: Type = syn::parse_quote!(<#spec_ty as ::nirvash_lower::FrontendSpec>::Action);
     let state_ty: Type = syn::parse_quote!(<#spec_ty as ::nirvash_lower::FrontendSpec>::State);
@@ -1061,7 +1055,7 @@ pub fn expand_binding(attr: TokenStream, item: TokenStream) -> syn::Result<Token
             type Output = #output_ty;
             type Error = #error_ty;
 
-            fn create(fixture: &Self::Fixture) -> Result<Self::Sut, Self::Error> {
+            fn create(fixture: Self::Fixture) -> Result<Self::Sut, Self::Error> {
                 #create_expr
             }
 
@@ -1498,13 +1492,13 @@ impl CreateMethod {
 
     fn call_expr(&self, self_ty: &Type) -> TokenStream2 {
         if self.ident == "default" {
-            return quote! { Ok(fixture.clone()) };
+            return quote! { Ok(fixture) };
         }
         let ident = &self.ident;
         let arg = if self.takes_ref {
-            quote! { fixture }
+            quote! { &fixture }
         } else {
-            quote! { fixture.clone() }
+            quote! { fixture }
         };
         if self.returns_result {
             quote! { #self_ty::#ident(#arg) }
@@ -2412,6 +2406,29 @@ fn sanitize_file_component(raw: &str) -> String {
         .collect()
 }
 
+fn stable_source_slug(span: Span, fallback: &str) -> String {
+    let span = span.unwrap();
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let file = span
+        .local_file()
+        .and_then(|path| {
+            manifest_dir
+                .as_ref()
+                .and_then(|root| path.strip_prefix(root).ok().map(PathBuf::from))
+                .or(Some(path))
+        })
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| span.file());
+    let start = span.start();
+    sanitize_file_component(&format!(
+        "{}__line{}_col{}_{}",
+        file,
+        start.line(),
+        start.column(),
+        fallback,
+    ))
+}
+
 fn profile_has_kani(profile: &ProfileDef) -> bool {
     profile
         .engines
@@ -2472,18 +2489,13 @@ pub fn expand_import_generated_tests(input: TokenStream) -> syn::Result<TokenStr
     let spec = args.spec;
     let binding = args.binding;
     let generated_path = generated_module_path(&spec)?;
-    let module_name = format_ident!(
-        "__nirvash_import_generated_tests_{}",
-        sanitize_file_component(
-            &spec
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .collect::<Vec<_>>()
-                .join("_"),
-        )
-        .to_lowercase()
-    );
+    let import_slug = sanitize_file_component(&format!(
+        "{}__{}",
+        spec.to_token_stream(),
+        binding.to_token_stream(),
+    ))
+    .to_lowercase();
+    let module_name = format_ident!("__nirvash_import_generated_tests_{}", import_slug);
 
     let body = if let Some(profiles) = args.profiles {
         quote! {

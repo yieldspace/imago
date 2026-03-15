@@ -112,3 +112,24 @@ note: required by a bound in `supports_trace`
    |     fn supports_trace() -> bool {
    |        -------------- required by a bound in this associated function
    = note: this error originates in the attribute macro `code_tests` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Spec: SpecOracle` is not satisfied
+  --> tests/fixtures/code_tests_missing_oracle.rs:73:1
+   |
+73 | #[nirvash_binding(spec = Spec)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `SpecOracle` is not implemented for `Spec`
+  --> tests/fixtures/code_tests_missing_oracle.rs:12:1
+   |
+12 | struct Spec;
+   | ^^^^^^^^^^^
+note: required by a bound in `nirvash_conformance::RuntimeBinding::Fixture`
+  --> $WORKSPACE/crates/nirvash-conformance/src/lib.rs
+   |
+   | pub trait RuntimeBinding<Spec: SpecOracle>: Sized {
+   |                                ^^^^^^^^^^ required by this bound in `RuntimeBinding::Fixture`
+   |     type Sut;
+   |     type Fixture: Send + Sync + 'static;
+   |          ------- required by a bound in this associated type
+   = note: this error originates in the attribute macro `nirvash_binding` (in Nightly builds, run with -Z macro-backtrace for more info)

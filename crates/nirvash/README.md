@@ -179,7 +179,8 @@ AST-native surface には arithmetic minimum set、projection/payload access、s
   - 手早い override は `small_keys(["a", "b"])`, `boundary_numbers::<u64>()`, `smoke_fixture(MyRuntime::default())` を `with(...)` に渡せる
 - generated module
   - `generated::{prelude, metadata, seeds, profiles, plans, install, replay, bindings}` が生える
-  - `generated::install::{all_tests!, tests!, unit_tests!, trace_tests!, kani_harnesses!, loom_tests!}` は low-level API として残る。spec が nested module 配下にある場合の canonical path は `nirvash::import_generated_tests!` で、crate root から low-level installer を直接使うなら `generated` を re-export してから呼ぶ
+  - `generated::install::{all_tests!, tests!, unit_tests!, trace_tests!, kani_harnesses!, loom_tests!}` は low-level API として残る。spec が nested module 配下にある場合も full spec path に追従するので、crate root から直接使うときは `pub use nested_spec::generated;` のように `generated` を re-export してから呼ぶ
+  - `generated::install::loom_tests!` は常に test 関数を生成し、consumer crate 側で `loom` feature を定義していない場合でも `nirvash-conformance` の serial fallback で実行できる
 
 runtime artifact は `target/nirvash/{manifest,replay}` に保存され、materialized replay / Kani harness は `tests/generated/*_replay.rs` と `tests/generated/*_kani.rs` に出力されます。`cargo nirvash list-tests`, `cargo nirvash materialize-tests`, `cargo nirvash replay` で扱えます。
 

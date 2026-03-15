@@ -30,6 +30,8 @@ pub struct ManifestRecord {
     #[serde(alias = "spec_name")]
     pub spec: String,
     #[serde(default)]
+    pub spec_slug: String,
+    #[serde(default)]
     pub spec_path: String,
     pub export_module: String,
     #[serde(default)]
@@ -151,7 +153,7 @@ pub fn materialize_tests(
         };
         let output_path = materialized_dir.join(format!(
             "{}_{}_replay.rs",
-            sanitize_path(&manifest.spec),
+            sanitize_path(manifest_spec_stem(&manifest)),
             sanitize_path(&manifest.profile),
         ));
         fs::write(
@@ -166,7 +168,7 @@ pub fn materialize_tests(
             if !obligations.is_empty() {
                 let kani_output = materialized_dir.join(format!(
                     "{}_{}_kani.rs",
-                    sanitize_path(&manifest.spec),
+                    sanitize_path(manifest_spec_stem(&manifest)),
                     sanitize_path(&manifest.profile),
                 ));
                 fs::write(
@@ -392,7 +394,7 @@ fn render_materialized_test(manifest: &ManifestRecord, replay_path: &Path) -> St
     let binding = normalize_subject_path(&manifest.binding, &crate_ident);
     let test_name = format!(
         "replay_{}_{}",
-        sanitize_ident(&manifest.spec),
+        sanitize_ident(manifest_spec_stem(manifest)),
         sanitize_ident(&manifest.profile),
     );
     format!(
@@ -499,6 +501,7 @@ fn collect_kani_obligations_for_manifest(
 fn helper_dir_for_manifest(base: &Path, manifest: &ManifestRecord) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     manifest.spec.hash(&mut hasher);
+    manifest.spec_slug.hash(&mut hasher);
     manifest.binding.hash(&mut hasher);
     manifest.profile.hash(&mut hasher);
     manifest.export_module.hash(&mut hasher);
@@ -514,6 +517,14 @@ fn crate_root_ident(package: &str) -> String {
         "crate".to_owned()
     } else {
         package.replace('-', "_")
+    }
+}
+
+fn manifest_spec_stem(manifest: &ManifestRecord) -> &str {
+    if manifest.spec_slug.is_empty() {
+        &manifest.spec
+    } else {
+        &manifest.spec_slug
     }
 }
 
@@ -670,6 +681,7 @@ mod tests {
     fn manifest_record(crate_manifest_dir: &Path) -> ManifestRecord {
         ManifestRecord {
             spec: "demo.spec".to_owned(),
+            spec_slug: String::new(),
             spec_path: "demo_crate::DemoSpec".to_owned(),
             export_module: "crate::demo::generated".to_owned(),
             crate_package: "demo-crate".to_owned(),
@@ -782,6 +794,42 @@ mod tests {
             )
         );
         assert!(body.contains(&json_path.display().to_string()));
+    }
+
+    #[test]
+    fn materialize_tests_prefers_spec_slug_for_output_paths() {
+        let temp = tempdir().expect("tempdir");
+        let base = temp.path().join("nirvash");
+        let manifest_dir = base.join("manifest");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        let crate_manifest_dir = temp.path().join("demo-crate");
+        fs::create_dir_all(&crate_manifest_dir).expect("crate manifest dir");
+        let mut manifest = manifest_record(&crate_manifest_dir);
+        manifest.spec_slug = "tests_fixtures_demo_spec_line42_col1_Spec".to_owned();
+        let manifest_path = manifest_dir.join("demo_spec__demo_binding__small.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+        let (json_path, _) = write_replay_files(&base);
+
+        let materialized = materialize_tests(
+            &base,
+            &MaterializeRequest {
+                spec: "demo.spec".to_owned(),
+                binding: "DemoBinding".to_owned(),
+                profile: "small".to_owned(),
+                replay: Some(json_path),
+            },
+        )
+        .expect("materialize replay");
+
+        assert_eq!(
+            materialized[0],
+            crate_manifest_dir
+                .join("tests/generated/tests_fixtures_demo_spec_line42_col1_Spec_small_replay.rs")
+        );
     }
 
     #[test]

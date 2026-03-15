@@ -29,6 +29,10 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/code_tests_strategy_only_seed_ok.rs");
     t.pass("tests/fixtures/code_tests_trace_binding_ok.rs");
     t.pass("tests/fixtures/code_tests_concurrency_marker_ok.rs");
+    t.pass("tests/fixtures/code_tests_nonclone_multi_binding_ok.rs");
+    t.pass("tests/fixtures/code_tests_custom_fixture_nonserializable_ok.rs");
+    t.pass("tests/fixtures/code_tests_low_level_nested_installer_ok.rs");
+    t.pass("tests/fixtures/code_tests_same_tail_specs_ok.rs");
     t.pass("tests/fixtures/code_tests_kani_harness_ok.rs");
     t.pass("tests/fixtures/derive_protocol_input_witness_ok.rs");
     t.pass("tests/fixtures/function_like_bool_macros_ok.rs");
