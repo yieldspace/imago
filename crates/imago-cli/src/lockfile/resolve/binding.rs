@@ -37,7 +37,7 @@ fn resolve_binding_wits_with(
 ) -> anyhow::Result<Vec<ResolvedBindingWit>> {
     ensure_supported_lock_version(lock.version)?;
 
-    let expected_requested = build_requested_snapshot(&[], expectations, None)?;
+    let expected_requested = build_requested_snapshot(&[], expectations, &[], None)?;
 
     let mut requested_by_id = BTreeMap::new();
     for requested in &lock.requested.bindings {
@@ -205,8 +205,9 @@ mod tests {
         let root = new_temp_dir("duplicate");
         let expectation = sample_expectation();
         let request_id = compute_binding_request_id(&expectation);
-        let requested = build_requested_snapshot(&[], std::slice::from_ref(&expectation), None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(&[], std::slice::from_ref(&expectation), &[], None)
+                .expect("requested snapshot should build");
 
         let lock = ImagoLock {
             version: IMAGO_LOCK_VERSION,
@@ -242,8 +243,9 @@ mod tests {
         let root = new_temp_dir("empty-interfaces");
         let expectation = sample_expectation();
         let request_id = compute_binding_request_id(&expectation);
-        let requested = build_requested_snapshot(&[], std::slice::from_ref(&expectation), None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(&[], std::slice::from_ref(&expectation), &[], None)
+                .expect("requested snapshot should build");
 
         let lock = ImagoLock {
             version: IMAGO_LOCK_VERSION,

@@ -6,19 +6,23 @@ wit_bindgen::generate!({
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    imago::experimental_gpio::delay::delay_ms(5);
-    println!("experimental-gpio delay-ms completed: 5");
+    use imago::experimental_gpio::digital;
 
-    if std::env::var("IMAGO_EXPERIMENTAL_GPIO_TRY_DIGITAL").as_deref() == Ok("1") {
-        match imago::experimental_gpio::digital::get_digital_out("GPIO17", &[]) {
+    println!("experimental-gpio example started");
+
+    match std::env::var("IMAGO_EXPERIMENTAL_GPIO_LABEL") {
+        Ok(label) => match digital::get_digital_out(&label, &[]) {
             Ok(pin) => {
                 let _ = pin.set_active();
                 let _ = pin.set_inactive();
-                println!("experimental-gpio digital smoke test completed");
+                println!("raw gpio smoke test completed for label: {label}");
             }
             Err(err) => {
-                println!("experimental-gpio digital smoke test failed: {err:?}");
+                println!("raw gpio smoke test failed for label {label}: {err:?}");
             }
+        },
+        Err(_) => {
+            println!("set IMAGO_EXPERIMENTAL_GPIO_LABEL to run a digital smoke test");
         }
     }
 

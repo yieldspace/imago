@@ -17,7 +17,7 @@ use super::{
     types::{
         BindingWitExpectation, DependencyExpectation, IMAGO_LOCK_VERSION, ImagoLock,
         ImagoLockRequestedDependency, ImagoLockResolvedBinding, ImagoLockResolvedDependency,
-        LockCapabilityPolicy, LockDependencyKind, LockSourceKind,
+        LockCapabilityPolicy, LockDependencyKind, LockSourceKind, ResourceProfileExpectation,
     },
     validation::{PathVerifier, StrictPathVerifier, validate_sha256_hex},
 };
@@ -32,7 +32,7 @@ pub use dependency::resolve_dependencies;
 pub use packages::{collect_resolved_packages_and_edges, resolved_package_ref};
 pub use requested::{
     build_requested_snapshot, compute_binding_request_id, compute_dependency_request_id,
-    compute_requested_fingerprint,
+    compute_requested_fingerprint, compute_resource_profile_request_id,
 };
 
 pub fn load_from_project_root(project_root: &Path) -> anyhow::Result<ImagoLock> {
@@ -57,11 +57,13 @@ pub fn ensure_requested_fingerprint(
     lock: &ImagoLock,
     dependency_expectations: &[DependencyExpectation],
     binding_expectations: &[BindingWitExpectation],
+    resource_profile_expectations: &[ResourceProfileExpectation],
     namespace_registries: Option<&BTreeMap<String, String>>,
 ) -> anyhow::Result<()> {
     let expected = build_requested_snapshot(
         dependency_expectations,
         binding_expectations,
+        resource_profile_expectations,
         namespace_registries,
     )?;
     if lock.requested.fingerprint != expected.fingerprint {
@@ -331,6 +333,7 @@ mod tests {
                 fingerprint: "not-matching".to_string(),
                 dependencies: vec![],
                 bindings: vec![],
+                resource_profiles: vec![],
             },
             resolved: ImagoLockResolved {
                 dependencies: vec![],
@@ -339,7 +342,7 @@ mod tests {
                 package_edges: vec![],
             },
         };
-        let err = ensure_requested_fingerprint(&lock, &[], &[], Some(&BTreeMap::new()))
+        let err = ensure_requested_fingerprint(&lock, &[], &[], &[], Some(&BTreeMap::new()))
             .expect_err("fingerprint mismatch should fail");
         assert!(err.to_string().contains("requested fingerprint mismatch"));
     }

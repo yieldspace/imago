@@ -41,5 +41,6 @@ uuid = { workspace = true, features = ["v4"] }
 wasm-pkg-client = { workspace = true }
 wasm-pkg-common = { workspace = true }
 wit-component = { workspace = true }
+wasmparser = { workspace = true }
 wit-parser = { workspace = true }
 web-transport-quinn = { workspace = true }

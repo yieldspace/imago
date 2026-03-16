@@ -122,6 +122,21 @@ command = "cargo component build --release"
 
 - Validation error notes: wrong type or empty command fails validation.
 
+### The `wit_world` field
+
+- Type: `string`
+- Required/Optional: Optional.
+- Accepted values / Constraints: non-empty world name from the local `wit/` package.
+- Default: none. When omitted, dependency capability validation calls `select_world(..., None)` and inherits its ambiguity error for multi-world packages.
+- Example:
+
+```toml
+[build]
+wit_world = "plugin-imports"
+```
+
+- Validation error notes: empty values fail validation. Unknown world names fail during `imago artifact build` when project WIT imports are inspected.
+
 <a id="the-targetname-section"></a>
 ## The [target.<name>] section
 
@@ -512,7 +527,7 @@ mode = "strict"
 
 [resources.gpio]
 digital_pins = [
-  { label = "GPIO17", value_path = "/sys/class/gpio/gpio17/value", supports_input = true, supports_output = true, default_active_level = "active-high", allow_pull_resistor = true }
+  { label = "A27", aliases = ["blue-led", "status-led"] },
 ]
 
 [resources.usb]
@@ -522,7 +537,11 @@ bulk_ring_chunk_bytes = 16384
 bulk_ring_slots = 16
 ```
 
-- Validation error notes: empty keys fail validation. `resources.gpio.digital_pins` rejects duplicated `label` and duplicated `value_path`, and requires each `value_path` to be an absolute `/sys/class/gpio/.../value` path; `resources.usb` rejects invalid path/limit settings during runtime startup.
+- `[[dependencies]] kind = "wasm"` entries that embed an `imago.resources.v1` custom section are treated as resource providers automatically during `imago deps sync` / build. Their `resources` payload is merged first, and service-side `resources` is applied afterward using provider merge policies.
+- `resources.gpio.digital_pins` works in two modes. Without a provider it is an inline catalog and each entry must supply the full runtime fields (`label`, `value_path`, `supports_input`, `supports_output`, `default_active_level`, `allow_pull_resistor`). With a provider present it becomes a keyed patch surface over existing labels, so patch entries may override fields such as `aliases`, but unknown labels fail validation.
+- `resources.gpio.profile.path` remains available as a local TOML profile source. Only `path` is supported. If it would populate the same canonical path as an embedded provider (currently `resources.gpio.digital_pins`), build fails instead of applying implicit precedence.
+- Provider merge policies default to `sealed`. `mergeable` allows service overrides under the declared path, and `required` also demands that the service override that path. `resources.gpio.digital_pins` is the only keyed array merge in v1; other provider-owned arrays are treated atomically.
+- Validation error notes: empty keys fail validation. `resources.usb` rejects invalid path/limit settings during runtime startup.
 
 <a id="the-capabilities-section"></a>
 ## The [capabilities] section

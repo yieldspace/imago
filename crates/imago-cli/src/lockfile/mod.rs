@@ -11,18 +11,19 @@ mod validation;
 #[allow(unused_imports)]
 pub use resolve::{
     build_requested_snapshot, collect_resolved_packages_and_edges, compute_binding_request_id,
-    compute_dependency_request_id, compute_requested_fingerprint, ensure_requested_fingerprint,
-    load_from_project_root, resolve_binding_wits, resolve_dependencies, resolved_package_ref,
-    save_to_project_root,
+    compute_dependency_request_id, compute_requested_fingerprint,
+    compute_resource_profile_request_id, ensure_requested_fingerprint, load_from_project_root,
+    resolve_binding_wits, resolve_dependencies, resolved_package_ref, save_to_project_root,
 };
 #[allow(unused_imports)]
 pub use types::{
     BindingWitExpectation, ComponentExpectation, DependencyExpectation, IMAGO_LOCK_VERSION,
     ImagoLock, ImagoLockRequested, ImagoLockRequestedBinding, ImagoLockRequestedDependency,
-    ImagoLockResolved, ImagoLockResolvedBinding, ImagoLockResolvedDependency,
-    ImagoLockResolvedPackage, ImagoLockResolvedPackageEdge, LockCapabilityPolicy,
-    LockDependencyKind, LockEdgeFromKind, LockPackageEdgeReason, LockSourceKind,
-    ResolvedBindingWit, ResolvedDependency, TransitivePackageRecord, default_lock_version,
+    ImagoLockRequestedResourceProfile, ImagoLockResolved, ImagoLockResolvedBinding,
+    ImagoLockResolvedDependency, ImagoLockResolvedPackage, ImagoLockResolvedPackageEdge,
+    LockCapabilityPolicy, LockDependencyKind, LockEdgeFromKind, LockPackageEdgeReason,
+    LockSourceKind, ResolvedBindingWit, ResolvedDependency, ResourceProfileExpectation,
+    TransitivePackageRecord, default_lock_version,
 };
 
 #[cfg(test)]
@@ -60,6 +61,7 @@ mod tests {
         super::build_requested_snapshot(
             dependency_expectations,
             binding_expectations,
+            &[],
             namespace_registries,
         )
         .expect("requested snapshot should build")
@@ -161,7 +163,7 @@ mod tests {
     fn requested_snapshot_rejects_duplicate_dependency_request_ids() {
         let dep_a = sample_dependency_expectation("dep-a");
         let dep_b = sample_dependency_expectation("dep-b");
-        let err = super::build_requested_snapshot(&[dep_a, dep_b], &[], None)
+        let err = super::build_requested_snapshot(&[dep_a, dep_b], &[], &[], None)
             .expect_err("duplicate dependency request ids must fail");
         assert!(
             err.to_string().contains("duplicate dependency request id"),
@@ -187,7 +189,7 @@ mod tests {
             version: "0.1.0".to_string(),
             sha256: None,
         };
-        let err = super::build_requested_snapshot(&[], &[binding_a, binding_b], None)
+        let err = super::build_requested_snapshot(&[], &[binding_a, binding_b], &[], None)
             .expect_err("duplicate binding request ids must fail");
         assert!(
             err.to_string().contains("duplicate binding request id"),
@@ -594,7 +596,7 @@ mod tests {
         };
         lock.requested.fingerprint = "deadbeef".to_string();
 
-        let err = ensure_requested_fingerprint(&lock, &[expectation], &[], None)
+        let err = ensure_requested_fingerprint(&lock, &[expectation], &[], &[], None)
             .expect_err("must fail on mismatch");
         assert!(err.to_string().contains("requested fingerprint mismatch"));
     }

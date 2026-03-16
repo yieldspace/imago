@@ -2,23 +2,25 @@
 
 ## 目的
 
-同一マシンで native plugin（`imago:experimental-gpio@0.1.0`）を使い、`delay.delay-ms` と basic digital 操作の呼び出し動作を確認するサンプルです。
+同一マシンで native plugin（`imago:experimental-gpio@0.1.0`）を使い、raw GPIO API を呼び出せることを確認するサンプルです。
 
-## GPIO カタログ設定
+## Dependency
 
-digital pin の定義は `imago.toml` の `[resources.gpio]` 配下 `digital_pins` から読み込まれます。  
-`resources.gpio` が未設定の場合は空カタログ扱いになり、`get-digital-*` は `undefined-pin-label` を返します。
-`digital_pins` では `label` と `value_path` の重複は許可されず、重複時は起動時に設定エラーになります。
+この example は app code で raw `imago:experimental-gpio` だけを import します。board 固有 dependency や board resolver は使いません。
+
+`imago.toml` には native `imago:experimental-gpio` だけを宣言します。
+
+app 側の `[capabilities.deps]` も raw GPIO package だけに対して開きます。
 
 ## 実行
 
 Rust toolchain と `wasm32-wasip2` target を用意します（未導入なら `rustup target add wasm32-wasip2`）。
 `imago.toml` の `remote = "ssh://localhost?socket=/tmp/imagod-local-plugin-native-experimental-gpio.sock"` と `imagod.toml` の `control_socket_path` を一致させ、同じユーザーからその socket に接続できる状態にしてください。
 
-1. ターミナル A で `imagod` を起動します。
+1. ターミナル A で `imagod` 起動を行います。
 
 ```bash
-cd examples/local-imagod-plugin-native-experimental-gpio
+cd ../../../imago/examples/local-imagod-plugin-native-experimental-gpio
 cargo run -p imago-cli -- deps sync
 cargo run -p imagod -- --config "$(pwd)/imagod.toml"
 ```
@@ -35,14 +37,15 @@ cargo run -p imago-cli -- service logs local-imagod-plugin-native-experimental-g
 
 ログに次の文字列が含まれれば成功です。
 
-- `experimental-gpio delay-ms completed: 5`
+- `experimental-gpio example started`
+- `set IMAGO_EXPERIMENTAL_GPIO_LABEL to run a digital smoke test`
 
 ## 任意: digital smoke test
 
-`get-digital-out` も試す場合は deploy 前に次を設定します。
+特定の digital label に対して raw GPIO API の smoke test を試す場合は deploy 前に次を設定します。
 
 ```bash
-export IMAGO_EXPERIMENTAL_GPIO_TRY_DIGITAL=1
+export IMAGO_EXPERIMENTAL_GPIO_LABEL=<your-digital-label>
 ```
 
-GPIO backend の実体ファイルが利用できない環境では `digital smoke test failed` が出る想定です。
+この example 自体は board catalog を持たないので、実機 smoke test を通すには対象 label が `resources.gpio` か別の provider で解決できる必要があります。GPIO backend の実体ファイルが利用できない環境では `raw gpio smoke test failed` が出る想定です。

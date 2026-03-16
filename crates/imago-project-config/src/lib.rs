@@ -137,6 +137,7 @@ impl JsonSchema for ServiceNameResolver {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BuildSection {
     pub command: Option<BuildCommand>,
+    pub wit_world: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
 }
@@ -209,8 +210,38 @@ pub struct ResourcesSection {
     pub env: Option<BTreeMap<String, String>>,
     #[schemars(with = "Option<Vec<String>>")]
     pub http_outbound: Option<JsonValue>,
+    pub gpio: Option<GpioResourcesSection>,
     pub mounts: Option<Vec<ResourceMount>>,
     pub read_only_mounts: Option<Vec<ResourceMount>>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct GpioResourcesSection {
+    pub digital_pins: Option<Vec<GpioDigitalPinEntry>>,
+    pub profile: Option<GpioProfileSource>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GpioProfileSource {
+    #[schemars(required)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct GpioDigitalPinEntry {
+    #[schemars(required)]
+    pub label: Option<String>,
+    pub aliases: Option<Vec<String>>,
+    pub value_path: Option<String>,
+    pub supports_input: Option<bool>,
+    pub supports_output: Option<bool>,
+    pub default_active_level: Option<String>,
+    pub allow_pull_resistor: Option<bool>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
 }
@@ -356,6 +387,49 @@ pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
         }
     }
 
+    if let Some(build) = &config.build {
+        validate_optional_nonempty_string(build.wit_world.as_deref(), "build.wit_world")?;
+    }
+
+    if let Some(resources) = &config.resources
+        && let Some(gpio) = &resources.gpio
+    {
+        if let Some(profile) = &gpio.profile {
+            let path = profile
+                .path
+                .as_deref()
+                .ok_or_else(|| anyhow!("resources.gpio.profile.path is required"))?;
+            if path.trim().is_empty() {
+                return Err(anyhow!("resources.gpio.profile.path must not be empty"));
+            }
+        }
+        if let Some(digital_pins) = &gpio.digital_pins {
+            for (index, pin) in digital_pins.iter().enumerate() {
+                validate_optional_nonempty_string(
+                    pin.label.as_deref(),
+                    &format!("resources.gpio.digital_pins[{index}].label"),
+                )?;
+                if let Some(aliases) = &pin.aliases {
+                    for (alias_index, alias) in aliases.iter().enumerate() {
+                        if alias.trim().is_empty() {
+                            return Err(anyhow!(
+                                "resources.gpio.digital_pins[{index}].aliases[{alias_index}] must not be empty"
+                            ));
+                        }
+                    }
+                }
+                validate_optional_nonempty_string(
+                    pin.value_path.as_deref(),
+                    &format!("resources.gpio.digital_pins[{index}].value_path"),
+                )?;
+                validate_optional_nonempty_string(
+                    pin.default_active_level.as_deref(),
+                    &format!("resources.gpio.digital_pins[{index}].default_active_level"),
+                )?;
+            }
+        }
+    }
+
     if let Some(dependencies) = &config.dependencies {
         for (index, dependency) in dependencies.iter().enumerate() {
             if let Some(kind) = &dependency.kind {
@@ -450,6 +524,15 @@ pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_optional_nonempty_string(value: Option<&str>, field_name: &str) -> Result<()> {
+    if let Some(value) = value
+        && value.trim().is_empty()
+    {
+        return Err(anyhow!("{field_name} must not be empty"));
+    }
     Ok(())
 }
 
@@ -833,6 +916,91 @@ remote = "127.0.0.1:4443"
         let err = result.expect_err("validation must fail");
         assert!(
             err.to_string().contains("ssh://"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn allows_gpio_profile_and_digital_pins_combined_for_patch_mode() {
+        decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+
+[resources.gpio]
+digital_pins = []
+
+[resources.gpio.profile]
+path = "../boards/milkv-duo-s/profile.toml"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        )
+        .expect("validation should allow profile plus digital_pins patch");
+    }
+
+    #[test]
+    fn rejects_empty_gpio_profile_path() {
+        let result = decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+
+[resources.gpio.profile]
+path = "   "
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string()
+                .contains("resources.gpio.profile.path must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_nonempty_build_wit_world() {
+        decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+
+[build]
+wit_world = "plugin-imports"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        )
+        .expect("validation should accept a non-empty build.wit_world");
+    }
+
+    #[test]
+    fn rejects_empty_build_wit_world() {
+        let result = decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+
+[build]
+wit_world = "   "
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string()
+                .contains("build.wit_world must not be empty"),
             "unexpected error: {err}"
         );
     }

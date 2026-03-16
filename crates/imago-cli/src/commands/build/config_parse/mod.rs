@@ -36,6 +36,10 @@ pub(crate) use dependency::{
     load_project_dependencies_with_namespace_registries, parse_namespace_registries,
 };
 pub(in crate::commands::build) use resources::*;
+pub(crate) use resources::{
+    EmbeddedResourceProviderCandidate, LoadedResourceProvider, load_declared_resource_providers,
+    load_embedded_resource_providers, load_resource_profile_expectations_from_providers,
+};
 pub(in crate::commands::build) use target::*;
 pub(in crate::commands::build) use validation::*;
 pub(crate) use validation::{validate_app_type, validate_service_name};

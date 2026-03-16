@@ -126,6 +126,7 @@ const GPIO_SYSFS_BASE_PATH: &str = "/sys/class/gpio";
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DigitalPinSpec {
     label: String,
+    aliases: Vec<String>,
     value_path: String,
     supports_input: bool,
     supports_output: bool,
@@ -169,6 +170,7 @@ const ANALOG_PIN_CATALOG: &[AnalogPinSpec] = &[
 #[derive(Debug, Clone)]
 struct DigitalPinHandle {
     label: String,
+    acquire_key: String,
     value_path: String,
     mode: PinMode,
     active_level: ActiveLevel,
@@ -178,6 +180,7 @@ struct DigitalPinHandle {
 #[derive(Debug, Clone)]
 struct AnalogPinHandle {
     label: String,
+    acquire_key: String,
     read_raw_path: Option<String>,
     write_raw_path: Option<String>,
     mode: PinMode,
@@ -335,6 +338,32 @@ fn parse_required_bool(
         .ok_or_else(|| GpioError::Other(format!("{field_path} must be a boolean")))
 }
 
+fn parse_optional_string_array(
+    object: &JsonMap<String, JsonValue>,
+    field_name: &str,
+    field_path: &str,
+) -> Result<Vec<String>, GpioError> {
+    let Some(value) = object.get(field_name) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| GpioError::Other(format!("{field_path} must be an array of strings")))?;
+    let mut values = Vec::with_capacity(array.len());
+    for (index, value) in array.iter().enumerate() {
+        let item_path = format!("{field_path}[{index}]");
+        let value = value
+            .as_str()
+            .ok_or_else(|| GpioError::Other(format!("{item_path} must be a string")))?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(GpioError::Other(format!("{item_path} must not be empty")));
+        }
+        values.push(value.to_string());
+    }
+    Ok(values)
+}
+
 fn parse_required_active_level(
     object: &JsonMap<String, JsonValue>,
     field_name: &str,
@@ -406,7 +435,7 @@ fn parse_digital_pin_catalog(
         GpioError::Other("resources.gpio.digital_pins must be an array".to_string())
     })?;
 
-    let mut seen_labels = BTreeSet::new();
+    let mut seen_public_names = BTreeSet::new();
     let mut seen_value_paths = BTreeSet::new();
     let mut specs = Vec::with_capacity(digital_pins.len());
     for (index, pin_value) in digital_pins.iter().enumerate() {
@@ -415,11 +444,19 @@ fn parse_digital_pin_catalog(
             .as_object()
             .ok_or_else(|| GpioError::Other(format!("{pin_path} must be a table")))?;
         let label = parse_required_string(pin, "label", &format!("{pin_path}.label"))?;
-        if !seen_labels.insert(label.clone()) {
+        if !seen_public_names.insert(label.clone()) {
             return Err(GpioError::Other(format!(
                 "{pin_path}.label is duplicated: {}",
                 label
             )));
+        }
+        let aliases = parse_optional_string_array(pin, "aliases", &format!("{pin_path}.aliases"))?;
+        for (alias_index, alias) in aliases.iter().enumerate() {
+            if !seen_public_names.insert(alias.clone()) {
+                return Err(GpioError::Other(format!(
+                    "{pin_path}.aliases[{alias_index}] is duplicated: {alias}"
+                )));
+            }
         }
         let value_path_raw =
             parse_required_string(pin, "value_path", &format!("{pin_path}.value_path"))?;
@@ -454,6 +491,7 @@ fn parse_digital_pin_catalog(
 
         specs.push(DigitalPinSpec {
             label,
+            aliases,
             value_path,
             supports_input,
             supports_output,
@@ -470,7 +508,7 @@ fn lookup_digital_spec_from_catalog(
 ) -> Result<DigitalPinSpec, GpioError> {
     catalog
         .iter()
-        .find(|spec| spec.label == pin_label)
+        .find(|spec| spec.label == pin_label || spec.aliases.iter().any(|alias| alias == pin_label))
         .cloned()
         .ok_or(GpioError::UndefinedPinLabel)
 }
@@ -544,21 +582,29 @@ fn mode_is_supported_for_analog(spec: &AnalogPinSpec, mode: PinMode) -> bool {
     }
 }
 
-fn acquire_pin_label(pin_label: &str, mode: PinMode) -> Result<(), GpioError> {
+fn acquire_pin_key(pin_key: &str, mode: PinMode) -> Result<(), GpioError> {
     let mut guard = acquired_pin_modes()
         .lock()
         .map_err(|_| GpioError::Other("acquired pin registry lock poisoned".to_string()))?;
-    if guard.contains_key(pin_label) {
+    if guard.contains_key(pin_key) {
         return Err(GpioError::AlreadyInUse);
     }
-    guard.insert(pin_label.to_string(), mode);
+    guard.insert(pin_key.to_string(), mode);
     Ok(())
 }
 
-fn release_pin_label(pin_label: &str) {
+fn release_pin_key(pin_key: &str) {
     if let Ok(mut guard) = acquired_pin_modes().lock() {
-        guard.remove(pin_label);
+        guard.remove(pin_key);
     }
+}
+
+fn digital_acquire_key(value_path: &str) -> String {
+    format!("digital:{value_path}")
+}
+
+fn analog_acquire_key(label: &str) -> String {
+    format!("analog:{label}")
 }
 
 fn digital_backend_requirements(mode: PinMode) -> (bool, bool) {
@@ -1094,6 +1140,8 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 
         let (active_level, pull_resistor) = resolve_digital_config(&spec, &flags)?;
         let path = spec.value_path.clone();
+        let canonical_label = spec.label.clone();
+        let acquire_key = digital_acquire_key(&path);
         let validation_path = path.clone();
         let (need_read, need_write) = digital_backend_requirements(PinMode::In);
         run_blocking_gpio(move || {
@@ -1101,10 +1149,11 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         })
         .await?;
 
-        acquire_pin_label(&pin_label, PinMode::In)?;
+        acquire_pin_key(&acquire_key, PinMode::In)?;
 
         let handle = DigitalPinHandle {
-            label: pin_label,
+            label: canonical_label,
+            acquire_key,
             value_path: path,
             mode: PinMode::In,
             active_level,
@@ -1128,6 +1177,8 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 
         let (active_level, pull_resistor) = resolve_digital_config(&spec, &flags)?;
         let path = spec.value_path.clone();
+        let canonical_label = spec.label.clone();
+        let acquire_key = digital_acquire_key(&path);
         let validation_path = path.clone();
         let (need_read, need_write) = digital_backend_requirements(PinMode::Out);
         run_blocking_gpio(move || {
@@ -1135,10 +1186,11 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         })
         .await?;
 
-        acquire_pin_label(&pin_label, PinMode::Out)?;
+        acquire_pin_key(&acquire_key, PinMode::Out)?;
 
         let handle = DigitalPinHandle {
-            label: pin_label,
+            label: canonical_label,
+            acquire_key,
             value_path: path,
             mode: PinMode::Out,
             active_level,
@@ -1162,6 +1214,8 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 
         let (active_level, pull_resistor) = resolve_digital_config(&spec, &flags)?;
         let path = spec.value_path.clone();
+        let canonical_label = spec.label.clone();
+        let acquire_key = digital_acquire_key(&path);
         let validation_path = path.clone();
         let (need_read, need_write) = digital_backend_requirements(PinMode::InOut);
         run_blocking_gpio(move || {
@@ -1169,10 +1223,11 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
         })
         .await?;
 
-        acquire_pin_label(&pin_label, PinMode::InOut)?;
+        acquire_pin_key(&acquire_key, PinMode::InOut)?;
 
         let handle = DigitalPinHandle {
-            label: pin_label,
+            label: canonical_label,
+            acquire_key,
             value_path: path,
             mode: PinMode::InOut,
             active_level,
@@ -1248,7 +1303,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 
     async fn drop(&mut self, resource: Resource<DigitalOutResource>) -> wasmtime::Result<()> {
         if let Some(handle) = remove_handle(digital_out_registry(), resource.rep()) {
-            release_pin_label(&handle.label);
+            release_pin_key(&handle.acquire_key);
         }
         Ok(())
     }
@@ -1372,7 +1427,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 
     async fn drop(&mut self, resource: Resource<DigitalInResource>) -> wasmtime::Result<()> {
         if let Some(handle) = remove_handle(digital_in_registry(), resource.rep()) {
-            release_pin_label(&handle.label);
+            release_pin_key(&handle.acquire_key);
         }
         Ok(())
     }
@@ -1543,7 +1598,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::digital:
 
     async fn drop(&mut self, resource: Resource<DigitalInOutResource>) -> wasmtime::Result<()> {
         if let Some(handle) = remove_handle(digital_in_out_registry(), resource.rep()) {
-            release_pin_label(&handle.label);
+            release_pin_key(&handle.acquire_key);
         }
         Ok(())
     }
@@ -1568,10 +1623,12 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         })
         .await?;
 
-        acquire_pin_label(&pin_label, PinMode::In)?;
+        let acquire_key = analog_acquire_key(spec.label);
+        acquire_pin_key(&acquire_key, PinMode::In)?;
 
         let handle = AnalogPinHandle {
-            label: pin_label,
+            label: spec.label.to_string(),
+            acquire_key,
             read_raw_path: spec.read_raw_path.map(ToString::to_string),
             write_raw_path: spec.write_raw_path.map(ToString::to_string),
             mode: PinMode::In,
@@ -1600,10 +1657,12 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         })
         .await?;
 
-        acquire_pin_label(&pin_label, PinMode::Out)?;
+        let acquire_key = analog_acquire_key(spec.label);
+        acquire_pin_key(&acquire_key, PinMode::Out)?;
 
         let handle = AnalogPinHandle {
-            label: pin_label,
+            label: spec.label.to_string(),
+            acquire_key,
             read_raw_path: spec.read_raw_path.map(ToString::to_string),
             write_raw_path: spec.write_raw_path.map(ToString::to_string),
             mode: PinMode::Out,
@@ -1632,10 +1691,12 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
         })
         .await?;
 
-        acquire_pin_label(&pin_label, PinMode::InOut)?;
+        let acquire_key = analog_acquire_key(spec.label);
+        acquire_pin_key(&acquire_key, PinMode::InOut)?;
 
         let handle = AnalogPinHandle {
-            label: pin_label,
+            label: spec.label.to_string(),
+            acquire_key,
             read_raw_path: spec.read_raw_path.map(ToString::to_string),
             write_raw_path: spec.write_raw_path.map(ToString::to_string),
             mode: PinMode::InOut,
@@ -1701,7 +1762,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 
     async fn drop(&mut self, resource: Resource<AnalogOutResource>) -> wasmtime::Result<()> {
         if let Some(handle) = remove_handle(analog_out_registry(), resource.rep()) {
-            release_pin_label(&handle.label);
+            release_pin_key(&handle.acquire_key);
         }
         Ok(())
     }
@@ -1851,7 +1912,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 
     async fn drop(&mut self, resource: Resource<AnalogInResource>) -> wasmtime::Result<()> {
         if let Some(handle) = remove_handle(analog_in_registry(), resource.rep()) {
-            release_pin_label(&handle.label);
+            release_pin_key(&handle.acquire_key);
         }
         Ok(())
     }
@@ -2026,7 +2087,7 @@ impl imago_experimental_gpio_plugin_bindings::imago::experimental_gpio::analog::
 
     async fn drop(&mut self, resource: Resource<AnalogInOutResource>) -> wasmtime::Result<()> {
         if let Some(handle) = remove_handle(analog_in_out_registry(), resource.rep()) {
-            release_pin_label(&handle.label);
+            release_pin_key(&handle.acquire_key);
         }
         Ok(())
     }
@@ -2040,6 +2101,7 @@ mod tests {
     fn digital_spec_fixture(allow_pull_resistor: bool) -> DigitalPinSpec {
         DigitalPinSpec {
             label: "GPIO17".to_string(),
+            aliases: vec![],
             value_path: "/sys/class/gpio/gpio17/value".to_string(),
             supports_input: true,
             supports_output: true,
@@ -2063,6 +2125,7 @@ mod tests {
                     },
                     {
                         "label": "GPIO22",
+                        "aliases": ["blue-led"],
                         "value_path": "/sys/class/gpio/gpio22/value",
                         "supports_input": false,
                         "supports_output": true,
@@ -2226,6 +2289,44 @@ mod tests {
         assert!(
             !message.contains("supports_output"),
             "duplicate label should fail before other field validation: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_duplicate_aliases_before_other_field_validation() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "aliases": ["blue-led"],
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO22",
+                        "aliases": ["blue-led"]
+                    }
+                ]
+            }),
+        )]);
+        let err =
+            parse_digital_pin_catalog(&resources).expect_err("duplicate aliases should fail first");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains(".aliases[0] is duplicated"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("supports_output"),
+            "duplicate alias should fail before other field validation: {message}"
         );
     }
 
@@ -2432,6 +2533,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_digital_pin_catalog_lookup_accepts_alias() {
+        let resources = resources_with_valid_digital_pins();
+        let spec = lookup_digital_spec(&resources, "blue-led").expect("alias should resolve");
+        assert_eq!(spec.label, "GPIO22");
+        assert_eq!(spec.aliases, vec!["blue-led".to_string()]);
+    }
+
+    #[test]
+    fn parse_digital_pin_catalog_rejects_alias_that_matches_primary_label() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "GPIO17",
+                        "value_path": "/sys/class/gpio/gpio17/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    },
+                    {
+                        "label": "GPIO22",
+                        "aliases": ["GPIO17"],
+                        "value_path": "/sys/class/gpio/gpio22/value",
+                        "supports_input": true,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": true
+                    }
+                ]
+            }),
+        )]);
+        let err = parse_digital_pin_catalog(&resources)
+            .expect_err("alias matching a primary label must fail");
+        let message = match err {
+            GpioError::Other(message) => message,
+            _ => panic!("expected other error"),
+        };
+        assert!(
+            message.contains(".aliases[0] is duplicated"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
     fn parse_digital_pin_catalog_normalizes_value_path_in_lookup_result() {
         let resources = BTreeMap::from([(
             "gpio".to_string(),
@@ -2472,10 +2619,71 @@ mod tests {
 
     #[test]
     fn pin_acquire_detects_duplicate_use() {
-        acquire_pin_label("GPIO17", PinMode::Out).expect("first acquire should pass");
-        let err = acquire_pin_label("GPIO17", PinMode::In).expect_err("duplicate must fail");
+        let pin_key = digital_acquire_key("/sys/class/gpio/gpio17/value");
+        acquire_pin_key(&pin_key, PinMode::Out).expect("first acquire should pass");
+        let err = acquire_pin_key(&pin_key, PinMode::In).expect_err("duplicate must fail");
         assert!(matches!(err, GpioError::AlreadyInUse));
-        release_pin_label("GPIO17");
+        release_pin_key(&pin_key);
+    }
+
+    #[test]
+    fn alias_acquire_uses_same_physical_pin_key() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "A27",
+                        "aliases": ["blue-led"],
+                        "value_path": "/sys/class/gpio/gpio507/value",
+                        "supports_input": false,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": false
+                    }
+                ]
+            }),
+        )]);
+        let primary = lookup_digital_spec(&resources, "A27").expect("primary label should resolve");
+        let alias = lookup_digital_spec(&resources, "blue-led").expect("alias should resolve");
+        let primary_key = digital_acquire_key(&primary.value_path);
+        let alias_key = digital_acquire_key(&alias.value_path);
+        acquire_pin_key(&primary_key, PinMode::Out).expect("primary acquire should pass");
+        let err = acquire_pin_key(&alias_key, PinMode::Out)
+            .expect_err("alias acquire should fail for the same physical pin");
+        assert!(matches!(err, GpioError::AlreadyInUse));
+        release_pin_key(&primary_key);
+    }
+
+    #[test]
+    fn digital_config_uses_canonical_label_for_alias_lookup() {
+        let resources = BTreeMap::from([(
+            "gpio".to_string(),
+            json!({
+                "digital_pins": [
+                    {
+                        "label": "A27",
+                        "aliases": ["blue-led"],
+                        "value_path": "/sys/class/gpio/gpio507/value",
+                        "supports_input": false,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": false
+                    }
+                ]
+            }),
+        )]);
+        let spec = lookup_digital_spec(&resources, "blue-led").expect("alias should resolve");
+        let handle = DigitalPinHandle {
+            label: spec.label,
+            acquire_key: digital_acquire_key(&spec.value_path),
+            value_path: spec.value_path,
+            mode: PinMode::Out,
+            active_level: ActiveLevel::ActiveHigh,
+            pull_resistor: None,
+        };
+        let config = digital_config_from_handle(&handle);
+        assert_eq!(config.label, "A27");
     }
 
     #[test]

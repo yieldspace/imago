@@ -8,7 +8,7 @@ use anyhow::{Context, anyhow};
 use crate::commands::{build::ProjectDependency, plugin_sources};
 
 use super::{
-    CACHE_ROOT_REL, MISSING_CACHE_HINT,
+    CACHE_ROOT_REL, DependencyCacheEntry, MISSING_CACHE_HINT,
     digest::{compute_path_digest_hex, compute_sha256_hex},
     io::{
         cache_component_path, cache_entry_root, copy_tree_with_conflict_check,
@@ -53,13 +53,29 @@ pub(crate) fn is_cache_hit(
         return Ok(false);
     }
 
+    if ensure_cache_source_fingerprints_match(project_root, dependency, &entry).is_err() {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn ensure_cache_source_fingerprints_match(
+    project_root: &Path,
+    dependency: &ProjectDependency,
+    entry: &DependencyCacheEntry,
+) -> anyhow::Result<()> {
     if let Some(actual_fingerprint) = wit_source_fingerprint_if_exists(
         project_root,
         &dependency.wit.source,
         dependency.wit.source_kind,
     )? && entry.wit_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
     {
-        return Ok(false);
+        return Err(anyhow!(
+            "cache wit source fingerprint mismatch (cache='{}', actual='{}')",
+            entry.wit_source_fingerprint.as_deref().unwrap_or(""),
+            actual_fingerprint
+        ));
     }
 
     if let Some(component_source) = entry.component_source.as_deref()
@@ -74,10 +90,14 @@ pub(crate) fn is_cache_hit(
         )?
         && entry.component_source_fingerprint.as_deref() != Some(actual_fingerprint.as_str())
     {
-        return Ok(false);
+        return Err(anyhow!(
+            "cache component source fingerprint mismatch (cache='{}', actual='{}')",
+            entry.component_source_fingerprint.as_deref().unwrap_or(""),
+            actual_fingerprint
+        ));
     }
 
-    Ok(true)
+    Ok(())
 }
 
 pub(crate) fn hydrate_project_wit_deps(
@@ -99,6 +119,16 @@ pub(crate) fn hydrate_project_wit_deps(
                     MISSING_CACHE_HINT
                 )
             })?;
+        ensure_cache_source_fingerprints_match(project_root, dependency, &entry).map_err(
+            |err| {
+                anyhow!(
+                    "dependency '{}' cache is stale under {}; {}: {err}",
+                    dependency.name,
+                    CACHE_ROOT_REL,
+                    MISSING_CACHE_HINT
+                )
+            },
+        )?;
 
         if !entry_files_are_complete(project_root, &entry)? {
             return Err(anyhow!(
@@ -175,6 +205,16 @@ pub(crate) fn verify_project_dependency_cache(
                     MISSING_CACHE_HINT
                 )
             })?;
+        ensure_cache_source_fingerprints_match(project_root, dependency, &entry).map_err(
+            |err| {
+                anyhow!(
+                    "dependency '{}' cache is stale under {}; {}: {err}",
+                    dependency.name,
+                    CACHE_ROOT_REL,
+                    MISSING_CACHE_HINT
+                )
+            },
+        )?;
         let hydrated_dependency_name = entry
             .resolved_package_name
             .as_deref()
@@ -310,9 +350,17 @@ mod tests {
     use crate::commands::dependency_cache::{
         DependencyCacheEntry, DependencyCacheTransitivePackage, cache_component_path, save_entry,
     };
+    use crate::commands::{
+        build::{
+            ManifestCapabilityPolicy, ManifestDependencyKind, ProjectDependency,
+            ProjectDependencyComponent, ProjectDependencySource,
+        },
+        plugin_sources,
+    };
 
     use super::{
-        resolve_cached_component_path, validate_hydrated_wit_output_path_collisions,
+        component_source_fingerprint_if_exists, resolve_cached_component_path,
+        validate_hydrated_wit_output_path_collisions, verify_project_dependency_cache,
         wit_source_fingerprint_if_exists,
     };
 
@@ -356,6 +404,28 @@ mod tests {
                 source: None,
                 path: "wit/deps/wasi-io-0.2.0".to_string(),
             }],
+        }
+    }
+
+    fn sample_dependency() -> ProjectDependency {
+        ProjectDependency {
+            name: "path-source-0".to_string(),
+            version: "0.1.0".to_string(),
+            kind: ManifestDependencyKind::Wasm,
+            wit: ProjectDependencySource {
+                source_kind: plugin_sources::SourceKind::Path,
+                source: "registry/example".to_string(),
+                registry: None,
+                sha256: None,
+            },
+            requires: vec![],
+            component: Some(ProjectDependencyComponent {
+                source_kind: plugin_sources::SourceKind::Path,
+                source: "registry/example-component.wasm".to_string(),
+                registry: None,
+                sha256: None,
+            }),
+            capabilities: ManifestCapabilityPolicy::default(),
         }
     }
 
@@ -428,5 +498,71 @@ mod tests {
         )
         .expect("missing path should be treated as none");
         assert!(fingerprint.is_none());
+    }
+
+    #[test]
+    fn verify_project_dependency_cache_rejects_component_source_fingerprint_drift() {
+        let root = new_temp_dir("fingerprint-drift");
+        fs::create_dir_all(root.join("registry/example")).expect("source dir should exist");
+        fs::write(
+            root.join("registry/example/package.wit"),
+            b"package test:example@0.1.0;\n",
+        )
+        .expect("wit source should be written");
+        fs::write(
+            root.join("registry/example-component.wasm"),
+            b"\0asm\x01\0\0\0",
+        )
+        .expect("component source should be written");
+
+        let component_sha =
+            super::compute_sha256_hex(&root.join("registry/example-component.wasm"))
+                .expect("component sha should compute");
+        let mut entry = sample_entry(&component_sha);
+        entry.transitive_packages.clear();
+        entry.wit_source_fingerprint = wit_source_fingerprint_if_exists(
+            &root,
+            "registry/example",
+            plugin_sources::SourceKind::Path,
+        )
+        .expect("wit fingerprint should compute");
+        entry.component_source_fingerprint = component_source_fingerprint_if_exists(
+            &root,
+            "registry/example-component.wasm",
+            plugin_sources::SourceKind::Path,
+        )
+        .expect("component fingerprint should compute");
+
+        let cache_wit_dir = root.join(".imago/deps/path-source-0").join(&entry.wit_path);
+        fs::create_dir_all(&cache_wit_dir).expect("cache wit dir should exist");
+        fs::write(
+            cache_wit_dir.join("package.wit"),
+            b"package test:example@0.1.0;\n",
+        )
+        .expect("cache wit should be written");
+        entry.wit_digest = super::compute_path_digest_hex(&cache_wit_dir)
+            .expect("cache wit digest should compute");
+
+        let component_path = cache_component_path(&root, &entry.name, &component_sha);
+        if let Some(parent) = component_path.parent() {
+            fs::create_dir_all(parent).expect("component cache dir should be created");
+        }
+        fs::write(&component_path, b"\0asm\x01\0\0\0").expect("component cache should exist");
+        save_entry(&root, &entry).expect("entry should be saved");
+
+        verify_project_dependency_cache(&root, &[sample_dependency()], None)
+            .expect("matching fingerprints should pass");
+
+        fs::write(
+            root.join("registry/example-component.wasm"),
+            b"\0asm\x01\0\0\0drift",
+        )
+        .expect("component source should drift");
+        let err = verify_project_dependency_cache(&root, &[sample_dependency()], None)
+            .expect_err("drifted component source should fail cache verification");
+        assert!(
+            err.to_string()
+                .contains("cache component source fingerprint mismatch")
+        );
     }
 }

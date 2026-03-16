@@ -4,7 +4,7 @@ use anyhow::anyhow;
 
 use crate::lockfile::{
     BindingWitExpectation, DependencyExpectation, ImagoLockRequested, ImagoLockRequestedBinding,
-    ImagoLockRequestedDependency,
+    ImagoLockRequestedDependency, ImagoLockRequestedResourceProfile, ResourceProfileExpectation,
 };
 
 use super::{
@@ -56,9 +56,25 @@ pub fn compute_binding_request_id(expectation: &BindingWitExpectation) -> String
     format!("bind:{}", sha256_hex(joined.as_bytes()))
 }
 
+pub fn compute_resource_profile_request_id(expectation: &ResourceProfileExpectation) -> String {
+    let lines = [
+        "resource=".to_string() + expectation.resource.as_str(),
+        "profile_kind=".to_string() + expectation.profile_kind.as_str(),
+        "source_kind=".to_string() + source_kind_label(expectation.source_kind),
+        "source=".to_string() + expectation.source.as_str(),
+        "provider_dependency=".to_string()
+            + expectation.provider_dependency.as_deref().unwrap_or(""),
+        "component_sha256=".to_string() + expectation.component_sha256.as_deref().unwrap_or(""),
+        "digest=".to_string() + expectation.digest.as_str(),
+    ];
+    let joined = lines.join("\n");
+    format!("res:{}", sha256_hex(joined.as_bytes()))
+}
+
 pub fn build_requested_snapshot(
     dependency_expectations: &[DependencyExpectation],
     binding_expectations: &[BindingWitExpectation],
+    resource_profile_expectations: &[ResourceProfileExpectation],
     namespace_registries: Option<&BTreeMap<String, String>>,
 ) -> anyhow::Result<ImagoLockRequested> {
     let mut dependencies = dependency_expectations
@@ -125,17 +141,48 @@ pub fn build_requested_snapshot(
     }
     bindings.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let fingerprint = compute_requested_fingerprint(&dependencies, &bindings, namespace_registries);
+    let mut resource_profiles = resource_profile_expectations
+        .iter()
+        .map(|expectation| ImagoLockRequestedResourceProfile {
+            id: compute_resource_profile_request_id(expectation),
+            resource: expectation.resource.clone(),
+            profile_kind: expectation.profile_kind.clone(),
+            source_kind: expectation.source_kind,
+            source: expectation.source.clone(),
+            provider_dependency: expectation.provider_dependency.clone(),
+            component_sha256: expectation.component_sha256.clone(),
+            digest: expectation.digest.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut seen_resource_profile_ids = BTreeSet::new();
+    for resource_profile in &resource_profiles {
+        if !seen_resource_profile_ids.insert(resource_profile.id.clone()) {
+            return Err(anyhow!(
+                "duplicate resource profile request id '{}' in requested snapshot; remove duplicated resource profile requests",
+                resource_profile.id
+            ));
+        }
+    }
+    resource_profiles.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let fingerprint = compute_requested_fingerprint(
+        &dependencies,
+        &bindings,
+        &resource_profiles,
+        namespace_registries,
+    );
     Ok(ImagoLockRequested {
         fingerprint,
         dependencies,
         bindings,
+        resource_profiles,
     })
 }
 
 pub fn compute_requested_fingerprint(
     dependencies: &[ImagoLockRequestedDependency],
     bindings: &[ImagoLockRequestedBinding],
+    resource_profiles: &[ImagoLockRequestedResourceProfile],
     namespace_registries: Option<&BTreeMap<String, String>>,
 ) -> String {
     let mut lines = vec!["imago-lock-requested:v1".to_string()];
@@ -221,6 +268,32 @@ pub fn compute_requested_fingerprint(
         ));
     }
 
+    for resource_profile in resource_profiles {
+        lines.push(format!("resource.id={}", resource_profile.id));
+        lines.push(format!("resource.name={}", resource_profile.resource));
+        lines.push(format!(
+            "resource.profile_kind={}",
+            resource_profile.profile_kind
+        ));
+        lines.push(format!(
+            "resource.source_kind={}",
+            source_kind_label(resource_profile.source_kind)
+        ));
+        lines.push(format!("resource.source={}", resource_profile.source));
+        lines.push(format!(
+            "resource.provider_dependency={}",
+            resource_profile
+                .provider_dependency
+                .as_deref()
+                .unwrap_or("")
+        ));
+        lines.push(format!(
+            "resource.component_sha256={}",
+            resource_profile.component_sha256.as_deref().unwrap_or("")
+        ));
+        lines.push(format!("resource.digest={}", resource_profile.digest));
+    }
+
     sha256_hex(lines.join("\n").as_bytes())
 }
 
@@ -230,9 +303,13 @@ mod tests {
 
     use crate::lockfile::{
         DependencyExpectation, LockCapabilityPolicy, LockDependencyKind, LockSourceKind,
+        ResourceProfileExpectation,
     };
 
-    use super::{build_requested_snapshot, compute_dependency_request_id};
+    use super::{
+        build_requested_snapshot, compute_dependency_request_id,
+        compute_resource_profile_request_id,
+    };
 
     fn sample_dependency(name: &str) -> DependencyExpectation {
         DependencyExpectation {
@@ -274,7 +351,7 @@ mod tests {
     fn build_requested_snapshot_rejects_duplicate_dependency_request_ids() {
         let dep_a = sample_dependency("dep-a");
         let dep_b = sample_dependency("dep-b");
-        let err = build_requested_snapshot(&[dep_a, dep_b], &[], None)
+        let err = build_requested_snapshot(&[dep_a, dep_b], &[], &[], None)
             .expect_err("duplicated request IDs should fail");
         assert!(err.to_string().contains("duplicate dependency request id"));
     }
@@ -287,11 +364,28 @@ mod tests {
         let mut dep_b = sample_dependency("dep-b");
         dep_b.source = "acme:other".to_string();
 
-        let left = build_requested_snapshot(&[dep_a.clone(), dep_b.clone()], &[], Some(&ns))
+        let left = build_requested_snapshot(&[dep_a.clone(), dep_b.clone()], &[], &[], Some(&ns))
             .expect("snapshot should build");
-        let right = build_requested_snapshot(&[dep_b, dep_a], &[], Some(&ns))
+        let right = build_requested_snapshot(&[dep_b, dep_a], &[], &[], Some(&ns))
             .expect("snapshot should build");
         assert_eq!(left.fingerprint, right.fingerprint);
         assert_eq!(left.dependencies, right.dependencies);
+    }
+
+    #[test]
+    fn resource_profile_request_id_is_stable() {
+        let expectation = ResourceProfileExpectation {
+            resource: "gpio".to_string(),
+            profile_kind: "path".to_string(),
+            source_kind: LockSourceKind::Path,
+            source: "../boards/milkv-duo-s/profile.toml".to_string(),
+            provider_dependency: None,
+            component_sha256: None,
+            digest: "abc123".to_string(),
+        };
+        assert_eq!(
+            compute_resource_profile_request_id(&expectation),
+            compute_resource_profile_request_id(&expectation)
+        );
     }
 }

@@ -1697,6 +1697,8 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
         project_root,
         &namespace_registries,
     )?;
+    let mut resource_providers =
+        build::load_declared_resource_providers_from_project_root(project_root)?;
     validate_wit_sources_outside_wit_deps(project_root, &dependencies, &bindings)?;
     validate_wit_output_path_collisions(&dependencies)?;
 
@@ -1708,9 +1710,10 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
         .iter()
         .map(binding_expectation_for_project_binding)
         .collect::<Vec<_>>();
-    let requested = build_requested_snapshot(
+    build_requested_snapshot(
         &dependency_expectations,
         &binding_expectations,
+        &[],
         Some(&namespace_registries),
     )
     .context("failed to build requested lock snapshot; duplicate dependency or binding requests detected")?;
@@ -1804,6 +1807,31 @@ async fn run_inner_async(project_root: &Path) -> anyhow::Result<UpdateSummary> {
             requires_request_ids: vec![],
         });
     }
+    let embedded_provider_candidates = dependencies
+        .iter()
+        .zip(lock_entries.iter())
+        .filter_map(|(dependency, entry)| {
+            let component_sha256 = entry.component_sha256.as_deref()?;
+            Some(build::EmbeddedResourceProviderCandidate {
+                project_dependency: dependency,
+                resolved_dependency_name: &entry.resolved_name,
+                component_sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    resource_providers.extend(build::load_embedded_resource_providers(
+        project_root,
+        &embedded_provider_candidates,
+    )?);
+    let resource_profile_expectations =
+        build::load_resource_profile_expectations_from_providers(&resource_providers);
+    let requested = build_requested_snapshot(
+        &dependency_expectations,
+        &binding_expectations,
+        &resource_profile_expectations,
+        Some(&namespace_registries),
+    )
+    .context("failed to build requested lock snapshot; duplicate dependency or binding requests detected")?;
     for (request_id, requires) in pending_requires_by_request_id {
         let requires_request_ids = requires
             .into_iter()
@@ -2086,6 +2114,10 @@ mod tests {
         hex::encode(sha2::Sha256::digest(bytes))
     }
 
+    fn minimal_wasm_module_bytes() -> &'static [u8] {
+        b"\0asm\x01\0\0\0"
+    }
+
     fn encode_wit_package(root: &Path) -> Vec<u8> {
         let mut resolve = Resolve::default();
         let (pkg, _) = resolve
@@ -2163,6 +2195,62 @@ mod tests {
             .find(|entry| entry.id == resolved.request_id)
             .expect("requested binding should exist");
         (requested, resolved)
+    }
+
+    #[tokio::test]
+    async fn update_records_gpio_profile_request_in_lock() {
+        let root = new_temp_dir("gpio-profile-requested");
+        write(
+            &root.join("imago.toml"),
+            br#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [resources.gpio.profile]
+    path = "boards/milkv-duo-s/profile.toml"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write(
+            &root.join("boards/milkv-duo-s/profile.toml"),
+            br#"
+    [[digital_pins]]
+    soc_name = "A27"
+    aliases = ["blue-led"]
+    gpio_num = 507
+    value_path = "/sys/class/gpio/gpio507/value"
+    supports_input = false
+    supports_output = true
+    default_active_level = "active-high"
+    allow_pull_resistor = false
+    header = "onboard"
+    physical_pin = 0
+    "#,
+        );
+
+        let result = run_with_project_root(UpdateArgs {}, &root).await;
+        assert_eq!(
+            result.exit_code, 0,
+            "update should succeed: {:?}",
+            result.stderr
+        );
+
+        let lock_raw = fs::read_to_string(root.join("imago.lock")).expect("lock should exist");
+        let lock: ImagoLock = toml::from_str(&lock_raw).expect("lock should parse");
+        assert!(lock.requested.dependencies.is_empty());
+        assert!(lock.requested.bindings.is_empty());
+        assert_eq!(lock.requested.resource_profiles.len(), 1);
+        let profile = &lock.requested.resource_profiles[0];
+        assert_eq!(profile.resource, "gpio");
+        assert_eq!(profile.profile_kind, "path");
+        assert_eq!(profile.source_kind, LockSourceKind::Path);
+        assert_eq!(profile.source, "boards/milkv-duo-s/profile.toml");
+        assert!(!profile.digest.is_empty());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2696,7 +2784,7 @@ mod tests {
     #[tokio::test]
     async fn update_records_component_source_and_sha_and_materializes_dependency_component_cache() {
         let root = new_temp_dir("component-sha");
-        let component_bytes = b"\0asmfake-component";
+        let component_bytes = minimal_wasm_module_bytes();
         let component_sha = sha256_hex(component_bytes);
         write(
             &root.join("imago.toml"),
@@ -5283,7 +5371,7 @@ mod tests {
             version: "0.1.0".to_string(),
             sha256: None,
         };
-        let err = build_requested_snapshot(&[], &[binding.clone(), binding], None)
+        let err = build_requested_snapshot(&[], &[binding.clone(), binding], &[], None)
             .context(
                 "failed to build requested lock snapshot; duplicate dependency or binding requests detected",
             )
