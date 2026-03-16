@@ -834,6 +834,7 @@ fn validate_final_gpio_catalog(resources: &JsonValue) -> anyhow::Result<()> {
         .as_array()
         .ok_or_else(|| anyhow!("resources.gpio.digital_pins must be an array"))?;
     let mut seen_public_names = BTreeSet::new();
+    let mut seen_value_paths = BTreeSet::new();
     for (index, pin) in pins.iter().enumerate() {
         let pin_path = format!("resources.gpio.digital_pins[{index}]");
         let object = pin
@@ -853,7 +854,12 @@ fn validate_final_gpio_catalog(resources: &JsonValue) -> anyhow::Result<()> {
                 ));
             }
         }
-        let _value_path = required_gpio_string_field(object, &pin_path, "value_path")?;
+        let value_path = required_gpio_string_field(object, &pin_path, "value_path")?;
+        if !seen_value_paths.insert(value_path.to_string()) {
+            return Err(anyhow!(
+                "resources.gpio.digital_pins contains duplicated value_path: {value_path}"
+            ));
+        }
         let supports_input = required_gpio_bool_field(object, &pin_path, "supports_input")?;
         let supports_output = required_gpio_bool_field(object, &pin_path, "supports_output")?;
         if !supports_input && !supports_output {
@@ -2097,6 +2103,47 @@ digital_pins = [
         assert!(
             err.to_string()
                 .contains("resources.gpio.digital_pins[blue-led]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn merge_resource_providers_rejects_provider_gpio_duplicate_value_paths() {
+        let mut first = sample_gpio_provider();
+        first.resources = json!({
+            "gpio": {
+                "digital_pins": [{
+                    "label": "A27",
+                    "aliases": ["blue-led"],
+                    "value_path": "/sys/class/gpio/gpio507/value",
+                    "supports_input": false,
+                    "supports_output": true,
+                    "default_active_level": "active-high",
+                    "allow_pull_resistor": false
+                }]
+            }
+        });
+        let mut second = sample_gpio_provider();
+        second.provider_name = "yieldspace:other-board".to_string();
+        second.resources = json!({
+            "gpio": {
+                "digital_pins": [{
+                    "label": "B12",
+                    "aliases": ["j3:13"],
+                    "value_path": "/sys/class/gpio/gpio507/value",
+                    "supports_input": true,
+                    "supports_output": true,
+                    "default_active_level": "active-high",
+                    "allow_pull_resistor": false
+                }]
+            }
+        });
+
+        let err = merge_resource_providers(None, BTreeMap::new(), &[first, second])
+            .expect_err("provider duplicate value paths must be rejected");
+        assert!(
+            err.to_string()
+                .contains("resources.gpio.digital_pins contains duplicated value_path"),
             "unexpected error: {err}"
         );
     }
