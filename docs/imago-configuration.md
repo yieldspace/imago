@@ -48,9 +48,9 @@ name = "example-service"
 
 ### The `main` field
 
-- Type: `string` (relative file path)
+- Type: `string` (relative filesystem path)
 - Required/Optional: Required.
-- Accepted values / Constraints: non-empty; relative path only; no Windows drive prefix; no backslashes; no path traversal; file must exist.
+- Accepted values / Constraints: non-empty; relative path only; no Windows drive prefix; no backslashes; `.` segments are normalized away; `..` parent segments are allowed; file must exist.
 - Default: none.
 - Example:
 
@@ -58,7 +58,7 @@ name = "example-service"
 main = "build/app.wasm"
 ```
 
-- Validation error notes: missing file or unsafe path causes `imago artifact build` to fail.
+- Validation error notes: missing file or unsafe path syntax causes `imago artifact build` to fail. The build output rewrites `main` to a hashed artifact filename in `build/manifest.json`, so release manifests still use a traversal-free entry name.
 
 ### The `type` field
 

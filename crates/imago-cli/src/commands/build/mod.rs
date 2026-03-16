@@ -542,7 +542,7 @@ fn build_project_with_target_override_inner(
     validate_service_name(&name)?;
 
     let main_raw = required_string(&root, "main")?;
-    let source_main_path = normalize_relative_path(&main_raw, "main")?;
+    let source_main_path = normalize_source_main_path(&main_raw, "main")?;
 
     let app_type = required_string(&root, "type")?;
     validate_app_type(&app_type)?;
@@ -1181,6 +1181,43 @@ mod tests {
         assert!(root.join(&hashed_main).exists());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_main_path_with_parent_segments() {
+        let workspace_root = new_temp_dir("main-parent-path");
+        let root = workspace_root.join("project");
+        fs::create_dir_all(&root).expect("project dir should be created");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "../shared/app.wasm"
+    type = "http"
+
+    [http]
+    port = 18080
+
+    [target.default]
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+    "#,
+        );
+        write_file(&workspace_root.join("shared/app.wasm"), b"wasm-from-parent");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let hashed_main = assert_hashed_main_path(&manifest, "svc");
+        let hashed_main_path = root.join(&hashed_main);
+        assert!(
+            hashed_main_path.exists(),
+            "hashed main should be materialized"
+        );
+        assert_eq!(
+            fs::read(&hashed_main_path).expect("hashed main should be readable"),
+            b"wasm-from-parent"
+        );
+
+        let _ = fs::remove_dir_all(workspace_root);
     }
 
     #[test]
