@@ -106,7 +106,7 @@ wasmparser = { version = "0.245.1", features = ["component-model"] }
 wat = "1.245.1"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"
-web-transport-quinn = "0.11.6"
+web-transport-quinn = "0.11.8"
 syn = "2.0.117"
 toml_edit = "0.25.4"
 
