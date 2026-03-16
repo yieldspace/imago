@@ -869,11 +869,11 @@ fn capability_policy_allows_dependency_interface(
     package_name: &str,
     interface_name: &str,
 ) -> bool {
-    if capabilities
-        .deps
-        .get("*")
-        .is_some_and(|rules| rules.iter().any(|rule| rule == "*"))
-    {
+    if capabilities.deps.get("*").is_some_and(|rules| {
+        rules
+            .iter()
+            .any(|rule| rule == "*" || rule == interface_name)
+    }) {
         return true;
     }
     capabilities.deps.get(package_name).is_some_and(|rules| {
@@ -4147,6 +4147,54 @@ interface api {}
 
         build_project("default", &root)
             .expect("build should accept project WIT imports when capability matches");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_project_wit_import_with_wildcard_dependency_capability_interface() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-wildcard-interface");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities.deps]
+    "*" = ["api"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {}
+"#,
+        );
+        run_update(&root);
+
+        build_project("default", &root).expect(
+            "build should accept project WIT imports when wildcard dependency capability matches",
+        );
 
         let _ = fs::remove_dir_all(root);
     }

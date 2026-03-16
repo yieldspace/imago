@@ -635,17 +635,24 @@ fn merge_provider_gpio_digital_pins(
     incoming: &[JsonValue],
     provider_name: &str,
 ) -> anyhow::Result<()> {
-    let mut seen_labels = target
-        .iter()
-        .map(|entry| digital_pin_label(entry, "resources.gpio.digital_pins provider entry"))
-        .collect::<anyhow::Result<BTreeSet<_>>>()?;
+    let mut seen_public_names = BTreeSet::new();
+    for entry in target.iter() {
+        for public_name in
+            digital_pin_public_names(entry, "resources.gpio.digital_pins provider entry")?
+        {
+            seen_public_names.insert(public_name);
+        }
+    }
     for entry in incoming {
-        let label = digital_pin_label(entry, "resources.gpio.digital_pins provider entry")?;
-        if !seen_labels.insert(label.clone()) {
-            return Err(anyhow!(
-                "resource provider '{}' conflicts with another provider at resources.gpio.digital_pins[{label}]",
-                provider_name
-            ));
+        for public_name in
+            digital_pin_public_names(entry, "resources.gpio.digital_pins provider entry")?
+        {
+            if !seen_public_names.insert(public_name.clone()) {
+                return Err(anyhow!(
+                    "resource provider '{}' conflicts with another provider at resources.gpio.digital_pins[{public_name}]",
+                    provider_name
+                ));
+            }
         }
         target.push(entry.clone());
     }
@@ -820,10 +827,12 @@ fn validate_final_gpio_catalog(resources: &JsonValue) -> anyhow::Result<()> {
     let pins = digital_pins
         .as_array()
         .ok_or_else(|| anyhow!("resources.gpio.digital_pins must be an array"))?;
+    let mut seen_public_names = BTreeSet::new();
     for (index, pin) in pins.iter().enumerate() {
+        let pin_path = format!("resources.gpio.digital_pins[{index}]");
         let object = pin
             .as_object()
-            .ok_or_else(|| anyhow!("resources.gpio.digital_pins[{index}] must be a table"))?;
+            .ok_or_else(|| anyhow!("{pin_path} must be a table"))?;
         for field in [
             "label",
             "value_path",
@@ -834,7 +843,14 @@ fn validate_final_gpio_catalog(resources: &JsonValue) -> anyhow::Result<()> {
         ] {
             if !object.contains_key(field) {
                 return Err(anyhow!(
-                    "resources.gpio.digital_pins[{index}].{field} is required after resource merge"
+                    "{pin_path}.{field} is required after resource merge"
+                ));
+            }
+        }
+        for public_name in digital_pin_public_names(pin, &pin_path)? {
+            if !seen_public_names.insert(public_name.clone()) {
+                return Err(anyhow!(
+                    "resources.gpio.digital_pins contains duplicated public name: {public_name}"
                 ));
             }
         }
@@ -859,6 +875,30 @@ fn digital_pin_label(entry: &JsonValue, field_name: &str) -> anyhow::Result<Stri
         .filter(|label| !label.is_empty())
         .map(ToString::to_string)
         .ok_or_else(|| anyhow!("{field_name}.label is required"))
+}
+
+fn digital_pin_public_names(entry: &JsonValue, field_name: &str) -> anyhow::Result<Vec<String>> {
+    let label = digital_pin_label(entry, field_name)?;
+    let mut public_names = vec![label];
+
+    let Some(entry) = entry.as_object() else {
+        return Err(anyhow!("{field_name} must be a table"));
+    };
+    let Some(aliases) = entry.get("aliases") else {
+        return Ok(public_names);
+    };
+    let aliases = aliases
+        .as_array()
+        .ok_or_else(|| anyhow!("{field_name}.aliases must be an array"))?;
+    for (alias_index, alias) in aliases.iter().enumerate() {
+        let alias = alias
+            .as_str()
+            .map(str::trim)
+            .filter(|alias| !alias.is_empty())
+            .ok_or_else(|| anyhow!("{field_name}.aliases[{alias_index}] must be a string"))?;
+        public_names.push(alias.to_string());
+    }
+    Ok(public_names)
 }
 
 fn join_resource_path(prefix: &str, key: &str) -> String {
@@ -1952,6 +1992,52 @@ digital_pins = [
         assert!(
             err.to_string()
                 .contains("resources.gpio.digital_pins contains duplicate patch label: A27"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn merge_resource_providers_rejects_provider_gpio_alias_conflicts() {
+        let mut first = sample_gpio_provider();
+        first.resources = json!({
+            "gpio": {
+                "digital_pins": [{
+                    "label": "A27",
+                    "aliases": ["blue-led"],
+                    "value_path": "/sys/class/gpio/gpio507/value",
+                    "supports_input": false,
+                    "supports_output": true,
+                    "default_active_level": "active-high",
+                    "allow_pull_resistor": false
+                }]
+            }
+        });
+        let mut second = sample_gpio_provider();
+        second.provider_name = "yieldspace:other-board".to_string();
+        second.resources = json!({
+            "gpio": {
+                "digital_pins": [{
+                    "label": "status-led",
+                    "aliases": ["blue-led"],
+                    "value_path": "/sys/class/gpio/gpio508/value",
+                    "supports_input": false,
+                    "supports_output": true,
+                    "default_active_level": "active-high",
+                    "allow_pull_resistor": false
+                }]
+            }
+        });
+
+        let err = merge_resource_providers(None, BTreeMap::new(), &[first, second])
+            .expect_err("provider alias collisions must be rejected");
+        assert!(
+            err.to_string()
+                .contains("resource provider 'yieldspace:other-board' conflicts"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("resources.gpio.digital_pins[blue-led]"),
             "unexpected error: {err}"
         );
     }
