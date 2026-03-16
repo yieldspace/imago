@@ -78,7 +78,7 @@ Choose the path that matches what you want to do:
 ### Start from a fresh template
 
 1. Install `imago` and `imagod`.
-   - Follow the installer and cargo options in [QUICKSTART.md](QUICKSTART.md).
+   - Run the two installer commands in [QUICKSTART.md](QUICKSTART.md).
 2. Create a new project and move into it.
 
    ```bash
@@ -87,10 +87,10 @@ Choose the path that matches what you want to do:
    ```
 
 3. Continue with [QUICKSTART.md](QUICKSTART.md) for the remaining setup.
-   - It covers the `wasm32-wasip2` target, key generation, `imagod.toml`, daemon startup, and the first deploy.
+   - It covers the `wasm32-wasip2` target, local key generation, SSH-only target config, `imagod.toml`, manual daemon startup, and the first deploy.
 
 The bare `rust` template creates the application files only (`Cargo.toml`, `imago.toml`, and `src/main.rs`).
-It does not include `imagod.toml` or the TLS material needed to start `imagod`.
+It does not include `imagod.toml` or the local key material needed to start `imagod`.
 
 ### Try a checked-in sample
 
