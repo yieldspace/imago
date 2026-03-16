@@ -281,7 +281,7 @@ mod imp {
                     "cloned cvimodel tensor metadata does not match template",
                 ));
             }
-            Ok(Box::new(CvitekExecutionContext {
+            let context: Box<dyn BackendExecutionContext> = Box::new(CvitekExecutionContext {
                 model,
                 inputs_meta: self.0.inputs.clone(),
                 outputs_meta: self.0.outputs.clone(),
@@ -289,8 +289,8 @@ mod imp {
                 raw_outputs,
                 inputs: vec![None; self.0.inputs.len()],
                 outputs: vec![None; self.0.outputs.len()],
-            })
-            .into())
+            });
+            Ok(context.into())
         }
     }
 
@@ -429,13 +429,13 @@ mod imp {
         let (inputs, outputs) = model.io_tensors()?;
         let inputs = tensor_infos(&inputs)?;
         let outputs = tensor_infos(&outputs)?;
-        Ok(Box::new(CvitekGraph(Arc::new(SharedModel {
+        let graph: Box<dyn BackendGraph> = Box::new(CvitekGraph(Arc::new(SharedModel {
             model,
             inputs,
             outputs,
             clone_lock: Mutex::new(()),
-        })))
-        .into())
+        })));
+        Ok(graph.into())
     }
 
     fn tensor_infos(tensors: &[CviTensor]) -> Result<Vec<TensorInfo>, BackendError> {
