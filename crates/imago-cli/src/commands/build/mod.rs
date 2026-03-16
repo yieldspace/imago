@@ -788,7 +788,9 @@ fn validate_project_wit_dependency_capabilities(
         .iter()
         .map(|dependency| dependency.name.as_str())
         .collect::<BTreeSet<_>>();
-    for (package_name, interface_name) in imported {
+    for imported_interface in imported {
+        let package_name = imported_interface.package_name;
+        let interface_name = imported_interface.interface_name;
         if !dependency_names.contains(package_name.as_str()) {
             continue;
         }
@@ -796,6 +798,7 @@ fn validate_project_wit_dependency_capabilities(
             capabilities,
             &package_name,
             &interface_name,
+            &imported_interface.function_names,
         ) {
             continue;
         }
@@ -808,10 +811,17 @@ fn validate_project_wit_dependency_capabilities(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ImportedDependencyInterface {
+    package_name: String,
+    interface_name: String,
+    function_names: BTreeSet<String>,
+}
+
 fn collect_project_wit_dependency_imports(
     project_root: &Path,
     wit_world: Option<&str>,
-) -> anyhow::Result<Vec<(String, String)>> {
+) -> anyhow::Result<Vec<ImportedDependencyInterface>> {
     let wit_root = project_root.join("wit");
     if !wit_root.exists() {
         return Ok(Vec::new());
@@ -888,7 +898,16 @@ fn collect_project_wit_dependency_imports(
                     wit_root.display()
                 )
             })?;
-        imports.insert((package_name, interface_name));
+        let function_names = interface
+            .functions
+            .keys()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        imports.insert(ImportedDependencyInterface {
+            package_name,
+            interface_name,
+            function_names,
+        });
     }
 
     Ok(imports.into_iter().collect())
@@ -898,20 +917,25 @@ fn capability_policy_allows_dependency_interface(
     capabilities: &ManifestCapabilityPolicy,
     package_name: &str,
     interface_name: &str,
+    function_names: &BTreeSet<String>,
 ) -> bool {
     if let Some(rules) = capabilities.deps.get(package_name) {
         return rules
             .iter()
-            .any(|rule| dependency_rule_allows_interface(rule, interface_name));
+            .any(|rule| dependency_rule_allows_interface(rule, interface_name, function_names));
     }
     capabilities.deps.get("*").is_some_and(|rules| {
         rules
             .iter()
-            .any(|rule| dependency_rule_allows_interface(rule, interface_name))
+            .any(|rule| dependency_rule_allows_interface(rule, interface_name, function_names))
     })
 }
 
-fn dependency_rule_allows_interface(rule: &str, interface_name: &str) -> bool {
+fn dependency_rule_allows_interface(
+    rule: &str,
+    interface_name: &str,
+    function_names: &BTreeSet<String>,
+) -> bool {
     let trimmed = rule.trim();
     if trimmed.is_empty() {
         return false;
@@ -924,7 +948,7 @@ fn dependency_rule_allows_interface(rule: &str, interface_name: &str) -> bool {
             return rule_interface == interface_name && !function_name.is_empty();
         }
     }
-    true
+    function_names.contains(trimmed)
 }
 
 pub(crate) fn load_declared_resource_providers_from_project_root(
@@ -4638,6 +4662,61 @@ interface api {
     }
 
     #[test]
+    fn build_rejects_project_wit_import_with_unmatched_bare_function_rule() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-bare-function-miss");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities.deps]
+    "test:example" = ["other"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {
+    invoke: func();
+}
+"#,
+        );
+        run_update(&root);
+
+        let err = build_project("default", &root)
+            .expect_err("unmatched bare function rule should not allow a different interface");
+        assert!(
+            err.to_string().contains(
+                "wit/world.wit imports dependency package 'test:example', interface 'api'"
+            ),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_rejects_project_wit_import_when_exact_dependency_capability_overrides_wildcard() {
         let root = new_temp_dir("dependencies-capabilities-project-wit-exact-overrides-wildcard");
         write_imago_toml(
@@ -4649,7 +4728,7 @@ interface api {
 
     [capabilities.deps]
     "*" = ["api"]
-    "test:example" = ["other.invoke"]
+    "test:example" = ["other"]
 
     [[dependencies]]
     version = "0.1.0"
