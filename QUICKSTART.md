@@ -88,7 +88,8 @@ Write the following content to `imago.toml` in your project root:
 ```toml
 "$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imago.schema.json"
 
-name = "example-service"
+name.cargo = true
+
 main = "target/wasm32-wasip2/release/example-service.wasm"
 type = "cli"
 
@@ -113,6 +114,10 @@ remote = "ssh://root@your-host"
 
 You can also override the daemon control socket path with `remote = "ssh://root@your-host?socket=/run/imago/imagod.sock"`.
 SSH targets use the system `ssh` command and must not set `server_name` or `client_key`.
+
+`name.cargo = true` reads `./Cargo.toml` `[package].name` from the same project root as `imago.toml`.
+If you prefer a literal value, keep using `name = "example-service"` instead.
+This lookup does not search parent directories; a missing sibling file or missing `[package].name` fails closed.
 
 ## Configure `imagod.toml`
 

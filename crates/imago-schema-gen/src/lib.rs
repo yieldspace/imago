@@ -111,10 +111,24 @@ mod tests {
             .get("properties")
             .and_then(JsonValue::as_object)
             .expect("imago root properties should be object");
+        let root_required = imago_json
+            .get("required")
+            .and_then(JsonValue::as_array)
+            .expect("imago root required should be array");
         let defs = imago_json
             .get("$defs")
             .and_then(JsonValue::as_object)
             .expect("imago $defs should be object");
+        let name_any_of = props
+            .get("name")
+            .and_then(|entry| entry.get("anyOf"))
+            .and_then(JsonValue::as_array)
+            .expect("imago name.anyOf should be array");
+        let name_resolver_one_of = defs
+            .get("ServiceNameResolver")
+            .and_then(|entry| entry.get("oneOf"))
+            .and_then(JsonValue::as_array)
+            .expect("ServiceNameResolver.oneOf should be array");
         let target_props = defs
             .get("TargetEntry")
             .and_then(|entry| entry.get("properties"))
@@ -184,6 +198,76 @@ mod tests {
         assert!(
             !props.contains_key("runtime"),
             "legacy runtime table must not be exposed in schema properties"
+        );
+        assert!(
+            root_required
+                .iter()
+                .any(|value| value.as_str() == Some("name")),
+            "name must be required in schema"
+        );
+        assert!(
+            name_any_of
+                .iter()
+                .any(|entry| entry.get("type").and_then(JsonValue::as_str) == Some("string")),
+            "name schema must allow literal strings"
+        );
+        assert!(
+            name_any_of.iter().any(|entry| {
+                entry.get("$ref").and_then(JsonValue::as_str) == Some("#/$defs/ServiceNameResolver")
+            }),
+            "name schema must allow resolver tables"
+        );
+        assert!(
+            name_resolver_one_of.len() == 2,
+            "resolver table must expose two exclusive branches"
+        );
+        assert!(
+            name_resolver_one_of.iter().any(|entry| {
+                entry
+                    .get("required")
+                    .and_then(JsonValue::as_array)
+                    .is_some_and(|required| {
+                        required.iter().any(|value| value.as_str() == Some("cargo"))
+                    })
+                    && entry
+                        .get("properties")
+                        .and_then(|value| value.get("cargo"))
+                        .and_then(|value| value.get("const"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+                    && entry
+                        .get("properties")
+                        .and_then(|value| value.get("pyproject"))
+                        .and_then(|value| value.get("const"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(false)
+            }),
+            "resolver table must require cargo=true in one branch"
+        );
+        assert!(
+            name_resolver_one_of.iter().any(|entry| {
+                entry
+                    .get("required")
+                    .and_then(JsonValue::as_array)
+                    .is_some_and(|required| {
+                        required
+                            .iter()
+                            .any(|value| value.as_str() == Some("pyproject"))
+                    })
+                    && entry
+                        .get("properties")
+                        .and_then(|value| value.get("cargo"))
+                        .and_then(|value| value.get("const"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(false)
+                    && entry
+                        .get("properties")
+                        .and_then(|value| value.get("pyproject"))
+                        .and_then(|value| value.get("const"))
+                        .and_then(JsonValue::as_bool)
+                        == Some(true)
+            }),
+            "resolver table must require pyproject=true in one branch"
         );
         assert!(
             !target_props.contains_key("ca_cert"),

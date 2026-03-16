@@ -1,10 +1,13 @@
 //! Typed configuration model for `imago.toml` plus JSON Schema derivation.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use anyhow::{Result, anyhow};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, IntoDeserializer},
+};
 use serde_json::Value as JsonValue;
 use url::Url;
 
@@ -22,8 +25,8 @@ pub struct ImagoTomlDocument {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ImagoTomlConfig {
-    #[schemars(required)]
-    pub name: Option<String>,
+    #[schemars(with = "Option<ServiceNameFieldSchema>", required)]
+    pub name: Option<ServiceNameField>,
     #[schemars(required)]
     pub main: Option<String>,
     #[serde(rename = "type")]
@@ -53,6 +56,82 @@ pub enum AppType {
     Http,
     Socket,
     Rpc,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub enum ServiceNameField {
+    Literal(String),
+    Resolver(ServiceNameResolver),
+}
+
+#[derive(Debug, Clone, JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum ServiceNameFieldSchema {
+    Literal(String),
+    Resolver(ServiceNameResolver),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceNameResolver {
+    #[serde(default)]
+    pub cargo: bool,
+    #[serde(default)]
+    pub pyproject: bool,
+}
+
+impl<'de> Deserialize<'de> for ServiceNameField {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = toml::Value::deserialize(deserializer)?;
+        match value {
+            toml::Value::String(text) => Ok(Self::Literal(text)),
+            toml::Value::Table(table) => {
+                ServiceNameResolver::deserialize(toml::Value::Table(table).into_deserializer())
+                    .map(Self::Resolver)
+                    .map_err(de::Error::custom)
+            }
+            other => Err(de::Error::custom(format!(
+                "imago.toml key 'name' must be a string or table (got {other})"
+            ))),
+        }
+    }
+}
+
+impl JsonSchema for ServiceNameResolver {
+    fn inline_schema() -> bool {
+        false
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "ServiceNameResolver".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": false,
+            "oneOf": [
+                {
+                    "required": ["cargo"],
+                    "properties": {
+                        "cargo": { "const": true },
+                        "pyproject": { "const": false, "default": false }
+                    }
+                },
+                {
+                    "required": ["pyproject"],
+                    "properties": {
+                        "cargo": { "const": false, "default": false },
+                        "pyproject": { "const": true }
+                    }
+                }
+            ]
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -265,6 +344,9 @@ pub fn decode_document(content: &str) -> Result<ImagoTomlDocument, toml::de::Err
 pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
     let config = &document.config;
 
+    if let Some(name) = &config.name {
+        validate_name_field(name)?;
+    }
     if let Some(app_type) = &config.app_type {
         validate_allowed(
             app_type,
@@ -454,6 +536,31 @@ fn validate_optional_nonempty_string(value: Option<&str>, field_name: &str) -> R
     Ok(())
 }
 
+fn validate_name_field(name: &ServiceNameField) -> Result<()> {
+    match name {
+        ServiceNameField::Literal(value) => {
+            if value.trim().is_empty() {
+                return Err(anyhow!("imago.toml key 'name' must not be empty"));
+            }
+        }
+        ServiceNameField::Resolver(resolver) => validate_name_resolver(resolver)?,
+    }
+    Ok(())
+}
+
+fn validate_name_resolver(resolver: &ServiceNameResolver) -> Result<()> {
+    let enabled_count = [resolver.cargo, resolver.pyproject]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count();
+    if enabled_count != 1 {
+        return Err(anyhow!(
+            "imago.toml key 'name' must enable exactly one resolver: `cargo` or `pyproject`"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_capability_policy(policy: &CapabilityPolicy, field_name: &str) -> Result<()> {
     if let Some(deps) = &policy.deps {
         match deps {
@@ -611,6 +718,118 @@ remote = "ssh://localhost?socket=/run/imago/imagod.sock"
 "#,
         );
         assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[test]
+    fn accepts_name_cargo_resolver() {
+        let result = decode_and_validate(
+            r#"
+name.cargo = true
+
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[test]
+    fn accepts_name_pyproject_resolver() {
+        let result = decode_and_validate(
+            r#"
+name.pyproject = true
+
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[test]
+    fn rejects_name_resolver_without_enabled_source() {
+        let result = decode_and_validate(
+            r#"
+name = {}
+
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string().contains("enable exactly one resolver"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_name_resolver_with_both_sources_enabled() {
+        let result = decode_and_validate(
+            r#"
+name = { cargo = true, pyproject = true }
+
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string().contains("enable exactly one resolver"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_name_resolver_with_false_source() {
+        let result = decode_and_validate(
+            r#"
+name.cargo = false
+
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        );
+        let err = result.expect_err("validation must fail");
+        assert!(
+            err.to_string().contains("enable exactly one resolver"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_name_resolver_with_unknown_key() {
+        let err = decode_document(
+            r#"
+name.package_json = true
+
+main = "build/example-service.wasm"
+type = "cli"
+
+[target.default]
+remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+"#,
+        )
+        .expect_err("decode must fail");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
