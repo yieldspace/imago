@@ -806,6 +806,96 @@ fn compute_iso_packet_lengths(total_len: usize, packets: u16) -> Result<Vec<u32>
     Ok(lengths)
 }
 
+fn iso_packet_actual_length_total(packet_actual_lengths: &[u32]) -> Result<usize, UsbError> {
+    packet_actual_lengths
+        .iter()
+        .try_fold(0usize, |total, length| {
+            total
+                .checked_add(usize::try_from(*length).map_err(|_| {
+                    UsbError::Other("iso packet length does not fit in usize".to_string())
+                })?)
+                .ok_or_else(|| UsbError::Other("iso packet lengths overflowed usize".to_string()))
+        })
+}
+
+fn compact_iso_in_buffer(
+    mut buffer: Vec<u8>,
+    packet_lengths: &[u32],
+    packet_actual_lengths: &[u32],
+) -> Result<(usize, Vec<u8>), UsbError> {
+    if packet_lengths.len() != packet_actual_lengths.len() {
+        return Err(UsbError::TransferFault);
+    }
+
+    let scheduled_total = packet_lengths.iter().try_fold(0usize, |total, length| {
+        total
+            .checked_add(usize::try_from(*length).map_err(|_| {
+                UsbError::Other("iso packet length does not fit in usize".to_string())
+            })?)
+            .ok_or_else(|| UsbError::Other("iso packet lengths overflowed usize".to_string()))
+    })?;
+    if scheduled_total != buffer.len() {
+        return Err(UsbError::TransferFault);
+    }
+
+    let mut read_offset = 0usize;
+    let mut write_offset = 0usize;
+    for (&scheduled_len, &actual_len) in packet_lengths.iter().zip(packet_actual_lengths) {
+        let scheduled_len = usize::try_from(scheduled_len)
+            .map_err(|_| UsbError::Other("iso packet length does not fit in usize".to_string()))?;
+        let actual_len = usize::try_from(actual_len)
+            .map_err(|_| UsbError::Other("iso packet length does not fit in usize".to_string()))?;
+        if actual_len > scheduled_len {
+            return Err(UsbError::TransferFault);
+        }
+
+        let packet_data_end = read_offset
+            .checked_add(actual_len)
+            .ok_or_else(|| UsbError::Other("iso packet lengths overflowed usize".to_string()))?;
+        let packet_end = read_offset
+            .checked_add(scheduled_len)
+            .ok_or_else(|| UsbError::Other("iso packet lengths overflowed usize".to_string()))?;
+        if packet_end > buffer.len() {
+            return Err(UsbError::TransferFault);
+        }
+
+        if actual_len > 0 && write_offset != read_offset {
+            buffer.copy_within(read_offset..packet_data_end, write_offset);
+        }
+        write_offset = write_offset
+            .checked_add(actual_len)
+            .ok_or_else(|| UsbError::Other("iso packet lengths overflowed usize".to_string()))?;
+        read_offset = packet_end;
+    }
+
+    buffer.truncate(write_offset);
+    Ok((write_offset, buffer))
+}
+
+unsafe fn collect_iso_packet_results(
+    transfer: *mut rusb::ffi::libusb_transfer,
+    packets: u16,
+) -> Result<(Vec<u32>, Option<i32>), UsbError> {
+    use rusb::ffi;
+    use rusb::ffi::constants::*;
+
+    let descriptor_ptr = unsafe {
+        std::ptr::addr_of!((*transfer).iso_packet_desc).cast::<ffi::libusb_iso_packet_descriptor>()
+    };
+    let mut packet_actual_lengths = Vec::with_capacity(usize::from(packets));
+    let mut first_packet_status_error = None;
+
+    for index in 0..usize::from(packets) {
+        let packet = unsafe { &*descriptor_ptr.add(index) };
+        if first_packet_status_error.is_none() && packet.status != LIBUSB_TRANSFER_COMPLETED {
+            first_packet_status_error = Some(packet.status);
+        }
+        packet_actual_lengths.push(packet.actual_length);
+    }
+
+    Ok((packet_actual_lengths, first_packet_status_error))
+}
+
 fn validate_transfer_len(length: u32, limits: &UsbLimitsConfig) -> Result<usize, UsbError> {
     let length = usize::try_from(length).map_err(|_| UsbError::InvalidArgument)?;
     if length > limits.max_transfer_bytes {
@@ -1615,31 +1705,19 @@ fn perform_iso_transfer(
         }
     }
 
-    let (status, actual_len, first_packet_status_error) = unsafe {
+    let iso_result = unsafe {
         let status = (*transfer).status;
-        let actual_len = usize::try_from((*transfer).actual_length.max(0)).unwrap_or(0);
-        let first_packet_status_error = if status == LIBUSB_TRANSFER_COMPLETED {
-            let descriptor_ptr = std::ptr::addr_of!((*transfer).iso_packet_desc)
-                .cast::<ffi::libusb_iso_packet_descriptor>();
-            let mut packet_error = None;
-            for index in 0..usize::from(packets) {
-                let packet_status = (*descriptor_ptr.add(index)).status;
-                if packet_status != LIBUSB_TRANSFER_COMPLETED {
-                    packet_error = Some(packet_status);
-                    break;
-                }
-            }
-            packet_error
-        } else {
-            None
-        };
-        (status, actual_len, first_packet_status_error)
+        let (packet_actual_lengths, first_packet_status_error) =
+            collect_iso_packet_results(transfer, packets)?;
+        Ok::<_, UsbError>((status, packet_actual_lengths, first_packet_status_error))
     };
 
     unsafe {
         drop(Box::from_raw(completed_ptr));
         ffi::libusb_free_transfer(transfer);
     }
+
+    let (status, packet_actual_lengths, first_packet_status_error) = iso_result?;
 
     if timed_out {
         return Err(UsbError::Timeout);
@@ -1651,12 +1729,11 @@ fn perform_iso_transfer(
     if let Some(packet_status) = first_packet_status_error {
         map_libusb_transfer_status(packet_status, "iso packet")?;
     }
-    let result = actual_len;
-
     if endpoint & 0x80 != 0 {
-        buffer.truncate(result);
+        return compact_iso_in_buffer(buffer, &packet_lengths, &packet_actual_lengths);
     }
 
+    let result = iso_packet_actual_length_total(&packet_actual_lengths)?;
     Ok((result, buffer))
 }
 
@@ -2948,6 +3025,35 @@ mod tests {
         assert_eq!(lengths[0], 129);
         assert!(lengths.iter().skip(1).all(|len| *len == 128));
         assert_eq!(lengths.iter().map(|len| u64::from(*len)).sum::<u64>(), 1025);
+    }
+
+    #[test]
+    fn iso_packet_actual_length_total_sums_packet_actual_lengths() {
+        let total =
+            iso_packet_actual_length_total(&[512, 256, 128]).expect("packet lengths should sum");
+        assert_eq!(total, 896);
+    }
+
+    #[test]
+    fn compact_iso_in_buffer_concatenates_actual_packet_payloads() {
+        let buffer = vec![
+            0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x30, 0x31,
+        ];
+        let (actual_len, compacted) = compact_iso_in_buffer(buffer, &[4, 6, 2], &[2, 3, 1])
+            .expect("packet payloads should compact");
+
+        assert_eq!(actual_len, 6);
+        assert_eq!(compacted, vec![0x10, 0x11, 0x20, 0x21, 0x22, 0x30]);
+    }
+
+    #[test]
+    fn compact_iso_in_buffer_ignores_missing_transfer_actual_length() {
+        let buffer = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let (actual_len, compacted) =
+            compact_iso_in_buffer(buffer, &[4, 4], &[4, 2]).expect("packet actual lengths win");
+
+        assert_eq!(actual_len, 6);
+        assert_eq!(compacted, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

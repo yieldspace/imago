@@ -112,6 +112,10 @@ let payload = iface.isochronous_in(0x81, 1024, 8, 1000)?;
 let _written = iface.isochronous_out(0x01, &payload, 8, 1000)?;
 ```
 
+`isochronous_in` returns the actual payload bytes reported by each packet descriptor,
+concatenated in packet order. The aggregate libusb `actual_length` field is not used for
+isochronous transfers.
+
 ### Consume bulk IN chunks from ring buffer
 
 ```rust

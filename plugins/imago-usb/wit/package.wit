@@ -314,7 +314,7 @@ interface usb-interface {
         @since(version = 0.1.0)
         interrupt-out: func(endpoint: u8, data: list<u8>, timeout-ms: u32) -> result<_, usb-error>;
 
-        /// Execute one isochronous IN transfer.
+        /// Execute one isochronous IN transfer and return each packet's actual payload bytes concatenated in packet order.
         @since(version = 0.1.0)
         isochronous-in: func(endpoint: u8, length: u32, packets: u16, timeout-ms: u32) -> result<list<u8>, usb-error>;
 
