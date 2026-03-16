@@ -1,0 +1,142 @@
+name: ci-installer-checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-installer-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    name: detect changes
+    runs-on: ubuntu-24.04
+    outputs:
+      installer_related: ${{ steps.detect.outputs.installer_related }}
+      workflow_related: ${{ steps.detect.outputs.workflow_related }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          installer_related=false
+          workflow_related=false
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha='${{ github.event.pull_request.base.sha }}'
+            head_sha='${{ github.event.pull_request.head.sha }}'
+            diff_output="$(git diff --name-only --no-renames "$base_sha...$head_sha")"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            before_sha='${{ github.event.before }}'
+            head_sha='${{ github.sha }}'
+            if [[ "$before_sha" =~ ^0+$ ]]; then
+              diff_output="$(git ls-tree -r --name-only "$head_sha")"
+            else
+              diff_output="$(git diff --name-only --no-renames "$before_sha...$head_sha")"
+            fi
+          else
+            installer_related=true
+            workflow_related=true
+            diff_output=""
+          fi
+
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+
+            case "$file" in
+              scripts/install_imagod.sh|.github/scripts/test_install_imagod.sh|.github/testdata/install_imagod/*)
+                installer_related=true
+                ;;
+            esac
+
+            case "$file" in
+              .github/workflows/ci-installer-checks.yml)
+                workflow_related=true
+                ;;
+            esac
+          done <<< "$diff_output"
+
+          echo "installer_related=$installer_related" >> "$GITHUB_OUTPUT"
+          echo "workflow_related=$workflow_related" >> "$GITHUB_OUTPUT"
+
+  installer_checks:
+    name: installer checks
+    needs: changed
+    if: ${{ needs.changed.outputs.installer_related == 'true' || needs.changed.outputs.workflow_related == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run install_imagod regression
+        shell: bash
+        run: bash ./.github/scripts/test_install_imagod.sh
+
+  checks:
+    name: checks
+    needs:
+      - changed
+      - installer_checks
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Evaluate required checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event_name='${{ github.event_name }}'
+          changed_result='${{ needs.changed.result }}'
+          installer_related='${{ needs.changed.outputs.installer_related }}'
+          workflow_related='${{ needs.changed.outputs.workflow_related }}'
+          installer_result='${{ needs.installer_checks.result }}'
+
+          echo "event_name: $event_name"
+          echo "changed: $changed_result"
+          echo "installer_related: $installer_related"
+          echo "workflow_related: $workflow_related"
+          echo "installer_checks: $installer_result"
+
+          [[ "$changed_result" == "success" ]] || {
+            echo "::error::changed job failed ($changed_result)"
+            exit 1
+          }
+
+          if [[ "$event_name" == "workflow_dispatch" ]]; then
+            [[ "$installer_result" == "success" ]] || {
+              echo "::error::installer_checks must succeed on workflow_dispatch events."
+              exit 1
+            }
+            exit 0
+          fi
+
+          if [[ "$installer_related" == "true" || "$workflow_related" == "true" ]]; then
+            [[ "$installer_result" == "success" ]] || {
+              echo "::error::installer_checks must succeed when installer/workflow files are changed."
+              exit 1
+            }
+          else
+            [[ "$installer_result" == "skipped" || "$installer_result" == "success" ]] || {
+              echo "::error::installer_checks must be skipped or succeed when no installer-related files are changed."
+              exit 1
+            }
+          fi
