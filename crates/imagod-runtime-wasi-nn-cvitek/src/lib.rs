@@ -357,21 +357,16 @@ mod imp {
 
             let mut raw_inputs = self.raw_inputs.clone();
             let mut raw_outputs = self.raw_outputs.clone();
-            let mut input_buffers = Vec::with_capacity(self.inputs.len());
             let mut output_buffers = Vec::with_capacity(self.outputs_meta.len());
 
-            for (index, tensor) in self.inputs.iter().enumerate() {
-                let mut buffer = tensor
-                    .as_ref()
-                    .expect("input presence checked above")
-                    .data
-                    .clone();
+            for (index, tensor) in self.inputs.iter_mut().enumerate() {
+                let tensor = tensor.as_mut().expect("input presence checked above");
                 raw_inputs[index].mem_type = CVI_MEM_SYSTEM;
                 check_rc(
                     unsafe {
                         CVI_NN_SetTensorPtr(
                             &mut raw_inputs[index],
-                            buffer.as_mut_ptr().cast::<c_void>(),
+                            tensor.data.as_mut_ptr().cast::<c_void>(),
                         )
                     },
                     format!(
@@ -379,7 +374,6 @@ mod imp {
                         self.inputs_meta[index].name
                     ),
                 )?;
-                input_buffers.push(buffer);
             }
 
             for (index, meta) in self.outputs_meta.iter().enumerate() {
@@ -410,25 +404,29 @@ mod imp {
                 "failed to execute cvimodel on TPU",
             )?;
 
-            let mut named_outputs = Vec::with_capacity(self.outputs_meta.len());
+            let mut named_outputs = if return_named_outputs {
+                Some(Vec::with_capacity(self.outputs_meta.len()))
+            } else {
+                None
+            };
             for (index, meta) in self.outputs_meta.iter().enumerate() {
                 let tensor = Tensor::new(
                     meta.dimensions.clone(),
                     meta.ty,
-                    output_buffers[index].clone(),
+                    std::mem::take(&mut output_buffers[index]),
                 );
-                self.outputs[index] = Some(tensor.clone());
-                named_outputs.push(NamedTensor {
-                    name: meta.name.clone(),
-                    tensor,
-                });
+                if let Some(named_outputs) = &mut named_outputs {
+                    self.outputs[index] = Some(tensor.clone());
+                    named_outputs.push(NamedTensor {
+                        name: meta.name.clone(),
+                        tensor,
+                    });
+                } else {
+                    self.outputs[index] = Some(tensor);
+                }
             }
 
-            if return_named_outputs {
-                Ok(Some(named_outputs))
-            } else {
-                Ok(None)
-            }
+            Ok(named_outputs)
         }
     }
 

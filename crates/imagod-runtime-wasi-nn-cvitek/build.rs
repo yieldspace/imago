@@ -114,7 +114,12 @@ fn ensure_required_libraries(lib_dir: &Path, link_mode: LinkMode) -> Result<(), 
 
     match link_mode {
         LinkMode::Dynamic => {
-            for lib in ["libcviruntime.so", "libcvikernel.so", "libcvimath.so"] {
+            for lib in [
+                "libcviruntime.so",
+                "libcvikernel.so",
+                "libcvimath.so",
+                "libz.so",
+            ] {
                 let candidate = lib_dir.join(lib);
                 if !candidate.is_file() {
                     return Err(format!(
@@ -129,6 +134,7 @@ fn ensure_required_libraries(lib_dir: &Path, link_mode: LinkMode) -> Result<(), 
                 "libcviruntime-static.a",
                 "libcvikernel-static.a",
                 "libcvimath-static.a",
+                "libz.a",
             ] {
                 let candidate = lib_dir.join(lib);
                 if !candidate.is_file() {
