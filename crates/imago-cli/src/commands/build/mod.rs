@@ -902,15 +902,31 @@ fn capability_policy_allows_dependency_interface(
     if capabilities.deps.get("*").is_some_and(|rules| {
         rules
             .iter()
-            .any(|rule| rule == "*" || rule == interface_name)
+            .any(|rule| dependency_rule_allows_interface(rule, interface_name))
     }) {
         return true;
     }
     capabilities.deps.get(package_name).is_some_and(|rules| {
         rules
             .iter()
-            .any(|rule| rule == "*" || rule == interface_name)
+            .any(|rule| dependency_rule_allows_interface(rule, interface_name))
     })
+}
+
+fn dependency_rule_allows_interface(rule: &str, interface_name: &str) -> bool {
+    let trimmed = rule.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == "*" || trimmed == interface_name {
+        return true;
+    }
+    for separator in ['.', '/', '#'] {
+        if let Some((rule_interface, function_name)) = trimmed.split_once(separator) {
+            return rule_interface == interface_name && !function_name.is_empty();
+        }
+    }
+    true
 }
 
 pub(crate) fn load_declared_resource_providers_from_project_root(
@@ -4564,6 +4580,63 @@ interface api {}
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_project_wit_import_with_function_scoped_dependency_capability() {
+        for rule in ["invoke", "api.invoke", "api/invoke", "api#invoke"] {
+            let root = new_temp_dir(&format!(
+                "dependencies-capabilities-project-wit-function-rule-{}",
+                rule.replace(['.', '/', '#'], "-")
+            ));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities.deps]
+    "test:example" = ["{rule}"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+            write_file(
+                &root.join("wit/world.wit"),
+                br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+            );
+            write_file(
+                &root.join("registry/example/package.wit"),
+                br#"package test:example@0.1.0;
+
+interface api {
+    invoke: func();
+}
+"#,
+            );
+            run_update(&root);
+
+            build_project("default", &root).expect(
+                "build should accept project WIT imports when function-scoped dependency capability matches",
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]

@@ -459,6 +459,7 @@ fn extract_embedded_resource_section(component_bytes: &[u8]) -> anyhow::Result<O
     Ok(section)
 }
 
+#[derive(Debug)]
 struct EmbeddedResourceProviderDocumentNormalized {
     resources: JsonValue,
     merge_policies: BTreeMap<String, ResourceMergePolicy>,
@@ -505,7 +506,16 @@ fn parse_embedded_resource_provider_document(
                 provider_name, normalized_path
             )
         })?;
-        merge_policies.insert(normalized_path, policy);
+        if merge_policies
+            .insert(normalized_path.clone(), policy)
+            .is_some()
+        {
+            return Err(anyhow!(
+                "embedded resource provider '{}' defines duplicate merge policy path resources.{}",
+                provider_name,
+                normalized_path
+            ));
+        }
     }
 
     Ok(EmbeddedResourceProviderDocumentNormalized {
@@ -1578,8 +1588,8 @@ mod tests {
         load_declared_resource_providers, load_embedded_resource_providers,
         load_resource_profile_expectations, load_resource_profile_expectations_from_providers,
         merge_resource_providers, normalize_policy_path, normalize_wasi_http_outbound_rule,
-        parse_resource_mount_entries, parse_resources_http_outbound, parse_resources_section,
-        validate_resource_mount_uniqueness,
+        parse_embedded_resource_provider_document, parse_resource_mount_entries,
+        parse_resources_http_outbound, parse_resources_section, validate_resource_mount_uniqueness,
     };
 
     fn parse_table(raw: &str) -> toml::Table {
@@ -1705,6 +1715,33 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("must not repeat the 'resources.' prefix"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_embedded_resource_provider_document_rejects_duplicate_normalized_policy_paths() {
+        let document = json!({
+            "schema_version": 1,
+            "resources": {
+                "gpio": {
+                    "digital_pins": []
+                }
+            },
+            "merge_policies": {
+                "resources.gpio.digital_pins": "mergeable",
+                "gpio.digital_pins": "required"
+            }
+        });
+        let section = serde_json::to_vec(&document).expect("document should encode");
+
+        let err =
+            parse_embedded_resource_provider_document(&section, "yieldspace:example-provider")
+                .expect_err("duplicate normalized policy paths must be rejected");
+        assert!(
+            err.to_string().contains(
+                "embedded resource provider 'yieldspace:example-provider' defines duplicate merge policy path resources.gpio.digital_pins"
+            ),
             "unexpected error: {err}"
         );
     }
