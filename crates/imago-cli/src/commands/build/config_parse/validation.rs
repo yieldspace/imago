@@ -170,6 +170,21 @@ pub(in crate::commands::build) fn normalize_relative_path(
     raw: &str,
     field_name: &str,
 ) -> anyhow::Result<PathBuf> {
+    normalize_relative_path_with_policy(raw, field_name, false)
+}
+
+pub(in crate::commands::build) fn normalize_source_main_path(
+    raw: &str,
+    field_name: &str,
+) -> anyhow::Result<PathBuf> {
+    normalize_relative_path_with_policy(raw, field_name, true)
+}
+
+fn normalize_relative_path_with_policy(
+    raw: &str,
+    field_name: &str,
+    allow_parent_dirs: bool,
+) -> anyhow::Result<PathBuf> {
     if raw.is_empty() {
         return Err(anyhow!("{field_name} must not be empty"));
     }
@@ -192,6 +207,7 @@ pub(in crate::commands::build) fn normalize_relative_path(
         match component {
             Component::CurDir => {}
             Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir if allow_parent_dirs => normalized.push(".."),
             Component::ParentDir | Component::RootDir => {
                 return Err(anyhow!(
                     "{field_name} must not contain path traversal: {raw}"
@@ -300,7 +316,12 @@ pub(in crate::commands::build) fn normalize_wasi_guest_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_relative_path, normalize_wasi_guest_path, validate_service_name};
+    use std::path::PathBuf;
+
+    use super::{
+        normalize_relative_path, normalize_source_main_path, normalize_wasi_guest_path,
+        validate_service_name,
+    };
 
     #[test]
     fn validate_service_name_rejects_unsupported_character() {
@@ -317,6 +338,35 @@ mod tests {
         let parent_err =
             normalize_relative_path("../file.wit", "field").expect_err("parent must fail");
         assert!(parent_err.to_string().contains("path traversal"));
+    }
+
+    #[test]
+    fn normalize_source_main_path_allows_parent_components_but_rejects_invalid_roots() {
+        assert_eq!(
+            normalize_source_main_path("../build/app.wasm", "main")
+                .expect("parent path should pass"),
+            PathBuf::from("../build/app.wasm")
+        );
+        assert_eq!(
+            normalize_source_main_path("./out/../app.wasm", "main")
+                .expect("dot segments should normalize"),
+            PathBuf::from("out/../app.wasm")
+        );
+
+        let empty_err = normalize_source_main_path("", "main").expect_err("empty path must fail");
+        assert!(empty_err.to_string().contains("must not be empty"));
+
+        let absolute_err = normalize_source_main_path("/tmp/app.wasm", "main")
+            .expect_err("absolute path must fail");
+        assert!(absolute_err.to_string().contains("relative path"));
+
+        let windows_err =
+            normalize_source_main_path("C:\\app.wasm", "main").expect_err("windows path must fail");
+        assert!(windows_err.to_string().contains("backslashes"));
+
+        let backslash_err = normalize_source_main_path("..\\app.wasm", "main")
+            .expect_err("backslash traversal must fail");
+        assert!(backslash_err.to_string().contains("backslashes"));
     }
 
     #[test]
