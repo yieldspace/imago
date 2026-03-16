@@ -800,14 +800,56 @@ download_release_metadata() {
 
 parse_release_asset_names_from_metadata() {
   tr '\r\n' '  ' < "$1" |
-    grep -Eo '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' |
     awk '
       {
         line = $0
-        sub(/.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", line)
-        sub(/"$/, "", line)
-        count = split(line, parts, "/")
-        print parts[count]
+
+        while (match(line, /"assets"[[:space:]]*:[[:space:]]*\[|\{|\}|\[|\]|"name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+          token = substr(line, RSTART, RLENGTH)
+          line = substr(line, RSTART + RLENGTH)
+
+          if (!in_assets) {
+            if (token ~ /^"assets"[[:space:]]*:/) {
+              in_assets = 1
+              object_depth = 0
+              array_depth = 1
+            }
+            continue
+          }
+
+          if (token == "{") {
+            object_depth += 1
+            continue
+          }
+
+          if (token == "}") {
+            if (object_depth > 0) {
+              object_depth -= 1
+            }
+            continue
+          }
+
+          if (token == "[") {
+            array_depth += 1
+            continue
+          }
+
+          if (token == "]") {
+            if (array_depth > 0) {
+              array_depth -= 1
+            }
+            if (array_depth == 0) {
+              in_assets = 0
+            }
+            continue
+          }
+
+          if (object_depth == 1 && array_depth == 1 && token ~ /^"name"[[:space:]]*:/) {
+            sub(/^"name"[[:space:]]*:[[:space:]]*"/, "", token)
+            sub(/"$/, "", token)
+            print token
+          }
+        }
       }
     '
 }
