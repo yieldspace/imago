@@ -337,6 +337,9 @@ mod imp {
             inputs: Option<Vec<NamedTensor>>,
         ) -> Result<Option<Vec<NamedTensor>>, BackendError> {
             let return_named_outputs = inputs.is_some();
+            for slot in &mut self.outputs {
+                *slot = None;
+            }
             if let Some(inputs) = inputs {
                 for slot in &mut self.inputs {
                     *slot = None;
