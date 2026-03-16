@@ -594,7 +594,7 @@ wasi = true
 
 - Validation error notes: wrong value types fail validation.
 - Usage note: this allowlist also governs imports such as `wasi:nn/*`; guest-side `wasi-nn` calls require the corresponding WASI capability rules.
-- Runtime note: when `imagod` is built with `wasi-nn-cvitek`, `wasi:nn/graph.load` accepts only precompiled `.cvimodel` bytes via `graph-encoding = autodetect` and `execution-target = tpu`. ONNX or PyTorch models must be converted outside `imago` before deploy. Release assets for such variants are published as `imagod-<target>+wasi-nn-cvitek`, and the build falls back to auto-downloading the pinned SG200x TPU SDK when `IMAGO_CVITEK_SDK_ROOT` / `CVI_TPU_SDK_ROOT` are unset.
+- Runtime note: when `imagod` is built with `wasi-nn-cvitek`, `wasi:nn/graph.load` accepts only precompiled `.cvimodel` bytes via `graph-encoding = autodetect` and `execution-target = tpu`. ONNX or PyTorch models must be converted outside `imago` before deploy. Release assets for such variants are published as `imagod-<target>+wasi-nn-cvitek`, and the build falls back to auto-downloading the pinned SG200x TPU SDK when `IMAGO_CVITEK_SDK_ROOT` / `CVI_TPU_SDK_ROOT` are unset. Linux `riscv64` `musl` builds prefer static linking, but automatically fall back to `IMAGO_CVITEK_LINK_MODE=dynamic` when `riscv64-unknown-linux-musl-g++` is unavailable; in that mode `imagod` looks for CVITEK TPU shared libraries in the system loader path or next to the binary under `lib/`.
 
 <a id="the-bindings-section"></a>
 ## The [[bindings]] section

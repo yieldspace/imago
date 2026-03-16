@@ -59,7 +59,7 @@ Options:
   --install-dir <path>              Binary install directory.
   --prerelease                      Allow prerelease imagod releases when --tag is omitted.
   --with-service                    Install and start a service after installing the binary.
-  -y, --yes                         Skip the confirmation prompt when a TTY is available.
+  -y, --yes                         Skip TTY prompts and install the default variant.
   --dry-run                         Print resolved values without installing.
   -h, --help                        Show this help.
 
@@ -173,6 +173,17 @@ feature_csv_display() {
   fi
 
   printf '<none>\n'
+}
+
+feature_csv_contains() {
+  feature_csv="$1"
+  wanted_feature="$2"
+
+  if [ -z "${feature_csv}" ]; then
+    return 1
+  fi
+
+  printf '%s' "${feature_csv}" | tr ',' '\n' | grep -Fx "${wanted_feature}" >/dev/null 2>&1
 }
 
 imagod_asset_name_for_variant() {
@@ -1409,29 +1420,31 @@ main() {
 
   if [ "${DRY_RUN}" != "1" ]; then
     MAIN_TMP_DIR="$(mktemp -d)"
-    release_metadata_file="${MAIN_TMP_DIR}/release-metadata.json"
-    variant_catalog_file="${MAIN_TMP_DIR}/release-variants.tsv"
+    if [ "${selection_mode}" != "tag" ]; then
+      release_metadata_file="${MAIN_TMP_DIR}/release-metadata.json"
+      variant_catalog_file="${MAIN_TMP_DIR}/release-variants.tsv"
 
-    download_release_metadata "${resolved_tag}" "${release_metadata_file}"
-    build_release_variant_catalog "${release_metadata_file}" "${target}" "${requested_features}" "${variant_catalog_file}"
+      download_release_metadata "${resolved_tag}" "${release_metadata_file}"
+      build_release_variant_catalog "${release_metadata_file}" "${target}" "${requested_features}" "${variant_catalog_file}"
 
-    default_asset_name=""
-    if [ -n "${TARGET_OVERRIDE}" ] || [ "${FEATURES_EXPLICIT}" = "1" ]; then
-      if ! catalog_has_asset_name "${variant_catalog_file}" "${requested_asset_name}"; then
-        die_with_variant_candidates "${requested_asset_name}" "${resolved_tag}" "${variant_catalog_file}"
+      default_asset_name=""
+      if [ -n "${TARGET_OVERRIDE}" ] || [ "${FEATURES_EXPLICIT}" = "1" ]; then
+        if ! catalog_has_asset_name "${variant_catalog_file}" "${requested_asset_name}"; then
+          die_with_variant_candidates "${requested_asset_name}" "${resolved_tag}" "${variant_catalog_file}"
+        fi
+        default_asset_name="${requested_asset_name}"
+      else
+        auto_asset_name="$(imagod_asset_name_for_variant "${target}" "")"
+        if catalog_has_asset_name "${variant_catalog_file}" "${auto_asset_name}"; then
+          default_asset_name="${auto_asset_name}"
+        fi
       fi
-      default_asset_name="${requested_asset_name}"
-    else
-      auto_asset_name="$(imagod_asset_name_for_variant "${target}" "")"
-      if catalog_has_asset_name "${variant_catalog_file}" "${auto_asset_name}"; then
-        default_asset_name="${auto_asset_name}"
-      fi
+
+      selected_asset_name="$(select_release_asset_or_exit "${resolved_tag}" "${selection_mode}" "${os}" "${target}" "${target_resolution}" "${libc}" "${requested_features}" "${install_dir}" "${service_status}" "${variant_catalog_file}" "${default_asset_name}")"
+      selected_variant="$(parse_imagod_asset_name "${selected_asset_name}")" || die "failed to parse selected imagod asset name: ${selected_asset_name}"
+      selected_target="$(printf '%s' "${selected_variant}" | awk -F '\t' 'NR == 1 { print $1 }')"
+      selected_features="$(printf '%s' "${selected_variant}" | awk -F '\t' 'NR == 1 { print $2 }')"
     fi
-
-    selected_asset_name="$(select_release_asset_or_exit "${resolved_tag}" "${selection_mode}" "${os}" "${target}" "${target_resolution}" "${libc}" "${requested_features}" "${install_dir}" "${service_status}" "${variant_catalog_file}" "${default_asset_name}")"
-    selected_variant="$(parse_imagod_asset_name "${selected_asset_name}")" || die "failed to parse selected imagod asset name: ${selected_asset_name}"
-    selected_target="$(printf '%s' "${selected_variant}" | awk -F '\t' 'NR == 1 { print $1 }')"
-    selected_features="$(printf '%s' "${selected_variant}" | awk -F '\t' 'NR == 1 { print $2 }')"
   fi
   checksum_name="${selected_asset_name}.sha256"
   release_url_base="$(resolve_release_url_base "${resolved_tag}")"
@@ -1452,6 +1465,9 @@ main() {
   log "selected_features: $(feature_csv_display "${selected_features}")"
   log "install_dir: ${install_dir}"
   log "service: ${service_status}"
+  if feature_csv_contains "${selected_features}" "wasi-nn-cvitek"; then
+    log "cvitek_runtime: dynamic builds expect CVITEK TPU shared libraries in the system loader path or under ${install_dir}/lib"
+  fi
 
   if [ "${DRY_RUN}" = "1" ]; then
     check_release_assets_for_dry_run "${binary_url}" "${checksum_url}" "${selected_asset_name}" "${checksum_name}" "${selection_mode}" "${resolved_tag}"

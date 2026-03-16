@@ -50,5 +50,5 @@ cargo run -p imago-cli -- service logs local-imagod-wasi-nn-openvino-person-dete
 
 - model は `assets/model.xml` と `assets/model.bin`、入力画像は `assets/people.ppm` として artifact に同梱され、`[[resources.read_only_mounts]]` により guest から `/app/assets` 配下で読めます。
 - `wasi-nn` 自体は runtime が提供し、model の preload は行いません。guest がファイルを読んで `wasi:nn/graph.load` を呼びます。
-- `wasi-nn-cvitek` backend を使う場合は、この OpenVINO example をそのまま流用せず、guest から `graph.load([...cvimodel bytes...], autodetect, tpu)` を呼んでください。release asset 名は `imagod-<target>+wasi-nn-cvitek` です。build 時は `IMAGO_CVITEK_SDK_ROOT` / `CVI_TPU_SDK_ROOT` を優先し、未指定なら pinned SG200x TPU SDK を自動取得します。必要に応じて `IMAGO_CVITEK_LINK_MODE=dynamic` で sidecar `lib/*.so` 解決へ切り替えます。
+- `wasi-nn-cvitek` backend を使う場合は、この OpenVINO example をそのまま流用せず、guest から `graph.load([...cvimodel bytes...], autodetect, tpu)` を呼んでください。release asset 名は `imagod-<target>+wasi-nn-cvitek` です。build 時は `IMAGO_CVITEK_SDK_ROOT` / `CVI_TPU_SDK_ROOT` を優先し、未指定なら pinned SG200x TPU SDK を自動取得します。Linux `riscv64` `musl` build では `riscv64-unknown-linux-musl-g++` が無いと `IMAGO_CVITEK_LINK_MODE=dynamic` へ自動 fallback するため、target では CVITEK TPU `.so` を loader path か `imagod` と同じディレクトリ配下の `lib/` に配置してください。
 - asset の出典は `assets/SOURCES.md` に記載しています。

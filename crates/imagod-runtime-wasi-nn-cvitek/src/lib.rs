@@ -243,8 +243,16 @@ mod imp {
             if outputs.is_null() && output_num != 0 {
                 return Err(runtime_error("runtime returned null output tensor array"));
             }
-            let inputs = unsafe { std::slice::from_raw_parts(inputs, input_num) }.to_vec();
-            let outputs = unsafe { std::slice::from_raw_parts(outputs, output_num) }.to_vec();
+            let inputs = if input_num == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(inputs, input_num) }.to_vec()
+            };
+            let outputs = if output_num == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(outputs, output_num) }.to_vec()
+            };
             Ok((inputs, outputs))
         }
     }
