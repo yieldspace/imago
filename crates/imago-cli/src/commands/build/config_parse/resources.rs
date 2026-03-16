@@ -515,9 +515,15 @@ fn parse_embedded_resource_provider_document(
 }
 
 fn normalize_policy_path(raw: &str) -> anyhow::Result<String> {
-    let trimmed = raw.trim().trim_start_matches("resources.");
+    let trimmed = raw.trim();
+    let trimmed = trimmed.strip_prefix("resources.").unwrap_or(trimmed);
     if trimmed.is_empty() {
         return Err(anyhow!("merge policy path must not be empty"));
+    }
+    if trimmed.starts_with("resources.") {
+        return Err(anyhow!(
+            "merge policy path must not repeat the 'resources.' prefix"
+        ));
     }
     let segments = trimmed.split('.').collect::<Vec<_>>();
     if segments.iter().any(|segment| segment.trim().is_empty()) {
@@ -847,6 +853,23 @@ fn validate_final_gpio_catalog(resources: &JsonValue) -> anyhow::Result<()> {
                 ));
             }
         }
+        let _value_path = required_gpio_string_field(object, &pin_path, "value_path")?;
+        let supports_input = required_gpio_bool_field(object, &pin_path, "supports_input")?;
+        let supports_output = required_gpio_bool_field(object, &pin_path, "supports_output")?;
+        if !supports_input && !supports_output {
+            return Err(anyhow!(
+                "{pin_path} must allow at least one mode (supports_input or supports_output)"
+            ));
+        }
+        let default_active_level =
+            required_gpio_string_field(object, &pin_path, "default_active_level")?;
+        if default_active_level != "active-high" && default_active_level != "active-low" {
+            return Err(anyhow!(
+                "{pin_path}.default_active_level must be 'active-high' or 'active-low'"
+            ));
+        }
+        let _allow_pull_resistor =
+            required_gpio_bool_field(object, &pin_path, "allow_pull_resistor")?;
         for public_name in digital_pin_public_names(pin, &pin_path)? {
             if !seen_public_names.insert(public_name.clone()) {
                 return Err(anyhow!(
@@ -899,6 +922,30 @@ fn digital_pin_public_names(entry: &JsonValue, field_name: &str) -> anyhow::Resu
         public_names.push(alias.to_string());
     }
     Ok(public_names)
+}
+
+fn required_gpio_string_field<'a>(
+    object: &'a serde_json::Map<String, JsonValue>,
+    pin_path: &str,
+    field: &str,
+) -> anyhow::Result<&'a str> {
+    object
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("{pin_path}.{field} must be a non-empty string"))
+}
+
+fn required_gpio_bool_field(
+    object: &serde_json::Map<String, JsonValue>,
+    pin_path: &str,
+    field: &str,
+) -> anyhow::Result<bool> {
+    object
+        .get(field)
+        .and_then(JsonValue::as_bool)
+        .ok_or_else(|| anyhow!("{pin_path}.{field} must be a boolean"))
 }
 
 fn join_resource_path(prefix: &str, key: &str) -> String {
@@ -1524,8 +1571,9 @@ mod tests {
         LoadedResourceProvider, ManifestAsset, ResourceMergePolicy, cidr_network_ip,
         load_declared_resource_providers, load_embedded_resource_providers,
         load_resource_profile_expectations, load_resource_profile_expectations_from_providers,
-        merge_resource_providers, normalize_wasi_http_outbound_rule, parse_resource_mount_entries,
-        parse_resources_http_outbound, parse_resources_section, validate_resource_mount_uniqueness,
+        merge_resource_providers, normalize_policy_path, normalize_wasi_http_outbound_rule,
+        parse_resource_mount_entries, parse_resources_http_outbound, parse_resources_section,
+        validate_resource_mount_uniqueness,
     };
 
     fn parse_table(raw: &str) -> toml::Table {
@@ -1642,6 +1690,17 @@ mod tests {
         let err = normalize_wasi_http_outbound_rule("*.example.com", "field")
             .expect_err("wildcard should be rejected");
         assert!(err.to_string().contains("wildcard is not supported"));
+    }
+
+    #[test]
+    fn normalize_policy_path_rejects_repeated_resources_prefix() {
+        let err = normalize_policy_path("resources.resources.gpio")
+            .expect_err("repeated resources prefix should be rejected");
+        assert!(
+            err.to_string()
+                .contains("must not repeat the 'resources.' prefix"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -2040,6 +2099,47 @@ digital_pins = [
                 .contains("resources.gpio.digital_pins[blue-led]"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn merge_resource_providers_rejects_invalid_gpio_provider_field_types() {
+        let cases = [
+            (
+                "value_path",
+                JsonValue::Bool(true),
+                "resources.gpio.digital_pins[0].value_path must be a non-empty string",
+            ),
+            (
+                "supports_input",
+                JsonValue::String("true".to_string()),
+                "resources.gpio.digital_pins[0].supports_input must be a boolean",
+            ),
+            (
+                "default_active_level",
+                JsonValue::String("blinking".to_string()),
+                "resources.gpio.digital_pins[0].default_active_level must be 'active-high' or 'active-low'",
+            ),
+            (
+                "allow_pull_resistor",
+                JsonValue::String("false".to_string()),
+                "resources.gpio.digital_pins[0].allow_pull_resistor must be a boolean",
+            ),
+        ];
+
+        for (field, invalid_value, expected) in cases {
+            let mut provider = sample_gpio_provider();
+            let entry = provider.resources["gpio"]["digital_pins"][0]
+                .as_object_mut()
+                .expect("sample gpio pin should be an object");
+            entry.insert(field.to_string(), invalid_value);
+
+            let err = merge_resource_providers(None, BTreeMap::new(), &[provider])
+                .expect_err("invalid provider field types must be rejected");
+            assert!(
+                err.to_string().contains(expected),
+                "unexpected error for {field}: {err}"
+            );
+        }
     }
 
     #[test]
