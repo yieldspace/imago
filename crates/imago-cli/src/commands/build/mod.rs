@@ -7,7 +7,7 @@
 //! - computing integrity metadata consumed by deploy/runtime paths
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 use url::Url;
+use wit_parser::{Resolve, WorldItem};
 
 use crate::{
     cli::BuildArgs,
@@ -537,6 +538,7 @@ fn build_project_with_target_override_inner(
     let namespace_registries = parse_namespace_registries(root.get("namespace_registries"))?;
 
     let command = parse_build_command(&root)?;
+    let wit_world = parse_build_wit_world(&root)?;
 
     let name = required_string(&root, "name")?;
     validate_service_name(&name)?;
@@ -554,6 +556,7 @@ fn build_project_with_target_override_inner(
         parse_project_binding_sources(root.get("bindings"), Some(&namespace_registries))?;
     let project_dependencies =
         parse_project_dependencies(root.get("dependencies"), Some(&namespace_registries))?;
+    let mut resource_providers = load_declared_resource_providers(&root, project_root)?;
     if !project_dependencies.is_empty() {
         let wit_deps_root = project_root.join("wit").join("deps");
         if !wit_deps_root.exists() {
@@ -573,7 +576,36 @@ fn build_project_with_target_override_inner(
         }
     }
     let capabilities = parse_root_capabilities(&root)?;
-    if !project_dependencies.is_empty() || !project_bindings.is_empty() {
+    let dependency_resolver = StandardDependencyResolver;
+    if emit_progress {
+        ui::command_stage("artifact.build", "resolve-deps", "resolving dependencies");
+    }
+    let dependencies = dependency_resolver
+        .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
+    let embedded_provider_candidates = project_dependencies
+        .iter()
+        .zip(dependencies.iter())
+        .filter_map(|(project_dependency, manifest_dependency)| {
+            let component = manifest_dependency.component.as_ref()?;
+            (manifest_dependency.kind == ManifestDependencyKind::Wasm).then_some(
+                EmbeddedResourceProviderCandidate {
+                    project_dependency,
+                    resolved_dependency_name: &manifest_dependency.name,
+                    component_sha256: &component.sha256,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    resource_providers.extend(load_embedded_resource_providers(
+        project_root,
+        &embedded_provider_candidates,
+    )?);
+    let resource_profile_expectations =
+        load_resource_profile_expectations_from_providers(&resource_providers);
+    if !project_dependencies.is_empty()
+        || !project_bindings.is_empty()
+        || !resource_profile_expectations.is_empty()
+    {
         let lock = crate::lockfile::load_from_project_root(project_root)?;
         let dependency_expectations = project_dependencies
             .iter()
@@ -587,20 +619,21 @@ fn build_project_with_target_override_inner(
             &lock,
             &dependency_expectations,
             &binding_expectations,
+            &resource_profile_expectations,
             Some(&namespace_registries),
         )?;
     }
-    let dependency_resolver = StandardDependencyResolver;
-    if emit_progress {
-        ui::command_stage("artifact.build", "resolve-deps", "resolving dependencies");
-    }
-    let dependencies = dependency_resolver
-        .resolve_manifest_dependencies_from_lock(project_root, &project_dependencies)?;
     let bindings = resolve_manifest_bindings_from_lock(project_root, &project_bindings)?;
     let target = match target_override {
         Some(target) => target.clone(),
         None => parse_target(&root, target_name, project_root)?,
     };
+    validate_project_wit_dependency_capabilities(
+        project_root,
+        wit_world.as_deref(),
+        &dependencies,
+        &capabilities,
+    )?;
 
     if emit_progress {
         ui::command_stage(
@@ -626,14 +659,11 @@ fn build_project_with_target_override_inner(
         .to_os_string();
 
     let assets = parse_assets(root.get("assets"), project_root)?;
-    let mut resources = parse_resources_section(&root, &assets)?;
-    let dotenv_resources_env = load_dotenv_resources_env(project_root)?;
-    if !dotenv_resources_env.is_empty() {
-        let resolved = resources.get_or_insert_with(ManifestResourcesConfig::default);
-        for (key, value) in dotenv_resources_env {
-            resolved.env.insert(key, value);
-        }
-    }
+    let resources = merge_resource_providers(
+        parse_resources_section(&root, &assets, project_root)?,
+        load_dotenv_resources_env(project_root)?,
+        &resource_providers,
+    )?;
 
     let mut manifest = Manifest {
         name,
@@ -713,6 +743,153 @@ fn load_resolved_toml(
     Ok(root)
 }
 
+fn validate_project_wit_dependency_capabilities(
+    project_root: &Path,
+    wit_world: Option<&str>,
+    dependencies: &[ManifestDependency],
+    capabilities: &ManifestCapabilityPolicy,
+) -> anyhow::Result<()> {
+    let imported = collect_project_wit_dependency_imports(project_root, wit_world)?;
+    if imported.is_empty() {
+        return Ok(());
+    }
+
+    let dependency_names = dependencies
+        .iter()
+        .map(|dependency| dependency.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for (package_name, interface_name) in imported {
+        if !dependency_names.contains(package_name.as_str()) {
+            continue;
+        }
+        if capability_policy_allows_dependency_interface(
+            capabilities,
+            &package_name,
+            &interface_name,
+        ) {
+            continue;
+        }
+        return Err(anyhow!(
+            "wit/world.wit imports dependency package '{}', interface '{}' but capabilities.deps does not allow it",
+            package_name,
+            interface_name
+        ));
+    }
+    Ok(())
+}
+
+fn collect_project_wit_dependency_imports(
+    project_root: &Path,
+    wit_world: Option<&str>,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let wit_root = project_root.join("wit");
+    if !wit_root.exists() {
+        return Ok(Vec::new());
+    }
+    let has_top_level_wit = fs::read_dir(&wit_root)
+        .with_context(|| format!("failed to read {}", wit_root.display()))?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.path().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "wit")
+        });
+    if !has_top_level_wit {
+        return Ok(Vec::new());
+    }
+
+    let mut resolve = Resolve::default();
+    let (top_package, _) = resolve.push_path(&wit_root).with_context(|| {
+        format!(
+            "failed to parse project WIT package directory {}",
+            wit_root.display()
+        )
+    })?;
+    if resolve.packages[top_package].worlds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let world = resolve
+        .select_world(&[top_package], wit_world)
+        .with_context(|| {
+            let wit_world_hint = wit_world
+                .map(|world| format!(" using build.wit_world = {world:?}"))
+                .unwrap_or_else(|| {
+                    " with no build.wit_world set; set [build].wit_world to choose a world explicitly"
+                        .to_string()
+                });
+            format!(
+                "failed to resolve project world from {} for dependency capability validation{}",
+                wit_root.display(),
+                wit_world_hint
+            )
+        })?;
+    let world_package = resolve.worlds[world].package;
+    let mut imports = BTreeSet::new();
+    for (world_key, world_item) in &resolve.worlds[world].imports {
+        let WorldItem::Interface { id, .. } = world_item else {
+            continue;
+        };
+        let interface = &resolve.interfaces[*id];
+        let Some(interface_package) = interface.package else {
+            continue;
+        };
+        if Some(interface_package) == world_package {
+            continue;
+        }
+        let package_name = format!(
+            "{}:{}",
+            resolve.packages[interface_package].name.namespace,
+            resolve.packages[interface_package].name.name
+        );
+        let interface_name = interface
+            .name
+            .as_ref()
+            .map(ToString::to_string)
+            .or(match world_key {
+                wit_parser::WorldKey::Name(name) => Some(name.to_string()),
+                wit_parser::WorldKey::Interface(_) => None,
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "failed to resolve imported interface name for package '{}' in {}",
+                    package_name,
+                    wit_root.display()
+                )
+            })?;
+        imports.insert((package_name, interface_name));
+    }
+
+    Ok(imports.into_iter().collect())
+}
+
+fn capability_policy_allows_dependency_interface(
+    capabilities: &ManifestCapabilityPolicy,
+    package_name: &str,
+    interface_name: &str,
+) -> bool {
+    if capabilities
+        .deps
+        .get("*")
+        .is_some_and(|rules| rules.iter().any(|rule| rule == "*"))
+    {
+        return true;
+    }
+    capabilities.deps.get(package_name).is_some_and(|rules| {
+        rules
+            .iter()
+            .any(|rule| rule == "*" || rule == interface_name)
+    })
+}
+
+pub(crate) fn load_declared_resource_providers_from_project_root(
+    project_root: &Path,
+) -> anyhow::Result<Vec<LoadedResourceProvider>> {
+    let root = load_resolved_toml(project_root, true)?;
+    load_declared_resource_providers(&root, project_root)
+}
+
 fn parse_restart_policy(root: &toml::Table) -> anyhow::Result<String> {
     let Some(raw) = root.get("restart") else {
         return Ok(DEFAULT_RESTART_POLICY.to_string());
@@ -774,6 +951,22 @@ fn parse_build_command(root: &toml::Table) -> anyhow::Result<Option<BuildCommand
     }
 
     Ok(Some(BuildCommand::Argv(argv)))
+}
+
+fn parse_build_wit_world(root: &toml::Table) -> anyhow::Result<Option<String>> {
+    let Some(build_section) = root.get("build") else {
+        return Ok(None);
+    };
+    let Some(build_table) = build_section.as_table() else {
+        return Ok(None);
+    };
+    let Some(wit_world) = build_table.get("wit_world") else {
+        return Ok(None);
+    };
+    let value = wit_world
+        .as_str()
+        .ok_or_else(|| anyhow!("build.wit_world must be a string"))?;
+    Ok(Some(value.trim().to_string()))
 }
 
 fn run_build_command(
@@ -944,8 +1137,8 @@ mod tests {
         ImagoLock, ImagoLockResolved, ImagoLockResolvedBinding, ImagoLockResolvedDependency,
         ImagoLockResolvedPackage, ImagoLockResolvedPackageEdge, LockCapabilityPolicy,
         LockDependencyKind, LockEdgeFromKind, LockPackageEdgeReason, LockSourceKind,
-        build_requested_snapshot, compute_binding_request_id, compute_dependency_request_id,
-        resolved_package_ref,
+        ResourceProfileExpectation, build_requested_snapshot, compute_binding_request_id,
+        compute_dependency_request_id, resolved_package_ref,
     };
     use crate::{
         cli::UpdateArgs,
@@ -1040,7 +1233,7 @@ mod tests {
         package_edges: Vec<ImagoLockResolvedPackageEdge>,
     ) -> ImagoLock {
         let requested =
-            build_requested_snapshot(&dependency_expectations, &binding_expectations, None)
+            build_requested_snapshot(&dependency_expectations, &binding_expectations, &[], None)
                 .expect("requested snapshot should be built");
         ImagoLock {
             version: IMAGO_LOCK_VERSION,
@@ -1093,6 +1286,189 @@ mod tests {
             let destination_path = destination.join(entry.file_name());
             copy_tree(&source_path, &destination_path);
         }
+    }
+
+    fn push_u32_leb(bytes: &mut Vec<u8>, mut value: usize) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn wasm_module_with_custom_section(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut section = Vec::new();
+        push_u32_leb(&mut section, name.len());
+        section.extend_from_slice(name.as_bytes());
+        section.extend_from_slice(payload);
+
+        let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+        bytes.push(0);
+        push_u32_leb(&mut bytes, section.len());
+        bytes.extend_from_slice(&section);
+        bytes
+    }
+
+    fn minimal_wasm_module_bytes() -> &'static [u8] {
+        b"\0asm\x01\0\0\0"
+    }
+
+    fn embedded_gpio_provider_payload(aliases: &[&str]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "resources": {
+                "gpio": {
+                    "digital_pins": [{
+                        "label": "A27",
+                        "aliases": aliases,
+                        "value_path": "/sys/class/gpio/gpio507/value",
+                        "supports_input": false,
+                        "supports_output": true,
+                        "default_active_level": "active-high",
+                        "allow_pull_resistor": false
+                    }]
+                }
+            },
+            "merge_policies": {
+                "gpio.digital_pins": "mergeable"
+            }
+        }))
+        .expect("embedded provider payload should serialize")
+    }
+
+    fn write_cached_path_wasm_dependency(
+        root: &Path,
+        request_name: &str,
+        resolved_name: &str,
+        version: &str,
+        wit_source: &str,
+        component_source: &str,
+        component_bytes: &[u8],
+    ) -> (DependencyExpectation, ImagoLockResolvedDependency, String) {
+        let wit_package = format!("package {resolved_name}@{version};\n");
+        write_file(
+            &root.join(wit_source).join("package.wit"),
+            wit_package.as_bytes(),
+        );
+
+        let wit_path = dependency_cache::dependency_wit_path(request_name, version);
+        write_file(
+            &root.join(&wit_path).join("package.wit"),
+            wit_package.as_bytes(),
+        );
+        let wit_digest = compute_path_digest_hex(&root.join(&wit_path)).expect("wit digest");
+
+        let component_sha = hex::encode(Sha256::digest(component_bytes));
+        write_file(&root.join(component_source), component_bytes);
+        write_file(
+            &dependency_cache::cache_component_path(root, request_name, &component_sha),
+            component_bytes,
+        );
+        write_file(
+            &dependency_cache::cache_entry_root(root, request_name)
+                .join(&wit_path)
+                .join("package.wit"),
+            wit_package.as_bytes(),
+        );
+        save_dependency_cache_entry_for_test(
+            root,
+            dependency_cache::DependencyCacheEntry {
+                name: request_name.to_string(),
+                resolved_package_name: None,
+                version: version.to_string(),
+                kind: "wasm".to_string(),
+                wit_source: wit_source.to_string(),
+                wit_registry: None,
+                wit_sha256: None,
+                wit_path: wit_path.clone(),
+                wit_digest: wit_digest.clone(),
+                wit_source_fingerprint: None,
+                component_source: Some(component_source.to_string()),
+                component_registry: None,
+                component_sha256: Some(component_sha.clone()),
+                component_source_fingerprint: None,
+                component_world_foreign_packages: vec![],
+                component_world_foreign_packages_recorded: true,
+                transitive_packages: vec![],
+            },
+            plugin_sources::SourceKind::Path,
+            Some(plugin_sources::SourceKind::Path),
+        );
+
+        let dependency_expectation = path_dependency_expectation(
+            request_name,
+            version,
+            wit_source,
+            LockDependencyKind::Wasm,
+            Some(ComponentExpectation {
+                source_kind: LockSourceKind::Path,
+                source: component_source.to_string(),
+                registry: None,
+                sha256: None,
+            }),
+        );
+        let resolved_dependency = ImagoLockResolvedDependency {
+            request_id: compute_dependency_request_id(&dependency_expectation),
+            resolved_name: resolved_name.to_string(),
+            resolved_version: version.to_string(),
+            wit_path,
+            wit_tree_digest: wit_digest,
+            component_source: Some(component_source.to_string()),
+            component_registry: None,
+            component_sha256: Some(component_sha.clone()),
+            requires_request_ids: vec![],
+        };
+        (dependency_expectation, resolved_dependency, component_sha)
+    }
+
+    fn embedded_resource_profile_expectation(
+        provider_dependency: &str,
+        component_source: &str,
+        component_sha256: &str,
+        section_bytes: &[u8],
+    ) -> ResourceProfileExpectation {
+        ResourceProfileExpectation {
+            resource: "resources".to_string(),
+            profile_kind: "component-custom-section".to_string(),
+            source_kind: LockSourceKind::Path,
+            source: component_source.to_string(),
+            provider_dependency: Some(provider_dependency.to_string()),
+            component_sha256: Some(component_sha256.to_string()),
+            digest: hex::encode(Sha256::digest(section_bytes)),
+        }
+    }
+
+    fn save_dependency_cache_entry_for_test(
+        root: &Path,
+        mut entry: dependency_cache::DependencyCacheEntry,
+        wit_source_kind: plugin_sources::SourceKind,
+        component_source_kind: Option<plugin_sources::SourceKind>,
+    ) {
+        entry.wit_source_fingerprint = dependency_cache::wit_source_fingerprint_if_exists(
+            root,
+            &entry.wit_source,
+            wit_source_kind,
+        )
+        .expect("wit source fingerprint should be computed");
+        entry.component_source_fingerprint =
+            match (entry.component_source.as_deref(), component_source_kind) {
+                (Some(component_source), Some(source_kind)) => {
+                    dependency_cache::component_source_fingerprint_if_exists(
+                        root,
+                        component_source,
+                        source_kind,
+                    )
+                    .expect("component source fingerprint should be computed")
+                }
+                _ => None,
+            };
+        dependency_cache::save_entry(root, &entry).expect("dependency cache should be written");
     }
 
     fn assert_hashed_main_path(manifest: &Manifest, service_name: &str) -> PathBuf {
@@ -2355,6 +2731,254 @@ mod tests {
     }
 
     #[test]
+    fn build_merges_embedded_resource_provider_into_manifest_resources() {
+        let root = new_temp_dir("embedded-resource-provider-build");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    path = "registry/example"
+
+    [dependencies.component]
+    path = "registry/example-provider.wasm"
+
+    [resources.gpio]
+    digital_pins = [{ label = "A27", aliases = ["blue-led", "status-led", "gpio507"] }]
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let section_bytes = embedded_gpio_provider_payload(&["blue-led", "gpio507"]);
+        let component_bytes =
+            wasm_module_with_custom_section(IMAGO_RESOURCES_CUSTOM_SECTION_NAME, &section_bytes);
+        let (dependency_expectation, resolved_dependency, component_sha) =
+            write_cached_path_wasm_dependency(
+                &root,
+                "path-source-0",
+                "test:example",
+                "0.1.0",
+                "registry/example",
+                "registry/example-provider.wasm",
+                &component_bytes,
+            );
+        let requested = build_requested_snapshot(
+            &[dependency_expectation],
+            &[],
+            &[embedded_resource_profile_expectation(
+                "test:example",
+                "registry/example-provider.wasm",
+                &component_sha,
+                &section_bytes,
+            )],
+            None,
+        )
+        .expect("requested snapshot should build");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                requested,
+                resolved: ImagoLockResolved {
+                    dependencies: vec![resolved_dependency],
+                    bindings: vec![],
+                    packages: vec![],
+                    package_edges: vec![],
+                },
+            },
+        );
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        let resources = manifest.resources.expect("resources should be emitted");
+        let digital_pins = resources
+            .extra
+            .get("gpio")
+            .and_then(JsonValue::as_object)
+            .and_then(|gpio| gpio.get("digital_pins"))
+            .and_then(JsonValue::as_array)
+            .expect("digital pin catalog should be present");
+        assert_eq!(digital_pins.len(), 1);
+        assert_eq!(
+            digital_pins[0]["aliases"],
+            serde_json::json!(["blue-led", "status-led", "gpio507"])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_gpio_profile_drift_with_lock_requested_fingerprint() {
+        let root = new_temp_dir("gpio-profile-fingerprint-mismatch");
+        let profile_relative_path = "boards/milkv-duo-s/profile.toml";
+        write_imago_toml(
+            &root,
+            &format!(
+                r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [resources.gpio.profile]
+    path = "{profile_relative_path}"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#
+            ),
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let original_profile = br#"
+[[digital_pins]]
+soc_name = "A27"
+aliases = ["blue-led"]
+gpio_num = 507
+value_path = "/sys/class/gpio/gpio507/value"
+supports_input = false
+supports_output = true
+default_active_level = "active-high"
+allow_pull_resistor = false
+header = "onboard"
+physical_pin = 0
+"#;
+        write_file(&root.join(profile_relative_path), original_profile);
+
+        let requested = build_requested_snapshot(
+            &[],
+            &[],
+            &[ResourceProfileExpectation {
+                resource: "gpio".to_string(),
+                profile_kind: "path".to_string(),
+                source_kind: LockSourceKind::Path,
+                source: profile_relative_path.to_string(),
+                provider_dependency: None,
+                component_sha256: None,
+                digest: hex::encode(Sha256::digest(original_profile)),
+            }],
+            None,
+        )
+        .expect("requested snapshot should build");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                requested,
+                resolved: ImagoLockResolved {
+                    dependencies: vec![],
+                    bindings: vec![],
+                    packages: vec![],
+                    package_edges: vec![],
+                },
+            },
+        );
+
+        let updated_profile = br#"
+[[digital_pins]]
+soc_name = "B12"
+aliases = ["j3:13"]
+gpio_num = 460
+value_path = "/sys/class/gpio/gpio460/value"
+supports_input = true
+supports_output = true
+default_active_level = "active-high"
+allow_pull_resistor = true
+header = "J3"
+physical_pin = 13
+"#;
+        write_file(&root.join(profile_relative_path), updated_profile);
+
+        let err =
+            build_project("default", &root).expect_err("profile drift should fail fingerprint");
+        assert!(
+            err.to_string().contains("requested fingerprint mismatch"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_embedded_resource_profile_drift_with_lock_requested_fingerprint() {
+        let root = new_temp_dir("embedded-resource-provider-fingerprint-mismatch");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "wasm"
+    path = "registry/example"
+
+    [dependencies.component]
+    path = "registry/example-provider.wasm"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let actual_section_bytes = embedded_gpio_provider_payload(&["blue-led", "gpio507"]);
+        let component_bytes = wasm_module_with_custom_section(
+            IMAGO_RESOURCES_CUSTOM_SECTION_NAME,
+            &actual_section_bytes,
+        );
+        let (dependency_expectation, resolved_dependency, component_sha) =
+            write_cached_path_wasm_dependency(
+                &root,
+                "path-source-0",
+                "test:example",
+                "0.1.0",
+                "registry/example",
+                "registry/example-provider.wasm",
+                &component_bytes,
+            );
+        let requested = build_requested_snapshot(
+            &[dependency_expectation],
+            &[],
+            &[embedded_resource_profile_expectation(
+                "test:example",
+                "registry/example-provider.wasm",
+                &component_sha,
+                &embedded_gpio_provider_payload(&["blue-led"]),
+            )],
+            None,
+        )
+        .expect("requested snapshot should build");
+        write_imago_lock(
+            &root,
+            &ImagoLock {
+                version: IMAGO_LOCK_VERSION,
+                requested,
+                resolved: ImagoLockResolved {
+                    dependencies: vec![resolved_dependency],
+                    bindings: vec![],
+                    packages: vec![],
+                    package_edges: vec![],
+                },
+            },
+        );
+
+        let err = build_project("default", &root)
+            .expect_err("stale embedded resource profile lock should fail build");
+        assert!(err.to_string().contains("requested fingerprint mismatch"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_accepts_wasi_http_outbound_and_normalizes_entries() {
         let root = new_temp_dir("wasi-http-outbound");
         write_imago_toml(
@@ -3152,8 +3776,12 @@ mod tests {
             &root.join("wit/deps/test-dep"),
             &cache_root.join("wit/deps/test-dep"),
         );
-        dependency_cache::save_entry(&root, &cache_entry)
-            .expect("dependency cache should be written");
+        save_dependency_cache_entry_for_test(
+            &root,
+            cache_entry,
+            plugin_sources::SourceKind::Path,
+            None,
+        );
 
         let err = build_project("default", &root)
             .expect_err("build should reject unknown via dependency");
@@ -3276,8 +3904,12 @@ mod tests {
             &root.join("wit/deps/test-dep"),
             &cache_root.join("wit/deps/test-dep"),
         );
-        dependency_cache::save_entry(&root, &cache_entry)
-            .expect("dependency cache should be written");
+        save_dependency_cache_entry_for_test(
+            &root,
+            cache_entry,
+            plugin_sources::SourceKind::Path,
+            None,
+        );
 
         let err = build_project("default", &root)
             .expect_err("build should reject non-canonical transitive package_ref");
@@ -3417,6 +4049,274 @@ mod tests {
         assert_eq!(
             manifest.capabilities.deps.get("test:example").cloned(),
             Some(vec!["*".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_project_wit_import_without_matching_dependency_capability() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-missing");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {}
+"#,
+        );
+        run_update(&root);
+
+        let err = build_project("default", &root)
+            .expect_err("build should reject project WIT imports without matching capability");
+        assert!(
+            err.to_string().contains(
+                "wit/world.wit imports dependency package 'test:example', interface 'api'"
+            ),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_project_wit_import_with_matching_dependency_capability() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-present");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities.deps]
+    "test:example" = ["api"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {}
+"#,
+        );
+        run_update(&root);
+
+        build_project("default", &root)
+            .expect("build should accept project WIT imports when capability matches");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_multi_world_project_wit_import_without_explicit_build_wit_world() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-multi-world-missing");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities.deps]
+    "test:example" = ["api"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+
+world alternate-imports {
+    import test:example/other@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {}
+interface other {}
+"#,
+        );
+        run_update(&root);
+
+        let err = build_project("default", &root)
+            .expect_err("build should reject multi-world project WIT without build.wit_world");
+        assert!(
+            err.to_string().contains("build.wit_world"),
+            "unexpected error: {err:#}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_accepts_multi_world_project_wit_import_with_explicit_build_wit_world() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-multi-world-present");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [build]
+    wit_world = "plugin-imports"
+
+    [capabilities.deps]
+    "test:example" = ["api"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+
+world alternate-imports {
+    import test:example/other@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {}
+interface other {}
+"#,
+        );
+        run_update(&root);
+
+        build_project("default", &root)
+            .expect("build should accept explicit build.wit_world for multi-world WIT");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_rejects_unknown_build_wit_world() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-multi-world-unknown");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [build]
+    wit_world = "missing-world"
+
+    [capabilities.deps]
+    "test:example" = ["api"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+
+world alternate-imports {
+    import test:example/other@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {}
+interface other {}
+"#,
+        );
+        run_update(&root);
+
+        let err = build_project("default", &root)
+            .expect_err("build should reject an unknown build.wit_world");
+        assert!(
+            err.to_string()
+                .contains("build.wit_world = \"missing-world\""),
+            "unexpected error: {err:#}"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -3687,8 +4587,12 @@ mod tests {
             &root.join("wit/deps/test-dep"),
             &cache_root.join("wit/deps/test-dep"),
         );
-        dependency_cache::save_entry(&root, &cache_entry)
-            .expect("dependency cache should be written");
+        save_dependency_cache_entry_for_test(
+            &root,
+            cache_entry,
+            plugin_sources::SourceKind::Path,
+            None,
+        );
 
         let err = build_project("default", &root)
             .expect_err("build should reject transitive lock digest mismatch");
@@ -3728,7 +4632,7 @@ mod tests {
             &root.join("registry/example/package.wit"),
             b"package test:example;\n",
         );
-        let plugin_bytes = b"\0asmplugin";
+        let plugin_bytes = minimal_wasm_module_bytes();
         write_file(&root.join("registry/example-plugin.wasm"), plugin_bytes);
         run_update(&root);
         let lock: ImagoLock = toml::from_str(
@@ -3782,7 +4686,7 @@ mod tests {
         );
         let wit_digest = compute_path_digest_hex(&root.join("wit/deps/chikoski-hello-0.1.0"))
             .expect("wit digest");
-        let component_bytes = b"\0asmderived-component";
+        let component_bytes = minimal_wasm_module_bytes();
         let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         let dependency_expectation = DependencyExpectation {
             name: "chikoski:hello".to_string(),
@@ -3851,8 +4755,12 @@ mod tests {
             &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
             component_bytes,
         );
-        dependency_cache::save_entry(&root, &cache_entry)
-            .expect("dependency cache should be written");
+        save_dependency_cache_entry_for_test(
+            &root,
+            cache_entry,
+            plugin_sources::SourceKind::Wit,
+            Some(plugin_sources::SourceKind::Wit),
+        );
 
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
@@ -3870,7 +4778,7 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_component_source_mismatch_when_component_is_omitted_in_config() {
+    fn build_rejects_requested_dependency_mismatch_when_component_is_omitted_in_config() {
         let root = new_temp_dir("dependencies-wasm-component-mismatch-derived");
         write_imago_toml(
             &root,
@@ -3895,7 +4803,7 @@ mod tests {
         );
         let wit_digest = compute_path_digest_hex(&root.join("wit/deps/chikoski-hello-0.1.0"))
             .expect("wit digest");
-        let component_bytes = b"\0asmderived-component";
+        let component_bytes = minimal_wasm_module_bytes();
         let plugin_sha = hex::encode(Sha256::digest(component_bytes));
         let dependency_expectation = DependencyExpectation {
             name: "chikoski:hello".to_string(),
@@ -3964,12 +4872,20 @@ mod tests {
             &dependency_cache::cache_component_path(&root, "chikoski:hello", &plugin_sha),
             component_bytes,
         );
-        dependency_cache::save_entry(&root, &cache_entry)
-            .expect("dependency cache should be written");
+        save_dependency_cache_entry_for_test(
+            &root,
+            cache_entry,
+            plugin_sources::SourceKind::Wit,
+            Some(plugin_sources::SourceKind::Wit),
+        );
 
         let err = build_project("default", &root)
-            .expect_err("build should fail when derived component source mismatches lock");
-        assert!(err.to_string().contains("requested fingerprint mismatch"));
+            .expect_err("build should fail when derived component changes the request id");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text.contains("is missing in imago.lock.requested"),
+            "unexpected error: {err_text}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

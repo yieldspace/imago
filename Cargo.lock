@@ -2409,6 +2409,7 @@ dependencies = [
  "uuid",
  "wasm-pkg-client",
  "wasm-pkg-common",
+ "wasmparser 0.245.1",
  "web-transport-quinn",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",

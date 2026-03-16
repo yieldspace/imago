@@ -25,6 +25,8 @@ pub struct ImagoLockRequested {
     pub dependencies: Vec<ImagoLockRequestedDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<ImagoLockRequestedBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_profiles: Vec<ImagoLockRequestedResourceProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +129,21 @@ pub struct ImagoLockRequestedBinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ImagoLockRequestedResourceProfile {
+    pub id: String,
+    pub resource: String,
+    pub profile_kind: String,
+    pub source_kind: LockSourceKind,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_dependency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_sha256: Option<String>,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ImagoLockResolvedDependency {
     pub request_id: String,
     pub resolved_name: String,
@@ -214,6 +231,18 @@ pub struct BindingWitExpectation {
     pub registry: Option<String>,
     pub version: String,
     pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Expected resource profile record supplied by config parsing.
+pub struct ResourceProfileExpectation {
+    pub resource: String,
+    pub profile_kind: String,
+    pub source_kind: LockSourceKind,
+    pub source: String,
+    pub provider_dependency: Option<String>,
+    pub component_sha256: Option<String>,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

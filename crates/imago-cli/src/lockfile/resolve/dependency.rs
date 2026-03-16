@@ -37,7 +37,7 @@ fn resolve_dependencies_with(
 ) -> anyhow::Result<BTreeMap<String, ResolvedDependency>> {
     ensure_supported_lock_version(lock.version)?;
 
-    let expected_requested = build_requested_snapshot(expectations, &[], None)?;
+    let expected_requested = build_requested_snapshot(expectations, &[], &[], None)?;
     let mut requested_by_id = BTreeMap::new();
     for requested in &lock.requested.dependencies {
         if requested_by_id
@@ -220,8 +220,9 @@ mod tests {
         let root = new_temp_dir("duplicate");
         let expectation = sample_expectation(LockDependencyKind::Native);
         let request_id = compute_dependency_request_id(&expectation);
-        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(std::slice::from_ref(&expectation), &[], &[], None)
+                .expect("requested snapshot should build");
 
         let lock = ImagoLock {
             version: IMAGO_LOCK_VERSION,
@@ -247,8 +248,9 @@ mod tests {
         let root = new_temp_dir("unknown-requires");
         let expectation = sample_expectation(LockDependencyKind::Native);
         let request_id = compute_dependency_request_id(&expectation);
-        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(std::slice::from_ref(&expectation), &[], &[], None)
+                .expect("requested snapshot should build");
 
         let lock = ImagoLock {
             version: IMAGO_LOCK_VERSION,
@@ -281,8 +283,9 @@ mod tests {
             sha256: None,
         });
         let request_id = compute_dependency_request_id(&expectation);
-        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(std::slice::from_ref(&expectation), &[], &[], None)
+                .expect("requested snapshot should build");
 
         let mut resolved = sample_resolved_dependency(&root, &request_id, vec![]);
         resolved.component_source = Some("registry/example-component.wasm".to_string());

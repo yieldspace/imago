@@ -331,6 +331,7 @@ mod tests {
                 fingerprint: "fp".to_string(),
                 dependencies: vec![],
                 bindings: vec![],
+                resource_profiles: vec![],
             },
             resolved: ImagoLockResolved {
                 dependencies: vec![],

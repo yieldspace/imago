@@ -83,6 +83,12 @@
               "type": "null"
             }
           ]
+        },
+        "wit_world": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -264,6 +270,94 @@
       ],
       "type": "object"
     },
+    "GpioDigitalPinEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "allow_pull_resistor": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default_active_level": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "supports_input": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_output": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "value_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    },
+    "GpioProfileSource": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "GpioResourcesSection": {
+      "additionalProperties": true,
+      "properties": {
+        "digital_pins": {
+          "items": {
+            "$ref": "#/$defs/GpioDigitalPinEntry"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpioProfileSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "HttpSection": {
       "additionalProperties": true,
       "properties": {
@@ -322,6 +416,16 @@
           "type": [
             "object",
             "null"
+          ]
+        },
+        "gpio": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GpioResourcesSection"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "http_outbound": {

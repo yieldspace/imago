@@ -76,7 +76,7 @@ interface digital {
     /// Resolved configuration for a digital pin resource.
     @since(version = 0.1.0)
     record digital-config {
-        /// Pin label used for acquisition.
+        /// Resolved canonical pin label.
         label: string,
         /// Pin mode assigned to this resource.
         pin-mode: pin-mode,

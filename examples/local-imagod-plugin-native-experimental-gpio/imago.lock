@@ -1,30 +1,44 @@
 version = 1
 
-[[dependencies]]
-name = "imago:experimental-gpio"
+[requested]
+fingerprint = "821deb45e09301aaaf15e202b1235ce4691708d7282a020cba1cd45ceef20a21"
+
+[[requested.dependencies]]
+id = "dep:e0f0a81ac27bad5e5f2515b44c44c167856c2efe97244ea5c715a4703276e565"
+kind = "native"
 version = "0.1.0"
-wit_source = "../../plugins/imago-experimental-gpio/wit"
-wit_digest = "a8c94d050c2b4fccd40bb4b4cecbb4118c5a221f0d2b0b62d24caaefb5aaf1ef"
+source_kind = "path"
+source = "../../plugins/imago-experimental-gpio/wit"
+declared_requires = []
+
+[[resolved.dependencies]]
+request_id = "dep:e0f0a81ac27bad5e5f2515b44c44c167856c2efe97244ea5c715a4703276e565"
+resolved_name = "imago:experimental-gpio"
+resolved_version = "0.1.0"
 wit_path = "wit/deps/imago-experimental-gpio-0.1.0"
+wit_tree_digest = "4685c285ce929cafcf56bef862cd9236d48f60417d6d0ddd7abd124b99ba178d"
+requires_request_ids = []
 
-[[wit_packages]]
+[[resolved.packages]]
+package_ref = "wasi:io@0.2.6#"
 name = "wasi:io"
-
-[[wit_packages.versions]]
-requirement = "=0.2.6"
 version = "0.2.6"
-digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
+requirement = "=0.2.6"
 path = "wit/deps/wasi-io-0.2.6"
-via = ["imago:experimental-gpio"]
-
-[[wit_packages]]
-name = "wasi:io"
-registry = "wasi.dev"
-
-[[wit_packages.versions]]
-requirement = "=0.2.6"
-version = "0.2.6"
 digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
+
+[[resolved.packages]]
+package_ref = "wasi:io@0.2.6#wasi.dev"
+name = "wasi:io"
+version = "0.2.6"
+registry = "wasi.dev"
+requirement = "=0.2.6"
 source = "wasi:io"
 path = "wit/deps/wasi-io-0.2.6"
-via = []
+digest = "sha256:b98b06c04cffa5eaf00b071e23cc856ae7e648506748a06b802972ee3cc38590"
+
+[[resolved.package_edges]]
+from_kind = "dependency"
+from_ref = "dep:e0f0a81ac27bad5e5f2515b44c44c167856c2efe97244ea5c715a4703276e565"
+to_package_ref = "wasi:io@0.2.6#"
+reason = "wit-import"

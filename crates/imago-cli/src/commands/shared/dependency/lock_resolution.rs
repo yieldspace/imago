@@ -279,8 +279,9 @@ mod tests {
         let dependency = sample_project_dependency(ManifestDependencyKind::Native);
         let expectation = dependency_expectation_for_project_dependency(&dependency)
             .expect("expectation should build");
-        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(std::slice::from_ref(&expectation), &[], &[], None)
+                .expect("requested snapshot should build");
         let lock = ImagoLock {
             version: IMAGO_LOCK_VERSION,
             requested,
@@ -319,8 +320,9 @@ path = "registry/example-component.wasm"
             dependency_expectation_for_project_dependency(&project_dependency)
                 .expect("expectation should build");
         let request_id = compute_dependency_request_id(&expectation);
-        let requested = build_requested_snapshot(std::slice::from_ref(&expectation), &[], None)
-            .expect("requested snapshot should build");
+        let requested =
+            build_requested_snapshot(std::slice::from_ref(&expectation), &[], &[], None)
+                .expect("requested snapshot should build");
 
         let wit_path = "wit/deps/path-source-0-0.1.0";
         write(
