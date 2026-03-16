@@ -18,7 +18,10 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use imago_project_config::{decode_document as decode_imago_toml_document, validate_for_build};
+use imago_project_config::{
+    ServiceNameField, ServiceNameResolver, decode_document as decode_imago_toml_document,
+    validate_for_build,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
@@ -150,6 +153,12 @@ pub fn parse_target_remote(raw: &str) -> anyhow::Result<SshTargetRemote> {
         port: parsed.port(),
         socket_path,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::commands::build) struct LoadResolvedTomlOptions {
+    pub(in crate::commands::build) validate_build_contract: bool,
+    pub(in crate::commands::build) resolve_service_name: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -470,12 +479,24 @@ fn run_inner_with_target_override(
 }
 
 pub fn load_target_config(target_name: &str, project_root: &Path) -> anyhow::Result<TargetConfig> {
-    let root = load_resolved_toml(project_root, false)?;
+    let root = load_resolved_toml(
+        project_root,
+        LoadResolvedTomlOptions {
+            validate_build_contract: false,
+            resolve_service_name: false,
+        },
+    )?;
     parse_target(&root, target_name, project_root)
 }
 
 pub fn load_service_name(project_root: &Path) -> anyhow::Result<String> {
-    let root = load_resolved_toml(project_root, false)?;
+    let root = load_resolved_toml(
+        project_root,
+        LoadResolvedTomlOptions {
+            validate_build_contract: false,
+            resolve_service_name: true,
+        },
+    )?;
     let name = required_string(&root, "name")?;
     validate_service_name(&name)?;
     Ok(name)
@@ -533,7 +554,13 @@ fn build_project_with_target_override_inner(
     if emit_progress {
         ui::command_stage("artifact.build", "load-config", "loading imago.toml");
     }
-    let root = load_resolved_toml(project_root, true)?;
+    let root = load_resolved_toml(
+        project_root,
+        LoadResolvedTomlOptions {
+            validate_build_contract: true,
+            resolve_service_name: true,
+        },
+    )?;
     let namespace_registries = parse_namespace_registries(root.get("namespace_registries"))?;
 
     let command = parse_build_command(&root)?;
@@ -695,22 +722,130 @@ fn build_project_with_target_override_inner(
 
 fn load_resolved_toml(
     project_root: &Path,
-    validate_build_contract: bool,
+    options: LoadResolvedTomlOptions,
 ) -> anyhow::Result<toml::Table> {
     let path = project_root.join("imago.toml");
     let raw =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let document = decode_imago_toml_document(&raw).context("failed to decode imago.toml")?;
-    if validate_build_contract {
+    if options.validate_build_contract {
         validate_for_build(&document)?;
     }
     let parsed: TomlValue = toml::from_str(&raw).context("failed to parse imago.toml")?;
-    let root = parsed
+    let mut root = parsed
         .as_table()
         .cloned()
         .ok_or_else(|| anyhow!("imago.toml root must be a table"))?;
+    if options.resolve_service_name {
+        resolve_service_name_field(&mut root, project_root, document.config.name.as_ref())?;
+    }
 
     Ok(root)
+}
+
+fn resolve_service_name_field(
+    root: &mut toml::Table,
+    project_root: &Path,
+    name_field: Option<&ServiceNameField>,
+) -> anyhow::Result<()> {
+    let Some(name_field) = name_field else {
+        return Ok(());
+    };
+
+    let resolved = match name_field {
+        ServiceNameField::Literal(_) => return Ok(()),
+        ServiceNameField::Resolver(resolver) => {
+            resolve_service_name_from_resolver(project_root, resolver)?
+        }
+    };
+
+    root.insert("name".to_string(), TomlValue::String(resolved));
+    Ok(())
+}
+
+fn resolve_service_name_from_resolver(
+    project_root: &Path,
+    resolver: &ServiceNameResolver,
+) -> anyhow::Result<String> {
+    match (resolver.cargo, resolver.pyproject) {
+        (true, false) => resolve_name_from_toml_path(
+            &project_root.join("Cargo.toml"),
+            "imago.toml key 'name.cargo'",
+            "package",
+            "name",
+        ),
+        (false, true) => resolve_name_from_toml_path(
+            &project_root.join("pyproject.toml"),
+            "imago.toml key 'name.pyproject'",
+            "project",
+            "name",
+        ),
+        _ => Err(anyhow!(
+            "imago.toml key 'name' must enable exactly one resolver: `cargo` or `pyproject`"
+        )),
+    }
+}
+
+fn resolve_name_from_toml_path(
+    path: &Path,
+    resolver_field: &str,
+    table_name: &str,
+    key_name: &str,
+) -> anyhow::Result<String> {
+    let raw = fs::read_to_string(path).with_context(|| {
+        format!(
+            "{resolver_field} requires readable sibling file {}",
+            path.display()
+        )
+    })?;
+    let parsed: TomlValue = toml::from_str(&raw).with_context(|| {
+        format!(
+            "{resolver_field} failed to parse sibling file {}",
+            path.display()
+        )
+    })?;
+    let root = parsed.as_table().ok_or_else(|| {
+        anyhow!(
+            "{resolver_field} requires {} to contain a TOML table root",
+            path.display()
+        )
+    })?;
+    let table = root
+        .get(table_name)
+        .and_then(TomlValue::as_table)
+        .ok_or_else(|| {
+            anyhow!(
+                "{resolver_field} requires sibling file {} to define [{}]",
+                path.display(),
+                table_name
+            )
+        })?;
+    let value = table.get(key_name).ok_or_else(|| {
+        anyhow!(
+            "{resolver_field} requires sibling file {} to define [{}].{}",
+            path.display(),
+            table_name,
+            key_name
+        )
+    })?;
+    let resolved = value.as_str().ok_or_else(|| {
+        anyhow!(
+            "{resolver_field} requires sibling file {} [{}].{} to be a string",
+            path.display(),
+            table_name,
+            key_name
+        )
+    })?;
+    let trimmed = resolved.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "{resolver_field} resolved [{}].{} from {} to an empty string",
+            table_name,
+            key_name,
+            path.display()
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 fn parse_restart_policy(root: &toml::Table) -> anyhow::Result<String> {
@@ -982,6 +1117,32 @@ mod tests {
             "remote = \"ssh://localhost?socket=/run/imago/imagod.sock\"",
         );
         write_file(&root.join("imago.toml"), body.as_bytes());
+    }
+
+    fn write_cargo_toml(root: &Path, package_name: &str) {
+        write_file(
+            &root.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{package_name}"
+version = "0.1.0"
+"#
+            )
+            .as_bytes(),
+        );
+    }
+
+    fn write_pyproject_toml(root: &Path, project_name: &str) {
+        write_file(
+            &root.join("pyproject.toml"),
+            format!(
+                r#"[project]
+name = "{project_name}"
+version = "0.1.0"
+"#
+            )
+            .as_bytes(),
+        );
     }
 
     fn write_imago_lock(root: &Path, lock: &ImagoLock) {
@@ -1826,6 +1987,169 @@ mod tests {
             err.to_string()
                 .contains("imago.toml missing required key: name")
         );
+        assert!(!root.join("build/side-effect.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_name_from_sibling_cargo_toml() {
+        let root = new_temp_dir("resolve-name-from-cargo");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_cargo_toml(&root, "svc-from-cargo");
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+
+        assert_eq!(manifest.name, "svc-from-cargo");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_name_from_sibling_pyproject_toml() {
+        let root = new_temp_dir("resolve-name-from-pyproject");
+        write_imago_toml(
+            &root,
+            r#"
+    name.pyproject = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_pyproject_toml(&root, "svc-from-pyproject");
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+
+        assert_eq!(manifest.name, "svc-from-pyproject");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn does_not_run_build_command_when_name_cargo_file_is_missing() {
+        let root = new_temp_dir("name-cargo-file-missing");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [build]
+    command = "mkdir -p build && printf side-effect > build/side-effect.txt"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+
+        let err = build_project("default", &root)
+            .expect_err("missing Cargo.toml should fail before build.command");
+        assert!(err.to_string().contains("name.cargo"));
+        assert!(err.to_string().contains("Cargo.toml"));
+        assert!(!root.join("build/side-effect.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn does_not_run_build_command_when_name_cargo_key_is_missing() {
+        let root = new_temp_dir("name-cargo-key-missing");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [build]
+    command = "mkdir -p build && printf side-effect > build/side-effect.txt"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(
+            &root.join("Cargo.toml"),
+            br#"[package]
+version = "0.1.0"
+"#,
+        );
+
+        let err = build_project("default", &root)
+            .expect_err("missing [package].name should fail before build.command");
+        assert!(err.to_string().contains("[package].name"));
+        assert!(!root.join("build/side-effect.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn does_not_run_build_command_when_resolved_name_is_empty() {
+        let root = new_temp_dir("name-cargo-empty");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [build]
+    command = "mkdir -p build && printf side-effect > build/side-effect.txt"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_cargo_toml(&root, "   ");
+
+        let err = build_project("default", &root)
+            .expect_err("empty resolved name should fail before build.command");
+        assert!(err.to_string().contains("empty string"));
+        assert!(!root.join("build/side-effect.txt").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn does_not_run_build_command_when_resolved_name_is_invalid() {
+        let root = new_temp_dir("name-cargo-invalid");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [build]
+    command = "mkdir -p build && printf side-effect > build/side-effect.txt"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_cargo_toml(&root, "svc/name");
+
+        let err = build_project("default", &root)
+            .expect_err("invalid resolved name should fail before build.command");
+        assert!(err.to_string().contains("invalid path characters"));
         assert!(!root.join("build/side-effect.txt").exists());
 
         let _ = fs::remove_dir_all(root);
@@ -4339,6 +4663,34 @@ mod tests {
     }
 
     #[test]
+    fn load_service_name_resolves_name_from_cargo_without_build_validation() {
+        let root = new_temp_dir("load-service-name-resolver");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+
+    [target.default]
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+    "#,
+        );
+        write_cargo_toml(&root, "svc-from-cargo");
+
+        let default_name = load_service_name(&root)
+            .expect("load_service_name should resolve name without build validation");
+
+        assert_eq!(default_name, "svc-from-cargo");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn load_target_config_ignores_build_only_validation_errors() {
         let root = new_temp_dir("load-target-config-ignores-build-validation");
         write_imago_toml(
@@ -4359,6 +4711,58 @@ mod tests {
 
         let target = load_target_config("default", &root)
             .expect("load_target_config should not require build-only validation");
+
+        assert_eq!(
+            target.remote,
+            "ssh://localhost?socket=/run/imago/imagod.sock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_target_config_ignores_missing_cargo_name_resolver_source() {
+        let root = new_temp_dir("load-target-config-missing-cargo-resolver-source");
+        write_imago_toml(
+            &root,
+            r#"
+    name.cargo = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [target.default]
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+    "#,
+        );
+
+        let target = load_target_config("default", &root)
+            .expect("load_target_config should not resolve name.cargo");
+
+        assert_eq!(
+            target.remote,
+            "ssh://localhost?socket=/run/imago/imagod.sock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_target_config_ignores_missing_pyproject_name_resolver_source() {
+        let root = new_temp_dir("load-target-config-missing-pyproject-resolver-source");
+        write_imago_toml(
+            &root,
+            r#"
+    name.pyproject = true
+    main = "build/app.wasm"
+    type = "cli"
+
+    [target.default]
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+    "#,
+        );
+
+        let target = load_target_config("default", &root)
+            .expect("load_target_config should not resolve name.pyproject");
 
         assert_eq!(
             target.remote,

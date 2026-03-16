@@ -363,6 +363,40 @@
       ],
       "type": "string"
     },
+    "ServiceNameResolver": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "cargo": {
+              "const": true
+            },
+            "pyproject": {
+              "const": false,
+              "default": false
+            }
+          },
+          "required": [
+            "cargo"
+          ]
+        },
+        {
+          "properties": {
+            "cargo": {
+              "const": false,
+              "default": false
+            },
+            "pyproject": {
+              "const": true
+            }
+          },
+          "required": [
+            "pyproject"
+          ]
+        }
+      ],
+      "type": "object"
+    },
     "SocketSection": {
       "additionalProperties": true,
       "properties": {
@@ -483,7 +517,14 @@
       "type": "string"
     },
     "name": {
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/ServiceNameResolver"
+        }
+      ]
     },
     "namespace_registries": {
       "additionalProperties": {
