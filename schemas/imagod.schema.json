@@ -288,7 +288,7 @@
       "description": "Runtime limits and process-control knobs."
     },
     "server_version": {
-      "default": "imagod/0.4.0",
+      "default": "imagod/0.5.0",
       "description": "Server version reported via negotiate response.",
       "type": "string"
     },
