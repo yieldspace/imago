@@ -34,9 +34,11 @@ These keys are read from the root TOML table and are not nested under a `[packag
 
 ### The `name` field
 
-- Type: `string`
+- Type: `string` or `table`
 - Required/Optional: Required.
-- Accepted values / Constraints: 1..=63 characters; ASCII `[A-Za-z0-9._-]` only; must not contain `/`, `\\`, or `..`.
+- Accepted values / Constraints:
+  - Literal string: 1..=63 characters; ASCII `[A-Za-z0-9._-]` only; must not contain `/`, `\\`, or `..`.
+  - Resolver table: enable exactly one of `cargo = true` or `pyproject = true`.
 - Default: none.
 - Example:
 
@@ -44,7 +46,19 @@ These keys are read from the root TOML table and are not nested under a `[packag
 name = "example-service"
 ```
 
-- Validation error notes: missing, empty, or invalid characters cause `imago artifact build` to fail.
+```toml
+name.cargo = true
+```
+
+```toml
+name.pyproject = true
+```
+
+- Resolution notes:
+  - `name.cargo = true` reads `Cargo.toml` `[package].name` from the same project root as `imago.toml`.
+  - `name.pyproject = true` reads `pyproject.toml` `[project].name` from the same project root as `imago.toml`.
+  - Resolver lookup is root-only and fail-closed. It does not search parent directories.
+- Validation error notes: missing, empty, invalid characters, missing sibling files, missing source keys, or invalid resolver tables cause `imago artifact build` to fail.
 
 ### The `main` field
 

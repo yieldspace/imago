@@ -1,6 +1,7 @@
 "$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imago.schema.json"
 
-name = "example-service"
+name.cargo = true
+
 main = "target/release/wasm32-wasip2/example-service.wasm"
 type = "cli"
 
