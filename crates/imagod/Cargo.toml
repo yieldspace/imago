@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = true
+build = "build.rs"
 
 [features]
 default = ["runtime-wasmtime"]
 runtime-wasmtime = ["imagod-runtime/runtime-wasmtime"]
+wasi-nn-cvitek = ["runtime-wasmtime", "imagod-runtime/wasi-nn-cvitek"]
 wasi-nn-openvino = ["runtime-wasmtime", "imagod-runtime/wasi-nn-openvino"]
 wasi-nn-onnx = ["runtime-wasmtime", "imagod-runtime/wasi-nn-onnx"]
 

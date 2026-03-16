@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Add `wasi-nn-cvitek` runtime feature for CVITEK / Milk-V Duo TPU backends
+
 ## [0.1.0](https://github.com/yieldspace/imago/releases/tag/imagod-runtime-v0.1.0) - 2026-03-02
 
 ### Other

@@ -1,0 +1,11 @@
+[package]
+name = "imagod-runtime-wasi-nn-cvitek"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+wasmtime = { workspace = true }
+wasmtime-wasi-nn = { workspace = true, default-features = false }

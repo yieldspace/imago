@@ -302,7 +302,7 @@ impl WasmRuntime {
 
         if !wasi_nn::has_enabled_feature() {
             return Err(map_runtime_error(
-                "wasi-nn backend is not enabled; rebuild imagod with feature 'wasi-nn-openvino' or 'wasi-nn-onnx'"
+                "wasi-nn backend is not enabled; rebuild imagod with feature 'wasi-nn-cvitek', 'wasi-nn-openvino', or 'wasi-nn-onnx'"
                     .to_string(),
             ));
         }
@@ -1666,7 +1666,11 @@ interface graph {
         );
     }
 
-    #[cfg(any(feature = "wasi-nn-openvino", feature = "wasi-nn-onnx"))]
+    #[cfg(any(
+        feature = "wasi-nn-cvitek",
+        feature = "wasi-nn-openvino",
+        feature = "wasi-nn-onnx"
+    ))]
     #[tokio::test]
     async fn cli_type_with_wasi_nn_import_does_not_fail_with_missing_nn_linker() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");
@@ -1716,7 +1720,11 @@ interface graph {
         );
     }
 
-    #[cfg(not(any(feature = "wasi-nn-openvino", feature = "wasi-nn-onnx")))]
+    #[cfg(not(any(
+        feature = "wasi-nn-cvitek",
+        feature = "wasi-nn-openvino",
+        feature = "wasi-nn-onnx"
+    )))]
     #[tokio::test]
     async fn cli_type_with_wasi_nn_import_requires_backend_feature() {
         let runtime = WasmRuntime::new().expect("runtime should initialize");

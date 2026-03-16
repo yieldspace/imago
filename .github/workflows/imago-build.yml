@@ -21,9 +21,165 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'imago-v') || startsWith(github.event.release.tag_name, 'imagod-v')
+  build-imagod:
+    name: Build imagod (${{ matrix.target }}${{ matrix.features && format('+{0}', matrix.features) || '' }})
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'imagod-v')
+    runs-on: ${{ matrix.runs_on }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use_zig: false
+            runs_on: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            use_zig: false
+            runs_on: ubuntu-24.04
+          - target: armv7-unknown-linux-gnueabihf
+            use_zig: false
+            runs_on: ubuntu-24.04
+          - target: riscv64gc-unknown-linux-gnu
+            use_zig: false
+            runs_on: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            use_zig: true
+            runs_on: ubuntu-24.04
+          - target: x86_64-unknown-linux-musl
+            use_zig: true
+            runs_on: ubuntu-24.04
+          - target: armv7-unknown-linux-musleabihf
+            use_zig: true
+            runs_on: ubuntu-24.04
+          - target: riscv64gc-unknown-linux-musl
+            use_zig: true
+            runs_on: ubuntu-24.04
+          - target: riscv64gc-unknown-linux-musl
+            use_zig: true
+            runs_on: ubuntu-24.04
+            features: wasi-nn-cvitek
+          - target: x86_64-apple-darwin
+            use_zig: false
+            runs_on: macos-latest
+          - target: aarch64-apple-darwin
+            use_zig: false
+            runs_on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: imago-build-${{ runner.os }}-v1
+          cache-targets: "false"
+          cache-bin: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup Linux cross build prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          IMAGO_ENABLE_ZIG_SETUP: ${{ matrix.use_zig && 'true' || 'false' }}
+          IMAGO_EXPECTED_TARGET: ${{ matrix.target }}
+        run: bash ./.github/scripts/setup_linux_cross_build_env.sh
+
+      - name: Build GNU target (main/PR)
+        if: ${{ !(matrix.use_zig) && github.event_name != 'release' }}
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod -F "default${{ matrix.features && format(',{0}', matrix.features) || '' }}"
+
+      - name: "Build GNU target (release: imagod)"
+        if: ${{ !(matrix.use_zig) && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v') }}
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod -F "default${{ matrix.features && format(',{0}', matrix.features) || '' }}"
+
+      - name: Build musl target with zig (main/PR)
+        if: ${{ matrix.use_zig && github.event_name != 'release' }}
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod -F "default${{ matrix.features && format(',{0}', matrix.features) || '' }}"
+
+      - name: "Build musl target with zig (release: imagod)"
+        if: ${{ matrix.use_zig && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v') }}
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod -F "default${{ matrix.features && format(',{0}', matrix.features) || '' }}"
+
+      - name: Resolve imagod version
+        if: github.event_name != 'release'
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          imagod_version="$(awk 'BEGIN{in_ws=0} /^\[workspace\.package\]/{in_ws=1;next} /^\[/{in_ws=0} in_ws && /^version = / {gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
+          echo "imagod_version=${imagod_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage release artifact (imagod)
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}${{ matrix.features && format('+{0}', matrix.features) || '' }}"
+
+      - name: Generate release checksum (imagod)
+        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
+        shell: bash
+        env:
+          IMAGOD_RELEASE_NAME: imagod-${{ matrix.target }}${{ matrix.features && format('+{0}', matrix.features) || '' }}
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${IMAGOD_RELEASE_NAME}" > "${IMAGOD_RELEASE_NAME}.sha256"
+            elif command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "${IMAGOD_RELEASE_NAME}" > "${IMAGOD_RELEASE_NAME}.sha256"
+            else
+              echo "error: neither sha256sum nor shasum is available" >&2
+              exit 1
+            fi
+          )
+
+      - name: Stage CI artifacts (main/PR)
+        if: github.event_name != 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}${{ matrix.features && format('+{0}', matrix.features) || '' }}-${{ steps.versions.outputs.imagod_version }}"
+
+      - name: Upload release artifacts
+        if: github.event_name == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: release-${{ github.event.release.tag_name }}-imagod-${{ matrix.target }}${{ matrix.features && format('+{0}', matrix.features) || '' }}
+          path: dist/*
+          retention-days: 7
+
+      - name: Upload CI artifacts
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          if-no-files-found: error
+          name: imagod-${{ matrix.target }}${{ matrix.features && format('+{0}', matrix.features) || '' }}-binaries-${{ github.sha }}
+          path: dist/*
+          retention-days: 1
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  build-imago-cli:
+    name: Build imago-cli (${{ matrix.target }})
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'imago-v')
     runs-on: ${{ matrix.runs_on }}
     env:
       RUSTC_WRAPPER: sccache
@@ -93,38 +249,28 @@ jobs:
 
       - name: Build GNU target (main/PR)
         if: ${{ !(matrix.use_zig) && github.event_name != 'release' }}
-        run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli --bin imago
 
       - name: "Build GNU target (release: imago)"
         if: ${{ !(matrix.use_zig) && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v') }}
         run: cargo build --locked --release --target "${{ matrix.target }}" -p imago-cli --bin imago
 
-      - name: "Build GNU target (release: imagod)"
-        if: ${{ !(matrix.use_zig) && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v') }}
-        run: cargo build --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod
-
       - name: Build musl target with zig (main/PR)
         if: matrix.use_zig && github.event_name != 'release'
-        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imago-cli -p imagod --bin imago --bin imagod
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imago-cli --bin imago
 
       - name: "Build musl target with zig (release: imago)"
         if: matrix.use_zig && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v')
         run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imago-cli --bin imago
 
-      - name: "Build musl target with zig (release: imagod)"
-        if: matrix.use_zig && github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
-        run: cargo zigbuild --locked --release --target "${{ matrix.target }}" -p imagod --bin imagod
-
-      - name: Resolve binary versions
+      - name: Resolve imago-cli version
         if: github.event_name != 'release'
         id: versions
         shell: bash
         run: |
           set -euo pipefail
           imago_cli_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' crates/imago-cli/Cargo.toml | head -n1)"
-          imagod_version="$(awk 'BEGIN{in_ws=0} /^\[workspace\.package\]/{in_ws=1;next} /^\[/{in_ws=0} in_ws && /^version = / {gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
           echo "imago_version=${imago_cli_version}" >> "$GITHUB_OUTPUT"
-          echo "imagod_version=${imagod_version}" >> "$GITHUB_OUTPUT"
 
       - name: Stage release artifact (imago)
         if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v')
@@ -133,14 +279,6 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/imago" "dist/imago-${{ matrix.target }}"
-
-      - name: Stage release artifact (imagod)
-        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}"
 
       - name: Generate release checksum (imago)
         if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v')
@@ -159,23 +297,6 @@ jobs:
             fi
           )
 
-      - name: Generate release checksum (imagod)
-        if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v')
-        shell: bash
-        run: |
-          set -euo pipefail
-          (
-            cd dist
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "imagod-${{ matrix.target }}" > "imagod-${{ matrix.target }}.sha256"
-            elif command -v shasum >/dev/null 2>&1; then
-              shasum -a 256 "imagod-${{ matrix.target }}" > "imagod-${{ matrix.target }}.sha256"
-            else
-              echo "error: neither sha256sum nor shasum is available" >&2
-              exit 1
-            fi
-          )
-
       - name: Stage CI artifacts (main/PR)
         if: github.event_name != 'release'
         shell: bash
@@ -183,14 +304,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/imago" "dist/imago-${{ matrix.target }}-${{ steps.versions.outputs.imago_version }}"
-          cp "target/${{ matrix.target }}/release/imagod" "dist/imagod-${{ matrix.target }}-${{ steps.versions.outputs.imagod_version }}"
 
       - name: Upload release artifacts
         if: github.event_name == 'release'
         uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
-          name: release-${{ github.event.release.tag_name }}-${{ matrix.target }}
+          name: release-${{ github.event.release.tag_name }}-imago-${{ matrix.target }}
           path: dist/*
           retention-days: 7
 
@@ -199,7 +319,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           if-no-files-found: error
-          name: ${{ matrix.target }}-binaries-${{ github.sha }}
+          name: imago-${{ matrix.target }}-binaries-${{ github.sha }}
           path: dist/*
           retention-days: 1
 
@@ -207,11 +327,11 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
-  upload-release-assets:
-    name: Upload release assets
+  upload-imagod-release-assets:
+    name: Upload imagod release assets
     needs:
-      - build
-    if: github.event_name == 'release' && (startsWith(github.event.release.tag_name, 'imago-v') || startsWith(github.event.release.tag_name, 'imagod-v')) && needs.build.result == 'success'
+      - build-imagod
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imagod-v') && needs.build-imagod.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -221,7 +341,49 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: dist
-          pattern: release-${{ github.event.release.tag_name }}-*
+          pattern: release-${{ github.event.release.tag_name }}-imagod-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -R dist
+
+      - name: Upload artifacts to existing GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+
+      - name: Promote GitHub Release to stable latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh release view "${{ github.event.release.tag_name }}" --json databaseId --jq '.databaseId')"
+          if [ -z "${release_id}" ] || [ "${release_id}" = "null" ]; then
+            echo "error: failed to resolve release id for ${{ github.event.release.tag_name }}" >&2
+            exit 1
+          fi
+          gh api -X PATCH "repos/{owner}/{repo}/releases/${release_id}" \
+            -F prerelease=false \
+            -f make_latest=true
+
+  upload-imago-release-assets:
+    name: Upload imago release assets
+    needs:
+      - build-imago-cli
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'imago-v') && needs.build-imago-cli.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: release-${{ github.event.release.tag_name }}-imago-*
           merge-multiple: true
 
       - name: List artifacts
