@@ -779,6 +779,10 @@ fn validate_project_wit_dependency_capabilities(
     dependencies: &[ManifestDependency],
     capabilities: &ManifestCapabilityPolicy,
 ) -> anyhow::Result<()> {
+    if capabilities.privileged {
+        return Ok(());
+    }
+
     let imported = collect_project_wit_dependency_imports(project_root, wit_world)?;
     if imported.is_empty() {
         return Ok(());
@@ -919,6 +923,10 @@ fn capability_policy_allows_dependency_interface(
     interface_name: &str,
     function_names: &BTreeSet<String>,
 ) -> bool {
+    if capabilities.privileged {
+        return true;
+    }
+
     if let Some(rules) = capabilities.deps.get(package_name) {
         return rules
             .iter()
@@ -945,7 +953,7 @@ fn dependency_rule_allows_interface(
     }
     for separator in ['.', '/', '#'] {
         if let Some((rule_interface, function_name)) = trimmed.split_once(separator) {
-            return rule_interface == interface_name && !function_name.is_empty();
+            return rule_interface == interface_name && function_names.contains(function_name);
         }
     }
     function_names.contains(trimmed)
@@ -4605,6 +4613,55 @@ interface api {}
     }
 
     #[test]
+    fn build_accepts_project_wit_import_when_capabilities_are_privileged() {
+        let root = new_temp_dir("dependencies-capabilities-project-wit-privileged");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities]
+    privileged = true
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+        write_file(
+            &root.join("wit/world.wit"),
+            br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+        );
+        write_file(
+            &root.join("registry/example/package.wit"),
+            br#"package test:example@0.1.0;
+
+interface api {
+    invoke: func();
+}
+"#,
+        );
+        run_update(&root);
+
+        build_project("default", &root)
+            .expect("privileged capabilities should bypass project WIT dependency validation");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_accepts_project_wit_import_with_function_scoped_dependency_capability() {
         for rule in ["invoke", "api.invoke", "api/invoke", "api#invoke"] {
             let root = new_temp_dir(&format!(
@@ -4655,6 +4712,69 @@ interface api {
 
             build_project("default", &root).expect(
                 "build should accept project WIT imports when function-scoped dependency capability matches",
+            );
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_project_wit_import_with_unmatched_function_scoped_rule() {
+        for rule in ["api.other", "api/other", "api#other"] {
+            let root = new_temp_dir(&format!(
+                "dependencies-capabilities-project-wit-function-rule-miss-{}",
+                rule.replace(['.', '/', '#'], "-")
+            ));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+    name = "svc"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [capabilities.deps]
+    "test:example" = ["{rule}"]
+
+    [[dependencies]]
+    version = "0.1.0"
+    kind = "native"
+    path = "registry/example"
+
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-a");
+            write_file(
+                &root.join("wit/world.wit"),
+                br#"package example:svc;
+
+world plugin-imports {
+    import test:example/api@0.1.0;
+}
+"#,
+            );
+            write_file(
+                &root.join("registry/example/package.wit"),
+                br#"package test:example@0.1.0;
+
+interface api {
+    invoke: func();
+}
+"#,
+            );
+            run_update(&root);
+
+            let err = build_project("default", &root).expect_err(
+                "function-scoped dependency capability should reject unknown imported functions",
+            );
+            assert!(
+                err.to_string().contains(
+                    "wit/world.wit imports dependency package 'test:example', interface 'api'"
+                ),
+                "unexpected error: {err:#}"
             );
 
             let _ = fs::remove_dir_all(root);
