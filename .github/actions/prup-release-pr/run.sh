@@ -48,8 +48,7 @@ while IFS= read -r row; do
   fi
 
   git commit \
-    -m "$title" \
-    -m "Co-authored-by: Codex <noreply@openai.com>"
+    -m "$title"
 
   git push --force-with-lease -u origin "$head_branch"
 
