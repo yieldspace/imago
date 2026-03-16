@@ -7,6 +7,7 @@ publish = false
 [features]
 default = ["runtime-wasmtime"]
 runtime-wasmtime = ["dep:imagod-runtime-wasmtime"]
+wasi-nn-cvitek = ["runtime-wasmtime", "imagod-runtime-wasmtime/wasi-nn-cvitek"]
 wasi-nn-openvino = ["runtime-wasmtime", "imagod-runtime-wasmtime/wasi-nn-openvino"]
 wasi-nn-onnx = ["runtime-wasmtime", "imagod-runtime-wasmtime/wasi-nn-onnx"]
 

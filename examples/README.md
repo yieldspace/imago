@@ -14,3 +14,5 @@
 | `examples/local-imagod-plugin-native-experimental-i2c` | experimental-i2c native plugin 依存の実行例 | `examples/local-imagod-plugin-native-experimental-i2c/README.md` |
 | `examples/imago-compose-bindings` | stack/trust cert の実行例 | `examples/imago-compose-bindings/README.md` |
 | `examples/imago-with-componentize-js-hono` | `componentize-js` + Hono で `type=http` を実行する例 | `examples/imago-with-componentize-js-hono/README.md` |
+
+- `wasi-nn-cvitek` backend は SG200x / CV18xx 系の TPU runtime が必要なため、この repo にはローカル再現用 example を置いていません。guest からは `graph.load(..., autodetect, tpu)` で `.cvimodel` を渡します。feature variant の release asset 名は `imagod-<target>+wasi-nn-cvitek` です。

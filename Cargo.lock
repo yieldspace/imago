@@ -2697,6 +2697,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "imagod-runtime-wasi-nn-cvitek"
+version = "0.5.0"
+dependencies = [
+ "wasmtime",
+ "wasmtime-wasi-nn",
+]
+
+[[package]]
 name = "imagod-runtime-wasmtime"
 version = "0.5.0"
 dependencies = [
@@ -2708,6 +2716,7 @@ dependencies = [
  "imagod-common",
  "imagod-ipc",
  "imagod-runtime-internal",
+ "imagod-runtime-wasi-nn-cvitek",
  "libc",
  "serde",
  "serde_json",
