@@ -506,6 +506,7 @@ bulk_ring_slots = 16
 - `provider.open-device(path)` rejects non-allowlisted paths before backend open attempts.
 - Per-device worker channels are bounded; saturated workers can return `usb-error.busy`.
 - All transfer APIs (`control`, `bulk`, `interrupt`, `isochronous`) enforce `usb.max_transfer_bytes` and `usb.max_timeout_ms`.
+- `claimed-interface.isochronous-in(endpoint, length, packets, timeout-ms)` returns each packet descriptor's actual payload bytes concatenated in packet order.
 - `claimed-interface.bulk-read(endpoint, timeout-ms)` reads one chunk from a per-endpoint bounded ring buffer (size from `usb.bulk_ring_chunk_bytes`).
 - Ring overflow uses drop-oldest backpressure and is observable via `claimed-interface.bulk-read-stats(endpoint)`.
 
