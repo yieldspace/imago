@@ -136,7 +136,7 @@
           "type": "integer"
         },
         "runner_ready_timeout_secs": {
-          "default": 3,
+          "default": 60,
           "description": "Deadline for waiting runner-ready handshake.",
           "format": "uint64",
           "minimum": 0,
@@ -274,7 +274,7 @@
         "max_inflight_chunks": 16,
         "retained_logs_capacity_bytes": 524288,
         "runner_log_buffer_bytes": 262144,
-        "runner_ready_timeout_secs": 3,
+        "runner_ready_timeout_secs": 60,
         "stop_grace_timeout_secs": 30,
         "transport_keepalive_interval_secs": 5,
         "transport_max_idle_timeout_secs": 180,

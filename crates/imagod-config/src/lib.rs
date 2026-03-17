@@ -883,7 +883,7 @@ fn default_stop_grace_timeout_secs() -> u64 {
 }
 
 fn default_runner_ready_timeout_secs() -> u64 {
-    3
+    60
 }
 
 fn default_runner_log_buffer_bytes() -> usize {
@@ -1028,7 +1028,7 @@ client_public_keys = ["111111111111111111111111111111111111111111111111111111111
             )
         );
         assert_eq!(config.runtime.max_artifact_size_bytes, 64 * 1024 * 1024);
-        assert_eq!(config.runtime.runner_ready_timeout_secs, 3);
+        assert_eq!(config.runtime.runner_ready_timeout_secs, 60);
         assert_eq!(config.runtime.runner_log_buffer_bytes, 256 * 1024);
         assert_eq!(config.runtime.retained_logs_capacity_bytes, 512 * 1024);
         assert_eq!(config.runtime.committed_session_ttl_secs, 120);
@@ -2120,7 +2120,7 @@ max_inflight_chunks = 16
 max_artifact_size_bytes = 67108864
 upload_session_ttl_secs = 600
 stop_grace_timeout_secs = 30
-runner_ready_timeout_secs = 3
+runner_ready_timeout_secs = 60
 runner_log_buffer_bytes = 262144
 epoch_tick_interval_ms = 50
 http_worker_count = 2

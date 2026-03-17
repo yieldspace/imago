@@ -247,12 +247,12 @@ stop_grace_timeout_secs = 30
 - Type: `integer` (`u64`)
 - Required/Optional: Optional.
 - Accepted values / Constraints: `>= 1`.
-- Default: `3`.
+- Default: `60`.
 - Example:
 
 ```toml
 [runtime]
-runner_ready_timeout_secs = 3
+runner_ready_timeout_secs = 60
 ```
 
 - Validation error notes: zero fails validation.
