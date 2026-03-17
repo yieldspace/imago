@@ -13,6 +13,6 @@ chunk_size = 1048576
 max_inflight_chunks = 16
 upload_session_ttl_secs = 900
 stop_grace_timeout_secs = 30
-runner_ready_timeout_secs = 3
+runner_ready_timeout_secs = 60
 runner_log_buffer_bytes = 262144
 epoch_tick_interval_ms = 50
