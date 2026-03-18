@@ -58,8 +58,11 @@ Replace the generated `imago.toml` with:
 
 name.cargo = true
 
-main = "target/release/wasm32-wasip2/example-service.wasm"
+main = "target/wasm32-wasip2/release/example-service.wasm"
 type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
 
 [capabilities]
 wasi = true
@@ -72,7 +75,14 @@ remote = "ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock"
 If you prefer a literal value, keep using `name = "example-service"` instead.
 This lookup does not search parent directories; a missing sibling file or missing `[package].name` fails closed.
 
-Loopback targets without `user@` or `:port` such as `ssh://localhost?...` connect directly to the local control socket. For a remote host, use `remote = "ssh://user@your-host?socket=/run/imago/imagod.sock"` instead; the CLI runs `ssh <host> imagod proxy-stdio`, and OpenSSH handles authentication and host verification.
+Loopback targets without `user@` or `:port` such as `ssh://localhost?...` connect directly to
+the local control socket.
+
+For a remote host, use:
+
+`remote = "ssh://user@your-host?socket=/run/imago/imagod.sock"`
+
+The CLI runs `ssh <host> imagod proxy-stdio`, and OpenSSH handles authentication and host verification.
 
 ## Create `imagod.toml`
 
