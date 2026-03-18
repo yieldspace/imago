@@ -254,6 +254,7 @@ fn systemd_quote_arg(path: &Path) -> String {
     let mut quoted = String::from("\"");
     for ch in path.as_os_str().to_string_lossy().chars() {
         match ch {
+            '%' => quoted.push_str("%%"),
             '"' | '\\' => {
                 quoted.push('\\');
                 quoted.push(ch);
@@ -696,6 +697,17 @@ mod tests {
         assert!(
             rendered
                 .contains("ExecStart=\"/tmp/imagod binary\" --config \"/tmp/imagod config.toml\"")
+        );
+    }
+
+    #[test]
+    fn render_systemd_unit_escapes_percent_signs() {
+        let rendered = render_systemd_unit(
+            Path::new("/tmp/im%agod"),
+            Path::new("/tmp/config%prod.toml"),
+        );
+        assert!(
+            rendered.contains("ExecStart=\"/tmp/im%%agod\" --config \"/tmp/config%%prod.toml\"")
         );
     }
 
