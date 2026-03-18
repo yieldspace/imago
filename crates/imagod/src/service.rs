@@ -457,11 +457,22 @@ fn matching_rc_entries(dir: &Path) -> Result<Vec<PathBuf>, anyhow::Error> {
     for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
         let entry = entry.with_context(|| format!("failed to inspect {}", dir.display()))?;
         let file_name = entry.file_name();
-        if file_name.to_string_lossy().ends_with(SERVICE_NAME) {
+        if is_imagod_rc_link_name(&file_name.to_string_lossy()) {
             entries.push(entry.path());
         }
     }
     Ok(entries)
+}
+
+fn is_imagod_rc_link_name(file_name: &str) -> bool {
+    let Some(service_name) = file_name.get(3..) else {
+        return false;
+    };
+    file_name.len() == SERVICE_NAME.len() + 3
+        && matches!(file_name.as_bytes()[0], b'S' | b'K')
+        && file_name.as_bytes()[1].is_ascii_digit()
+        && file_name.as_bytes()[2].is_ascii_digit()
+        && service_name == SERVICE_NAME
 }
 
 fn service_manager_probe_dir() -> PathBuf {
@@ -700,6 +711,15 @@ mod tests {
     }
 
     #[test]
+    fn is_imagod_rc_link_name_matches_only_exact_service_links() {
+        assert!(is_imagod_rc_link_name("S50imagod"));
+        assert!(is_imagod_rc_link_name("K01imagod"));
+        assert!(!is_imagod_rc_link_name("S20myimagod"));
+        assert!(!is_imagod_rc_link_name("imagod"));
+        assert!(!is_imagod_rc_link_name("S5imagod"));
+    }
+
+    #[test]
     fn resolve_service_config_path_makes_relative_paths_absolute() {
         let _env_lock = env_lock();
         let root = temp_dir("relative-config");
@@ -873,6 +893,7 @@ mod tests {
         write_stub_command(&bin_dir.join("service"), &log_path);
         fs::write(&initd_path, "script").expect("script");
         fs::write(rc2.join("S50imagod"), "").expect("rc link placeholder");
+        fs::write(rc2.join("S20myimagod"), "").expect("unrelated rc link placeholder");
         let path_value = env::join_paths([bin_dir.as_path()]).expect("PATH should join");
         let _guard = EnvGuard::set(&[
             ("IMAGOD_TEST_INITD_SCRIPT_PATH", &initd_path),
@@ -884,6 +905,7 @@ mod tests {
         assert_eq!(removed, vec![ServiceManager::Initd]);
         assert!(!initd_path.exists());
         assert!(!rc2.join("S50imagod").exists());
+        assert!(rc2.join("S20myimagod").exists());
         let commands = fs::read_to_string(&log_path).expect("commands should be logged");
         assert!(commands.contains("service imagod stop"));
     }

@@ -471,6 +471,9 @@ fn should_send_github_auth(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
     };
+    if parsed.scheme() != "https" {
+        return false;
+    }
     let Some(host) = parsed.host_str() else {
         return false;
     };
@@ -730,6 +733,9 @@ mod tests {
         ));
         assert!(!should_send_github_auth(
             "https://example.com/releases.json"
+        ));
+        assert!(!should_send_github_auth(
+            "http://api.github.com/repos/yieldspace/imago/releases"
         ));
         assert!(!should_send_github_auth("not-a-url"));
     }
