@@ -268,18 +268,18 @@ fn render_initd_script(current_exe: &Path, config_path: &Path) -> String {
 ### END INIT INFO\n\
 \n\
 DAEMON='{}'\n\
-DAEMON_ARGS='--config {}'\n\
+CONFIG_PATH='{}'\n\
 PIDFILE=\"/var/run/imagod.pid\"\n\
 NAME=\"imagod\"\n\
 \n\
 start() {{\n\
   mkdir -p /run/imago\n\
   if command -v start-stop-daemon >/dev/null 2>&1; then\n\
-    start-stop-daemon --start --quiet --background --make-pidfile --pidfile \"$PIDFILE\" --exec \"$DAEMON\" -- $DAEMON_ARGS\n\
+    start-stop-daemon --start --quiet --background --make-pidfile --pidfile \"$PIDFILE\" --exec \"$DAEMON\" -- --config \"$CONFIG_PATH\"\n\
     return $?\n\
   fi\n\
 \n\
-  \"$DAEMON\" $DAEMON_ARGS >/dev/null 2>&1 &\n\
+  \"$DAEMON\" --config \"$CONFIG_PATH\" >/dev/null 2>&1 &\n\
   echo $! > \"$PIDFILE\"\n\
 }}\n\
 \n\
@@ -312,9 +312,13 @@ case \"$1\" in\n\
   status) status ;;\n\
   *) echo \"Usage: /etc/init.d/$NAME {{start|stop|restart|status}}\"; exit 1 ;;\n\
 esac\n",
-        current_exe.display(),
-        config_path.display()
+        shell_single_quote(current_exe),
+        shell_single_quote(config_path)
     )
+}
+
+fn shell_single_quote(path: &Path) -> String {
+    path.as_os_str().to_string_lossy().replace('\'', "'\\''")
 }
 
 fn render_launchd_plist(current_exe: &Path, config_path: &Path) -> String {
@@ -608,7 +612,9 @@ mod tests {
     fn render_initd_script_includes_execstart_and_config() {
         let rendered = render_initd_script(Path::new("/tmp/imagod"), Path::new("/tmp/imagod.toml"));
         assert!(rendered.contains("DAEMON='/tmp/imagod'"));
-        assert!(rendered.contains("DAEMON_ARGS='--config /tmp/imagod.toml'"));
+        assert!(rendered.contains("CONFIG_PATH='/tmp/imagod.toml'"));
+        assert!(rendered.contains("-- --config \"$CONFIG_PATH\""));
+        assert!(rendered.contains("\"$DAEMON\" --config \"$CONFIG_PATH\""));
     }
 
     #[test]
@@ -629,6 +635,17 @@ mod tests {
             rendered
                 .contains("ExecStart=\"/tmp/imagod binary\" --config \"/tmp/imagod config.toml\"")
         );
+    }
+
+    #[test]
+    fn render_initd_script_quotes_config_path_with_spaces() {
+        let rendered = render_initd_script(
+            Path::new("/tmp/imagod"),
+            Path::new("/tmp/path with spaces/imagod.toml"),
+        );
+        assert!(rendered.contains("CONFIG_PATH='/tmp/path with spaces/imagod.toml'"));
+        assert!(rendered.contains("-- --config \"$CONFIG_PATH\""));
+        assert!(rendered.contains("\"$DAEMON\" --config \"$CONFIG_PATH\""));
     }
 
     #[test]
@@ -763,7 +780,7 @@ mod tests {
         assert_eq!(manager, ServiceManager::Initd);
         let script = fs::read_to_string(&initd_path).expect("script should exist");
         assert!(script.contains(&format!("DAEMON='{}'", current_test_binary().display())));
-        assert!(script.contains(&format!("DAEMON_ARGS='--config {}'", config_path.display())));
+        assert!(script.contains(&format!("CONFIG_PATH='{}'", config_path.display())));
         let commands = fs::read_to_string(&log_path).expect("commands should be logged");
         assert!(commands.contains("update-rc.d imagod defaults"));
         assert!(commands.contains("service imagod start"));

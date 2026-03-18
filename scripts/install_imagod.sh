@@ -58,7 +58,7 @@ Options:
   --features <csv>                  Select a feature variant such as wasi-nn-cvitek.
   --install-dir <path>              Binary install directory.
   --prerelease                      Allow prerelease imagod releases when --tag is omitted.
-  --with-service                    Run `imagod service install` after installing the binary.
+  --with-service                    Run `imagod service install` after installing the binary, with a legacy fallback for older imagod releases.
   -y, --yes                         Skip TTY prompts and install the default variant.
   --dry-run                         Print resolved values without installing.
   -h, --help                        Show this help.
@@ -81,7 +81,7 @@ Notes:
   - Interactive terminal runs show release variants with the auto-detected imagod-<target> entry preselected; use -y to skip the prompt.
   - SSH targets call `ssh <host> imagod proxy-stdio` on the remote host.
   - The default SSH control socket is /run/imago/imagod.sock and can be overridden in imagod.toml with control_socket_path.
-  - --with-service runs `imagod service install --config /etc/imago/imagod.toml` after the binary install step.
+  - --with-service runs `imagod service install --config /etc/imago/imagod.toml` after the binary install step, or falls back to legacy service setup when the installed imagod release predates that subcommand.
   - imagod auto-creates a default config on first start if /etc/imago/imagod.toml does not exist yet.
 USAGE
 }
@@ -554,6 +554,11 @@ default_install_dir() {
 }
 
 run_as_root() {
+  if [ "${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" = "1" ]; then
+    "$@"
+    return $?
+  fi
+
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
     return 0
@@ -594,13 +599,15 @@ validate_service_binary_path_or_die() {
 run_service_install_command() {
   service_binary="$1"
   service_config="$2"
+  service_os="$3"
 
-  if [ "${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" = "1" ]; then
-    "${service_binary}" service install --config "${service_config}"
+  if "${service_binary}" service install --help >/dev/null 2>&1; then
+    run_as_root "${service_binary}" service install --config "${service_config}"
     return $?
   fi
 
-  run_as_root "${service_binary}" service install --config "${service_config}"
+  service_manager="$(detect_service_manager_or_die "${service_os}")" || return $?
+  setup_requested_service "${service_binary}" "${service_manager}"
 }
 
 downloader() {
@@ -1110,6 +1117,207 @@ install_binary() {
   printf '%s\n' "${install_destination_bin}"
 }
 
+setup_systemd_service() {
+  service_binary="$1"
+  systemd_tmp="$(mktemp)"
+  cat > "${systemd_tmp}" <<EOF_SYSTEMD
+[Unit]
+Description=imagod daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${service_binary} --config ${DEFAULT_CONFIG_PATH}
+RuntimeDirectory=imago
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF_SYSTEMD
+
+  if ! run_as_root install -m 0644 -- "${systemd_tmp}" /etc/systemd/system/imagod.service; then
+    rm -f "${systemd_tmp}"
+    return 1
+  fi
+  rm -f "${systemd_tmp}"
+
+  run_as_root systemctl daemon-reload &&
+    run_as_root systemctl enable --now imagod.service
+}
+
+setup_initd_service() {
+  service_binary="$1"
+  initd_tmp="$(mktemp)"
+  cat > "${initd_tmp}" <<EOF_INITD
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          imagod
+# Required-Start:    \$remote_fs \$network
+# Required-Stop:     \$remote_fs \$network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: imagod daemon
+### END INIT INFO
+
+DAEMON='${service_binary}'
+DAEMON_ARGS='--config ${DEFAULT_CONFIG_PATH}'
+PIDFILE="/var/run/imagod.pid"
+NAME="imagod"
+
+start() {
+  mkdir -p /run/imago
+  if command -v start-stop-daemon >/dev/null 2>&1; then
+    start-stop-daemon --start --quiet --background --make-pidfile --pidfile "\$PIDFILE" --exec "\$DAEMON" -- \$DAEMON_ARGS
+    return \$?
+  fi
+
+  "\$DAEMON" \$DAEMON_ARGS >/dev/null 2>&1 &
+  echo \$! > "\$PIDFILE"
+}
+
+stop() {
+  if command -v start-stop-daemon >/dev/null 2>&1; then
+    start-stop-daemon --stop --quiet --pidfile "\$PIDFILE" --retry 5
+    rm -f "\$PIDFILE"
+    return \$?
+  fi
+
+  if [ -f "\$PIDFILE" ]; then
+    kill "\$(cat "\$PIDFILE")" >/dev/null 2>&1 || true
+    rm -f "\$PIDFILE"
+  fi
+}
+
+status() {
+  if [ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE")" >/dev/null 2>&1; then
+    echo "\$NAME is running"
+    exit 0
+  fi
+  echo "\$NAME is not running"
+  exit 3
+}
+
+case "\$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "Usage: /etc/init.d/\$NAME {start|stop|restart|status}"; exit 1 ;;
+esac
+EOF_INITD
+
+  if ! run_as_root install -m 0755 -- "${initd_tmp}" /etc/init.d/imagod; then
+    rm -f "${initd_tmp}"
+    return 1
+  fi
+  rm -f "${initd_tmp}"
+
+  if check_cmd update-rc.d; then
+    run_as_root update-rc.d imagod defaults || return 1
+  elif check_cmd chkconfig; then
+    run_as_root chkconfig --add imagod || return 1
+  fi
+
+  if check_cmd service; then
+    run_as_root service imagod start
+  else
+    run_as_root /etc/init.d/imagod start
+  fi
+}
+
+setup_launchd_system_daemon() {
+  service_binary="$1"
+  launchd_tmp="$(mktemp)"
+  cat > "${launchd_tmp}" <<EOF_LAUNCHD
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>imagod</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${service_binary}</string>
+    <string>--config</string>
+    <string>${DEFAULT_CONFIG_PATH}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+EOF_LAUNCHD
+
+  if ! run_as_root install -m 0644 -- "${launchd_tmp}" "${LAUNCHD_PLIST_PATH}"; then
+    rm -f "${launchd_tmp}"
+    return 1
+  fi
+  rm -f "${launchd_tmp}"
+
+  run_as_root launchctl bootout system "${LAUNCHD_PLIST_PATH}" >/dev/null 2>&1 || true
+  run_as_root launchctl bootstrap system "${LAUNCHD_PLIST_PATH}" &&
+    run_as_root launchctl enable system/imagod &&
+    run_as_root launchctl kickstart -k system/imagod
+}
+
+detect_service_manager_or_die() {
+  if [ -n "${IMAGOD_TEST_SERVICE_MANAGER:-}" ]; then
+    case "${IMAGOD_TEST_SERVICE_MANAGER}" in
+      systemd|initd|launchd)
+        printf '%s\n' "${IMAGOD_TEST_SERVICE_MANAGER}"
+        return 0
+        ;;
+      none)
+        die "no supported init system detected for --with-service"
+        ;;
+      *)
+        die "IMAGOD_TEST_SERVICE_MANAGER must be one of: systemd, initd, launchd, none"
+        ;;
+    esac
+  fi
+
+  if [ "$1" = "darwin" ]; then
+    if check_cmd launchctl; then
+      printf 'launchd\n'
+      return 0
+    fi
+    die "launchctl not found on macOS; cannot use --with-service"
+  fi
+
+  if check_cmd systemctl && [ -d /run/systemd/system ]; then
+    printf 'systemd\n'
+    return 0
+  fi
+
+  if [ -d /etc/init.d ]; then
+    printf 'initd\n'
+    return 0
+  fi
+
+  die "no supported init system detected for --with-service"
+}
+
+setup_requested_service() {
+  case "$2" in
+    systemd)
+      setup_systemd_service "$1"
+      ;;
+    initd)
+      setup_initd_service "$1"
+      ;;
+    launchd)
+      setup_launchd_system_daemon "$1"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 path_contains() {
   path_candidate="$1"
   old_ifs="${IFS}"
@@ -1263,7 +1471,7 @@ main() {
   if [ "${WITH_SERVICE}" = "1" ]; then
     validate_service_binary_path_or_die "${planned_binary_path}"
     service_manager="imagod service install"
-    service_status="enabled (${service_manager})"
+    service_status="enabled (${service_manager} with legacy fallback)"
   fi
 
   requested_features="${FEATURES_OVERRIDE}"
@@ -1340,7 +1548,7 @@ main() {
   log "installed binary: ${installed_bin}"
 
   if [ "${WITH_SERVICE}" = "1" ]; then
-    if ! run_service_install_command "${installed_bin}" "${DEFAULT_CONFIG_PATH}"; then
+    if ! run_service_install_command "${installed_bin}" "${DEFAULT_CONFIG_PATH}" "${os}"; then
       die "binary installed at ${installed_bin}, but service setup failed"
     fi
     log "service installed and started: ${service_manager}"
