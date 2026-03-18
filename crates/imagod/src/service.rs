@@ -142,7 +142,7 @@ fn uninstall_systemd() -> Result<(), anyhow::Error> {
 
     let _ = run_command("systemctl", ["disable", "--now", "imagod.service"]);
     remove_file_if_exists(&unit_path)?;
-    run_command("systemctl", ["daemon-reload"])?;
+    let _ = run_command("systemctl", ["daemon-reload"]);
     Ok(())
 }
 
@@ -235,9 +235,24 @@ RestartSec=2\n\
 \n\
 [Install]\n\
 WantedBy=multi-user.target\n",
-        current_exe.display(),
-        config_path.display()
+        systemd_quote_arg(current_exe),
+        systemd_quote_arg(config_path)
     )
+}
+
+fn systemd_quote_arg(path: &Path) -> String {
+    let mut quoted = String::from("\"");
+    for ch in path.as_os_str().to_string_lossy().chars() {
+        match ch {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(ch);
+            }
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn render_initd_script(current_exe: &Path, config_path: &Path) -> String {
@@ -585,7 +600,7 @@ mod tests {
     #[test]
     fn render_systemd_unit_includes_execstart_and_config() {
         let rendered = render_systemd_unit(Path::new("/tmp/imagod"), Path::new("/tmp/imagod.toml"));
-        assert!(rendered.contains("ExecStart=/tmp/imagod --config /tmp/imagod.toml"));
+        assert!(rendered.contains("ExecStart=\"/tmp/imagod\" --config \"/tmp/imagod.toml\""));
         assert!(rendered.contains("RuntimeDirectory=imago"));
     }
 
@@ -602,6 +617,18 @@ mod tests {
             render_launchd_plist(Path::new("/tmp/imagod"), Path::new("/tmp/imagod.toml"));
         assert!(rendered.contains("<string>/tmp/imagod</string>"));
         assert!(rendered.contains("<string>/tmp/imagod.toml</string>"));
+    }
+
+    #[test]
+    fn render_systemd_unit_quotes_paths_with_spaces() {
+        let rendered = render_systemd_unit(
+            Path::new("/tmp/imagod binary"),
+            Path::new("/tmp/imagod config.toml"),
+        );
+        assert!(
+            rendered
+                .contains("ExecStart=\"/tmp/imagod binary\" --config \"/tmp/imagod config.toml\"")
+        );
     }
 
     #[test]
@@ -635,7 +662,7 @@ mod tests {
         assert_eq!(manager, ServiceManager::Systemd);
         let unit = fs::read_to_string(&unit_path).expect("unit should exist");
         assert!(unit.contains(&format!(
-            "ExecStart={} --config {}",
+            "ExecStart=\"{}\" --config \"{}\"",
             current_test_binary().display(),
             config_path.display()
         )));
@@ -672,6 +699,39 @@ mod tests {
         ]);
 
         let removed = uninstall().expect("uninstall should succeed");
+        assert_eq!(removed, vec![ServiceManager::Systemd]);
+        assert!(!unit_path.exists());
+        let commands = fs::read_to_string(&log_path).expect("commands should be logged");
+        assert!(commands.contains("systemctl disable --now imagod.service"));
+        assert!(commands.contains("systemctl daemon-reload"));
+    }
+
+    #[test]
+    fn uninstall_systemd_ignores_daemon_reload_failure_after_removal() {
+        let _env_lock = env_lock();
+        let root = temp_dir("systemd-uninstall-daemon-reload-failure");
+        let bin_dir = root.path().join("bin");
+        let log_path = root.path().join("commands.log");
+        let unit_path = root.path().join("imagod.service");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        fs::write(
+            bin_dir.join("systemctl"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> '{}'\nif [ \"${{1:-}}\" = \"daemon-reload\" ]; then\n  exit 1\nfi\n",
+                log_path.display()
+            ),
+        )
+        .expect("stub command should be written");
+        fs::set_permissions(bin_dir.join("systemctl"), fs::Permissions::from_mode(0o755))
+            .expect("stub command should be executable");
+        fs::write(&unit_path, "unit").expect("unit should exist");
+        let path_value = env::join_paths([bin_dir.as_path()]).expect("PATH should join");
+        let _guard = EnvGuard::set(&[
+            ("IMAGOD_TEST_SYSTEMD_UNIT_PATH", &unit_path),
+            ("PATH", Path::new(&path_value)),
+        ]);
+
+        let removed = uninstall().expect("uninstall should still succeed");
         assert_eq!(removed, vec![ServiceManager::Systemd]);
         assert!(!unit_path.exists());
         let commands = fs::read_to_string(&log_path).expect("commands should be logged");
