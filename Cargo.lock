@@ -2566,6 +2566,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ureq",
+ "url",
  "web-transport-quinn",
 ]
 

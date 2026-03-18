@@ -45,7 +45,7 @@ pub(crate) fn install(config_path: Option<PathBuf>) -> Result<ServiceManager, an
 
     let current_exe =
         env::current_exe().context("failed to resolve current imagod executable path")?;
-    let config_path = resolve_config_path(config_path);
+    let config_path = resolve_service_config_path(config_path)?;
 
     match manager {
         ServiceManager::Systemd => install_systemd(&current_exe, &config_path)?,
@@ -121,6 +121,16 @@ fn installed_managers() -> Vec<ServiceManager> {
         managers.push(ServiceManager::Launchd);
     }
     managers
+}
+
+fn resolve_service_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, anyhow::Error> {
+    let config_path = resolve_config_path(config_path);
+    if config_path.is_absolute() {
+        return Ok(config_path);
+    }
+
+    let cwd = env::current_dir().context("failed to resolve current directory for --config")?;
+    Ok(cwd.join(config_path))
 }
 
 fn install_systemd(current_exe: &Path, config_path: &Path) -> Result<(), anyhow::Error> {
@@ -581,7 +591,7 @@ mod tests {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("env lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn temp_dir(label: &str) -> tempfile::TempDir {
@@ -595,6 +605,24 @@ mod tests {
             ))
             .tempdir()
             .expect("temp dir should be created")
+    }
+
+    struct CurrentDirGuard {
+        saved: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Self {
+            let saved = env::current_dir().expect("current dir should resolve");
+            env::set_current_dir(path).expect("current dir should change");
+            Self { saved }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            env::set_current_dir(&self.saved).expect("current dir should restore");
+        }
     }
 
     fn write_stub_command(path: &Path, log_path: &Path) {
@@ -669,6 +697,27 @@ mod tests {
         assert!(rendered.contains("CONFIG_PATH='/tmp/path with spaces/imagod.toml'"));
         assert!(rendered.contains("-- --config \"$CONFIG_PATH\""));
         assert!(rendered.contains("\"$DAEMON\" --config \"$CONFIG_PATH\""));
+    }
+
+    #[test]
+    fn resolve_service_config_path_makes_relative_paths_absolute() {
+        let _env_lock = env_lock();
+        let root = temp_dir("relative-config");
+        let _cwd = CurrentDirGuard::set(root.path());
+
+        let resolved = resolve_service_config_path(Some(PathBuf::from("imagod.toml")))
+            .expect("relative config path should resolve");
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved.file_name(), Some(OsStr::new("imagod.toml")));
+        assert_eq!(
+            fs::canonicalize(
+                resolved
+                    .parent()
+                    .expect("absolute path should have a parent directory")
+            )
+            .expect("resolved parent should canonicalize"),
+            fs::canonicalize(root.path()).expect("temp dir should canonicalize")
+        );
     }
 
     #[test]

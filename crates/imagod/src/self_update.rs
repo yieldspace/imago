@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::service;
 
@@ -17,6 +18,12 @@ const DEFAULT_RELEASE_TAG_API_BASE: &str =
     "https://api.github.com/repos/yieldspace/imago/releases/tags";
 const DEFAULT_RELEASE_DOWNLOAD_BASE: &str = "https://github.com/yieldspace/imago/releases/download";
 const GITHUB_USER_AGENT: &str = "imagod-self-update";
+const TRUSTED_GITHUB_AUTH_HOSTS: &[&str] = &[
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelfUpdateSummary {
@@ -437,7 +444,7 @@ fn download_bytes(url: &str, github_api: bool) -> Result<Vec<u8>, anyhow::Error>
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
     }
-    if let Some(token) = github_auth_token() {
+    if let Some(token) = github_auth_token().filter(|_| should_send_github_auth(url)) {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }
     let response = request
@@ -458,6 +465,18 @@ fn github_auth_token() -> Option<String> {
                 .ok()
                 .filter(|value| !value.is_empty())
         })
+}
+
+fn should_send_github_auth(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    TRUSTED_GITHUB_AUTH_HOSTS
+        .iter()
+        .any(|trusted| host.eq_ignore_ascii_case(trusted))
 }
 
 fn releases_api_url() -> String {
@@ -496,6 +515,12 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRequest {
+        path: String,
+        headers: Vec<(String, String)>,
+    }
 
     struct EnvGuard {
         saved: Vec<(String, Option<std::ffi::OsString>)>,
@@ -695,8 +720,44 @@ mod tests {
         assert_eq!(tag, "imagod-v0.6.0");
     }
 
+    #[test]
+    fn should_send_github_auth_only_to_trusted_github_hosts() {
+        assert!(should_send_github_auth(
+            "https://api.github.com/repos/yieldspace/imago/releases"
+        ));
+        assert!(should_send_github_auth(
+            "https://github.com/yieldspace/imago/releases/download/imagod-v0.6.0/imagod"
+        ));
+        assert!(!should_send_github_auth(
+            "https://example.com/releases.json"
+        ));
+        assert!(!should_send_github_auth("not-a-url"));
+    }
+
+    #[test]
+    fn download_bytes_omits_authorization_for_untrusted_hosts() {
+        let _env_lock = env_lock();
+        let server = TestServer::start(vec![("/asset".to_string(), b"asset".to_vec())]);
+        let _guard = EnvGuard::set(&[("GH_TOKEN", "super-secret-token")]);
+
+        let bytes = download_bytes(&server.url("/asset"), false).expect("download should succeed");
+        assert_eq!(bytes, b"asset");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization")),
+            "authorization header must not be sent to untrusted hosts: {:?}",
+            requests[0].headers
+        );
+    }
+
     struct TestServer {
         addr: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
         stop: Arc<AtomicBool>,
         handle: Option<thread::JoinHandle<()>>,
     }
@@ -708,16 +769,22 @@ mod tests {
                 .set_nonblocking(true)
                 .expect("listener should become nonblocking");
             let addr = listener.local_addr().expect("local addr");
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let stop = Arc::new(AtomicBool::new(false));
+            let requests_for_thread = Arc::clone(&requests);
             let stop_for_thread = Arc::clone(&stop);
             let handle = thread::spawn(move || {
                 let routes = routes;
                 while !stop_for_thread.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _addr)) => {
-                            let request_path = read_request_path(&mut stream);
+                            let request = read_request(&mut stream);
+                            requests_for_thread
+                                .lock()
+                                .expect("request log")
+                                .push(request.clone());
                             let Some((_, body)) =
-                                routes.iter().find(|(path, _)| path == &request_path)
+                                routes.iter().find(|(path, _)| path == &request.path)
                             else {
                                 write_response(&mut stream, 404, b"not found");
                                 continue;
@@ -734,6 +801,7 @@ mod tests {
 
             Self {
                 addr: format!("http://{addr}"),
+                requests,
                 stop,
                 handle: Some(handle),
             }
@@ -741,6 +809,10 @@ mod tests {
 
         fn url(&self, path: &str) -> String {
             format!("{}{}", self.addr, path)
+        }
+
+        fn requests(&self) -> Vec<RecordedRequest> {
+            self.requests.lock().expect("request log").clone()
         }
     }
 
@@ -753,18 +825,26 @@ mod tests {
         }
     }
 
-    fn read_request_path(stream: &mut TcpStream) -> String {
+    fn read_request(stream: &mut TcpStream) -> RecordedRequest {
         let mut buffer = [0u8; 4096];
         let size = stream
             .read(&mut buffer)
             .expect("request should be readable");
         let request = String::from_utf8_lossy(&buffer[..size]);
-        request
-            .lines()
+        let mut lines = request.lines();
+        let path = lines
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/")
-            .to_string()
+            .to_string();
+        let headers = lines
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                Some((name.trim().to_string(), value.trim().to_string()))
+            })
+            .collect();
+        RecordedRequest { path, headers }
     }
 
     fn write_response(stream: &mut TcpStream, status: u16, body: &[u8]) {
