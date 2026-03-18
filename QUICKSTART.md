@@ -114,6 +114,7 @@ imagod --config ./imagod.toml
 ```bash
 # Terminal 2
 cd ~/imago-quickstart/app
+cargo build --target wasm32-wasip2 --release
 imago service deploy --target default --detach
 imago service logs example-service --tail 200
 ```
