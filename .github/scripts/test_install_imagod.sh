@@ -39,8 +39,24 @@ write_asset() {
   )
 }
 
-write_asset "imagod-riscv64gc-unknown-linux-musl" "fixture binary without features"
-write_asset "imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek" "fixture binary with wasi-nn-cvitek"
+write_asset "imagod-riscv64gc-unknown-linux-musl" '#!/bin/sh
+if [ "${1:-}" = "service" ] && [ "${2:-}" = "install" ]; then
+  if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+    printf "%s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+  fi
+  exit 0
+fi
+printf "fixture binary without features\n"
+'
+write_asset "imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek" '#!/bin/sh
+if [ "${1:-}" = "service" ] && [ "${2:-}" = "install" ]; then
+  if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+    printf "%s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+  fi
+  exit 0
+fi
+printf "fixture binary with wasi-nn-cvitek\n"
+'
 
 port_file="${tmp_root}/http.port"
 python3 - <<'PY' "${server_root}" "${port_file}" &
@@ -89,6 +105,8 @@ run_install() {
   IMAGOD_RELEASES_API_URL="${base_url}/api/releases.json" \
     IMAGOD_RELEASE_TAG_API_BASE="${base_url}/api/tags" \
     IMAGOD_RELEASE_BASE_URL="${download_base}" \
+    IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION="${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" \
+    IMAGOD_TEST_STUB_LOG="${IMAGOD_TEST_STUB_LOG:-}" \
     bash "${repo_root}/scripts/install_imagod.sh" \
       --install-dir "${install_dir}" \
       "$@"
@@ -96,6 +114,8 @@ run_install() {
 
 plain_dir="${tmp_root}/plain-install"
 feature_dir="${tmp_root}/feature-install"
+service_dir="${tmp_root}/service-install"
+service_log="${tmp_root}/service-install.log"
 
 run_install \
   "install default variant from fixture catalog" \
@@ -115,3 +135,15 @@ run_install \
 cmp -s \
   "${feature_dir}/imagod" \
   "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek"
+
+IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION=1 IMAGOD_TEST_STUB_LOG="${service_log}" run_install \
+  "install default variant and delegate service setup to imagod service install" \
+  "${service_dir}" \
+  --target riscv64gc-unknown-linux-musl \
+  --with-service
+
+cmp -s \
+  "${service_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -Fx "service install --config /etc/imago/imagod.toml" "${service_log}"

@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
 use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
 use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
@@ -15,6 +15,8 @@ use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 mod manager_runtime;
 mod runner_runtime;
+mod self_update;
+mod service;
 mod shutdown;
 
 const STDIO_MESSAGE_TERMINATOR: [u8; 4] = 0u32.to_be_bytes();
@@ -25,12 +27,20 @@ enum RunMode {
     Manager,
     Runner,
     ProxyStdio,
+    SelfUpdate,
+    ServiceInstall,
+    ServiceUninstall,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 enum CliCommand {
     /// Bridge stdin/stdout to the local control socket for SSH transport.
     ProxyStdio(ProxyStdioArgs),
+    /// Update the current imagod binary from the matching GitHub release asset.
+    #[command(name = "self")]
+    SelfOp(SelfArgs),
+    /// Install or uninstall imagod as a system service.
+    Service(ServiceArgs),
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -38,6 +48,49 @@ struct ProxyStdioArgs {
     /// Override the local control socket path.
     #[arg(long = "socket", value_name = "PATH")]
     socket_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct SelfArgs {
+    #[command(subcommand)]
+    command: SelfCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum SelfCommand {
+    /// Download and atomically replace imagod with the matching release asset.
+    Update(SelfUpdateArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct SelfUpdateArgs {
+    /// Install a specific release tag or semver version.
+    #[arg(long = "tag", value_name = "SEMVER|imagod-vX.Y.Z")]
+    tag: Option<String>,
+    /// Allow prerelease imagod releases when --tag is omitted.
+    #[arg(long)]
+    prerelease: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ServiceArgs {
+    #[command(subcommand)]
+    command: ServiceCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ServiceCommand {
+    /// Install imagod as a system service and start it immediately.
+    Install(ServiceInstallArgs),
+    /// Uninstall an existing imagod system service.
+    Uninstall,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ServiceInstallArgs {
+    /// Config path to embed into the generated service definition.
+    #[arg(long = "config", value_name = "PATH")]
+    config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -55,12 +108,17 @@ struct CliArgs {
 
 impl CliArgs {
     fn mode(&self) -> RunMode {
-        if matches!(self.command, Some(CliCommand::ProxyStdio(_))) {
-            RunMode::ProxyStdio
-        } else if self.runner {
-            RunMode::Runner
-        } else {
-            RunMode::Manager
+        match &self.command {
+            Some(CliCommand::ProxyStdio(_)) => RunMode::ProxyStdio,
+            Some(CliCommand::SelfOp(args)) => match args.command {
+                SelfCommand::Update(_) => RunMode::SelfUpdate,
+            },
+            Some(CliCommand::Service(args)) => match args.command {
+                ServiceCommand::Install(_) => RunMode::ServiceInstall,
+                ServiceCommand::Uninstall => RunMode::ServiceUninstall,
+            },
+            None if self.runner => RunMode::Runner,
+            None => RunMode::Manager,
         }
     }
 
@@ -68,6 +126,26 @@ impl CliArgs {
         match &self.command {
             Some(CliCommand::ProxyStdio(args)) => args.socket_path.clone(),
             None => None,
+            _ => None,
+        }
+    }
+
+    fn self_update_args(&self) -> Option<SelfUpdateArgs> {
+        match &self.command {
+            Some(CliCommand::SelfOp(args)) => match &args.command {
+                SelfCommand::Update(args) => Some(args.clone()),
+            },
+            _ => None,
+        }
+    }
+
+    fn service_install_args(&self) -> Option<ServiceInstallArgs> {
+        match &self.command {
+            Some(CliCommand::Service(args)) => match &args.command {
+                ServiceCommand::Install(args) => Some(args.clone()),
+                ServiceCommand::Uninstall => None,
+            },
+            _ => None,
         }
     }
 }
@@ -89,6 +167,42 @@ pub async fn dispatch_from_env() -> Result<(), anyhow::Error> {
         }
         RunMode::Manager => manager_runtime::run_manager(cli.config_path).await,
         RunMode::ProxyStdio => run_proxy_stdio(cli.proxy_socket_path()).await,
+        RunMode::SelfUpdate => {
+            let args = cli
+                .self_update_args()
+                .ok_or_else(|| anyhow::anyhow!("missing self update arguments"))?;
+            let summary = self_update::run(args.tag.as_deref(), args.prerelease)?;
+            eprintln!(
+                "imagod updated to {} using {}",
+                summary.resolved_tag, summary.asset_name
+            );
+            if let Some(restart_hint) = summary.restart_hint {
+                eprintln!("restart required for service-managed imagod: {restart_hint}");
+            }
+            Ok(())
+        }
+        RunMode::ServiceInstall => {
+            let args = cli
+                .service_install_args()
+                .ok_or_else(|| anyhow::anyhow!("missing service install arguments"))?;
+            let manager = service::install(args.config_path)?;
+            eprintln!("imagod service installed and started: {manager}");
+            Ok(())
+        }
+        RunMode::ServiceUninstall => {
+            let removed = service::uninstall()?;
+            if removed.is_empty() {
+                eprintln!("imagod service uninstall: nothing to remove");
+            } else {
+                let removed = removed
+                    .into_iter()
+                    .map(|manager| manager.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!("imagod service uninstalled: {removed}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -105,6 +219,42 @@ pub async fn dispatch_from_env_with_registry(
         RunMode::Runner => runner_runtime::run_runner_with_registry(native_plugin_registry).await,
         RunMode::Manager => manager_runtime::run_manager(cli.config_path).await,
         RunMode::ProxyStdio => run_proxy_stdio(cli.proxy_socket_path()).await,
+        RunMode::SelfUpdate => {
+            let args = cli
+                .self_update_args()
+                .ok_or_else(|| anyhow::anyhow!("missing self update arguments"))?;
+            let summary = self_update::run(args.tag.as_deref(), args.prerelease)?;
+            eprintln!(
+                "imagod updated to {} using {}",
+                summary.resolved_tag, summary.asset_name
+            );
+            if let Some(restart_hint) = summary.restart_hint {
+                eprintln!("restart required for service-managed imagod: {restart_hint}");
+            }
+            Ok(())
+        }
+        RunMode::ServiceInstall => {
+            let args = cli
+                .service_install_args()
+                .ok_or_else(|| anyhow::anyhow!("missing service install arguments"))?;
+            let manager = service::install(args.config_path)?;
+            eprintln!("imagod service installed and started: {manager}");
+            Ok(())
+        }
+        RunMode::ServiceUninstall => {
+            let removed = service::uninstall()?;
+            if removed.is_empty() {
+                eprintln!("imagod service uninstall: nothing to remove");
+            } else {
+                let removed = removed
+                    .into_iter()
+                    .map(|manager| manager.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                eprintln!("imagod service uninstalled: {removed}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -185,13 +335,13 @@ fn validate_cli_args(cli: CliArgs) -> Result<CliArgs, clap::Error> {
     if cli.command.is_some() && cli.runner {
         return Err(clap::Error::raw(
             ErrorKind::ArgumentConflict,
-            "--runner cannot be used with proxy-stdio",
+            "--runner cannot be used with subcommands",
         ));
     }
     if cli.command.is_some() && cli.config_path.is_some() {
         return Err(clap::Error::raw(
             ErrorKind::ArgumentConflict,
-            "--config cannot be used with proxy-stdio",
+            "--config cannot be used with subcommands",
         ));
     }
     Ok(cli)
@@ -352,6 +502,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_accepts_self_update_subcommand() {
+        let cli = parse_cli_args(vec!["self".to_string(), "update".to_string()])
+            .expect("self update parse should work");
+        assert_eq!(cli.mode(), RunMode::SelfUpdate);
+        let args = cli
+            .self_update_args()
+            .expect("self update args should exist");
+        assert_eq!(args.tag, None);
+        assert!(!args.prerelease);
+    }
+
+    #[test]
+    fn parse_cli_accepts_service_install_with_config() {
+        let cli = parse_cli_args(vec![
+            "service".to_string(),
+            "install".to_string(),
+            "--config".to_string(),
+            "/tmp/imagod.toml".to_string(),
+        ])
+        .expect("service install parse should work");
+        assert_eq!(cli.mode(), RunMode::ServiceInstall);
+        assert_eq!(
+            cli.service_install_args()
+                .expect("service install args")
+                .config_path,
+            Some(PathBuf::from("/tmp/imagod.toml"))
+        );
+    }
+
+    #[test]
+    fn parse_cli_accepts_service_uninstall() {
+        let cli = parse_cli_args(vec!["service".to_string(), "uninstall".to_string()])
+            .expect("service uninstall parse should work");
+        assert_eq!(cli.mode(), RunMode::ServiceUninstall);
+    }
+
+    #[test]
     fn parse_cli_accepts_config_separate_argument() {
         let cli = parse_cli_args(vec!["--config".to_string(), "imagod.toml".to_string()])
             .expect("config parse should work");
@@ -375,9 +562,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_rejects_runner_with_proxy_stdio() {
+    fn parse_cli_rejects_runner_with_subcommands() {
         let err = parse_cli_args(vec!["--runner".to_string(), "proxy-stdio".to_string()])
-            .expect_err("runner and proxy-stdio must conflict");
+            .expect_err("runner and subcommands must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+
+        let err = parse_cli_args(vec![
+            "--runner".to_string(),
+            "self".to_string(),
+            "update".to_string(),
+        ])
+        .expect_err("runner and self update must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn parse_cli_rejects_top_level_config_with_subcommands() {
+        let err = parse_cli_args(vec![
+            "--config".to_string(),
+            "/tmp/imagod.toml".to_string(),
+            "service".to_string(),
+            "install".to_string(),
+        ])
+        .expect_err("top-level config and service install must conflict");
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
