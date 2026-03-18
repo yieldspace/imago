@@ -11,6 +11,17 @@ You can enable editor completion/validation by adding this root key:
 "$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json"
 ```
 
+## System-managed installs
+
+For system-managed installs, install or remove the host service with:
+
+```sh
+imagod service install --config /etc/imago/imagod.toml
+imagod service uninstall
+```
+
+`imagod service install` starts the service immediately. If `/etc/imago/imagod.toml` does not exist yet, `imagod` creates a default config on first start and prints a reminder to review `tls.server_key` and `tls.client_public_keys`.
+
 ## Sections
 
 - [The top-level fields section](#the-top-level-fields-section)

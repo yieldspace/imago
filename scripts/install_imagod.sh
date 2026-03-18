@@ -58,7 +58,7 @@ Options:
   --features <csv>                  Select a feature variant such as wasi-nn-cvitek.
   --install-dir <path>              Binary install directory.
   --prerelease                      Allow prerelease imagod releases when --tag is omitted.
-  --with-service                    Install and start a service after installing the binary.
+  --with-service                    Run `imagod service install` after installing the binary, with a legacy fallback for older imagod releases.
   -y, --yes                         Skip TTY prompts and install the default variant.
   --dry-run                         Print resolved values without installing.
   -h, --help                        Show this help.
@@ -81,7 +81,8 @@ Notes:
   - Interactive terminal runs show release variants with the auto-detected imagod-<target> entry preselected; use -y to skip the prompt.
   - SSH targets call `ssh <host> imagod proxy-stdio` on the remote host.
   - The default SSH control socket is /run/imago/imagod.sock and can be overridden in imagod.toml with control_socket_path.
-  - --with-service installs a service that reads /etc/imago/imagod.toml; prepare that config separately before first start.
+  - --with-service runs `imagod service install --config /etc/imago/imagod.toml` after the binary install step, or falls back to legacy service setup when the installed imagod release predates that subcommand.
+  - imagod auto-creates a default config on first start if /etc/imago/imagod.toml does not exist yet.
 USAGE
 }
 
@@ -553,6 +554,11 @@ default_install_dir() {
 }
 
 run_as_root() {
+  if [ "${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" = "1" ]; then
+    "$@"
+    return $?
+  fi
+
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
     return 0
@@ -588,6 +594,20 @@ validate_service_binary_path_or_die() {
   if ! printf '%s\n' "$1" | grep -Eq '^/[A-Za-z0-9._/+:-]+$'; then
     die "service binary path contains unsafe characters: $1"
   fi
+}
+
+run_service_install_command() {
+  service_binary="$1"
+  service_config="$2"
+  service_os="$3"
+
+  if "${service_binary}" service install --help >/dev/null 2>&1; then
+    run_as_root "${service_binary}" service install --config "${service_config}"
+    return $?
+  fi
+
+  service_manager="$(detect_service_manager_or_die "${service_os}")" || return $?
+  setup_requested_service "${service_binary}" "${service_manager}"
 }
 
 downloader() {
@@ -1450,8 +1470,8 @@ main() {
   planned_binary_path="${install_dir}/imagod"
   if [ "${WITH_SERVICE}" = "1" ]; then
     validate_service_binary_path_or_die "${planned_binary_path}"
-    service_manager="$(detect_service_manager_or_die "${os}")"
-    service_status="enabled (${service_manager})"
+    service_manager="imagod service install"
+    service_status="enabled (${service_manager} with legacy fallback)"
   fi
 
   requested_features="${FEATURES_OVERRIDE}"
@@ -1528,7 +1548,7 @@ main() {
   log "installed binary: ${installed_bin}"
 
   if [ "${WITH_SERVICE}" = "1" ]; then
-    if ! setup_requested_service "${installed_bin}" "${service_manager}"; then
+    if ! run_service_install_command "${installed_bin}" "${DEFAULT_CONFIG_PATH}" "${os}"; then
       die "binary installed at ${installed_bin}, but service setup failed"
     fi
     log "service installed and started: ${service_manager}"

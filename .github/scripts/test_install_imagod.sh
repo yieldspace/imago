@@ -17,17 +17,20 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 server_root="${tmp_root}/server"
-mkdir -p "${server_root}/api/tags" "${server_root}/downloads/imagod-v0.6.0"
+mkdir -p "${server_root}/api/tags" "${server_root}/downloads/imagod-v0.6.0" "${server_root}/downloads/imagod-v0.5.0"
 cp "${fixture_root}/releases-index.json" "${server_root}/api/releases.json"
 
 write_asset() {
-  local asset_name="$1"
-  local asset_body="$2"
-  local asset_path="${server_root}/downloads/imagod-v0.6.0/${asset_name}"
+  local release_tag="$1"
+  local asset_name="$2"
+  local asset_body="$3"
+  local asset_dir="${server_root}/downloads/${release_tag}"
+  local asset_path="${asset_dir}/${asset_name}"
 
+  mkdir -p "${asset_dir}"
   printf '%s\n' "${asset_body}" > "${asset_path}"
   (
-    cd "${server_root}/downloads/imagod-v0.6.0"
+    cd "${asset_dir}"
     if command -v sha256sum >/dev/null 2>&1; then
       sha256sum "${asset_name}" > "${asset_name}.sha256"
     elif command -v shasum >/dev/null 2>&1; then
@@ -39,8 +42,30 @@ write_asset() {
   )
 }
 
-write_asset "imagod-riscv64gc-unknown-linux-musl" "fixture binary without features"
-write_asset "imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek" "fixture binary with wasi-nn-cvitek"
+write_asset "imagod-v0.6.0" "imagod-riscv64gc-unknown-linux-musl" '#!/bin/sh
+if [ "${1:-}" = "service" ] && [ "${2:-}" = "install" ]; then
+  if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+    printf "%s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+  fi
+  exit 0
+fi
+printf "fixture binary without features\n"
+'
+write_asset "imagod-v0.6.0" "imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek" '#!/bin/sh
+if [ "${1:-}" = "service" ] && [ "${2:-}" = "install" ]; then
+  if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+    printf "%s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+  fi
+  exit 0
+fi
+printf "fixture binary with wasi-nn-cvitek\n"
+'
+write_asset "imagod-v0.5.0" "imagod-riscv64gc-unknown-linux-musl" '#!/bin/sh
+if [ "${1:-}" = "service" ] && [ "${2:-}" = "install" ]; then
+  exit 1
+fi
+printf "legacy fixture binary without service subcommand\n"
+'
 
 port_file="${tmp_root}/http.port"
 python3 - <<'PY' "${server_root}" "${port_file}" &
@@ -86,9 +111,12 @@ run_install() {
   shift 2
 
   echo "== ${description}"
+  local release_base_url="${IMAGOD_TEST_RELEASE_BASE_URL:-${download_base}}"
   IMAGOD_RELEASES_API_URL="${base_url}/api/releases.json" \
     IMAGOD_RELEASE_TAG_API_BASE="${base_url}/api/tags" \
-    IMAGOD_RELEASE_BASE_URL="${download_base}" \
+    IMAGOD_RELEASE_BASE_URL="${release_base_url}" \
+    IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION="${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" \
+    IMAGOD_TEST_STUB_LOG="${IMAGOD_TEST_STUB_LOG:-}" \
     bash "${repo_root}/scripts/install_imagod.sh" \
       --install-dir "${install_dir}" \
       "$@"
@@ -96,6 +124,13 @@ run_install() {
 
 plain_dir="${tmp_root}/plain-install"
 feature_dir="${tmp_root}/feature-install"
+service_dir="${tmp_root}/service-install"
+service_log="${tmp_root}/service-install.log"
+legacy_service_dir="${tmp_root}/legacy-service-install"
+legacy_service_log="${tmp_root}/legacy-service.log"
+legacy_stub_bin="${tmp_root}/legacy-service-bin"
+legacy_systemd_unit="${tmp_root}/legacy-imagod.service"
+legacy_download_base="${base_url}/downloads/imagod-v0.5.0"
 
 run_install \
   "install default variant from fixture catalog" \
@@ -115,3 +150,88 @@ run_install \
 cmp -s \
   "${feature_dir}/imagod" \
   "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek"
+
+IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION=1 IMAGOD_TEST_STUB_LOG="${service_log}" run_install \
+  "install default variant and delegate service setup to imagod service install" \
+  "${service_dir}" \
+  --target riscv64gc-unknown-linux-musl \
+  --with-service
+
+cmp -s \
+  "${service_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -Fx "service install --config /etc/imago/imagod.toml" "${service_log}"
+
+mkdir -p "${legacy_stub_bin}"
+cat > "${legacy_stub_bin}/install" <<'EOF'
+#!/bin/sh
+set -eu
+
+mode=""
+create_dir=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m)
+      mode="$2"
+      shift 2
+      ;;
+    -d)
+      create_dir=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "${create_dir}" = "1" ]; then
+  mkdir -p -- "$@"
+  exit 0
+fi
+
+src="$1"
+dest="$2"
+if [ "${dest}" = "/etc/systemd/system/imagod.service" ]; then
+  dest="${IMAGOD_TEST_SYSTEMD_UNIT_PATH}"
+fi
+mkdir -p -- "$(dirname "${dest}")"
+cp "${src}" "${dest}"
+if [ -n "${mode}" ]; then
+  chmod "${mode}" "${dest}"
+fi
+EOF
+chmod +x "${legacy_stub_bin}/install"
+
+cat > "${legacy_stub_bin}/systemctl" <<'EOF'
+#!/bin/sh
+set -eu
+printf "%s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+EOF
+chmod +x "${legacy_stub_bin}/systemctl"
+
+PATH="${legacy_stub_bin}:${PATH}" \
+IMAGOD_TEST_SERVICE_MANAGER=systemd \
+IMAGOD_TEST_SYSTEMD_UNIT_PATH="${legacy_systemd_unit}" \
+IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION=1 \
+IMAGOD_TEST_STUB_LOG="${legacy_service_log}" \
+IMAGOD_TEST_RELEASE_BASE_URL="${legacy_download_base}" \
+run_install \
+  "install older tagged release and fall back to legacy service setup" \
+  "${legacy_service_dir}" \
+  --target riscv64gc-unknown-linux-musl \
+  --tag imagod-v0.5.0 \
+  --with-service
+
+cmp -s \
+  "${legacy_service_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.5.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -Fx "daemon-reload" "${legacy_service_log}"
+grep -Fx "enable --now imagod.service" "${legacy_service_log}"
+grep -F "ExecStart=${legacy_service_dir}/imagod --config /etc/imago/imagod.toml" "${legacy_systemd_unit}"

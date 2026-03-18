@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Add `imagod self update` and `imagod service install|uninstall`, and route installer `--with-service` through the new service CLI
 - Add feature-gated `wasi-nn-cvitek` support for Duo TPU `.cvimodel` execution via `autodetect + tpu`
 
 ## [0.1.0](https://github.com/yieldspace/imago/releases/tag/imagod-v0.1.0) - 2026-03-02

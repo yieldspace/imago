@@ -24,6 +24,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+hex = { workspace = true }
 imago-plugin-imago-admin = { workspace = true }
 imago-plugin-imago-experimental-gpio = { workspace = true }
 imago-plugin-imago-experimental-i2c = { workspace = true }
@@ -35,6 +36,14 @@ imagod-common = { workspace = true }
 imagod-control = { workspace = true }
 imagod-runtime = { workspace = true }
 imagod-server = { workspace = true }
+libc = { workspace = true }
 rustls = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
+ureq = { workspace = true }
+url = { workspace = true }
 web-transport-quinn = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

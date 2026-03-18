@@ -2547,6 +2547,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "imago-plugin-imago-admin",
  "imago-plugin-imago-experimental-gpio",
  "imago-plugin-imago-experimental-i2c",
@@ -2558,8 +2559,14 @@ dependencies = [
  "imagod-control",
  "imagod-runtime",
  "imagod-server",
+ "libc",
  "rustls 0.23.37",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
+ "ureq",
+ "url",
  "web-transport-quinn",
 ]
 
