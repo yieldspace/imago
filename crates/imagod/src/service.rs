@@ -341,9 +341,22 @@ fn render_launchd_plist(current_exe: &Path, config_path: &Path) -> String {
   <true/>\n\
 </dict>\n\
 </plist>\n",
-        current_exe.display(),
-        config_path.display()
+        xml_escape(current_exe),
+        xml_escape(config_path)
     )
+}
+
+fn xml_escape(path: &Path) -> String {
+    let mut escaped = String::new();
+    for ch in path.as_os_str().to_string_lossy().chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn run_command<I, S>(program: impl AsRef<OsStr>, args: I) -> Result<(), anyhow::Error>
@@ -623,6 +636,16 @@ mod tests {
             render_launchd_plist(Path::new("/tmp/imagod"), Path::new("/tmp/imagod.toml"));
         assert!(rendered.contains("<string>/tmp/imagod</string>"));
         assert!(rendered.contains("<string>/tmp/imagod.toml</string>"));
+    }
+
+    #[test]
+    fn render_launchd_plist_escapes_xml_metacharacters() {
+        let rendered = render_launchd_plist(
+            Path::new("/tmp/imago&d"),
+            Path::new("/tmp/config<prod>.toml"),
+        );
+        assert!(rendered.contains("<string>/tmp/imago&amp;d</string>"));
+        assert!(rendered.contains("<string>/tmp/config&lt;prod&gt;.toml</string>"));
     }
 
     #[test]
