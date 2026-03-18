@@ -4,53 +4,26 @@
 
 This guide helps you:
 
-1. Install `imago` CLI and `imagod`.
+1. Install `imago` and `imagod`.
 2. Create a brand-new project with `imago project init`.
 3. Build and run the generated template service on local `imagod`.
 
 This quickstart does not require cloning the `imago` repository.
 
-## Install Imago CLI
+## Install `imago`
 
-Choose one installation method:
-
-Option A:
 ```bash
-curl -sSf https://cli.imago.sh | sh
+curl -sSLf https://cli.imago.sh | sh
 ```
 
-This installer defaults to the latest stable `imago` release.
-If only prereleases are available, use `--prerelease`. To pin an exact build, use `--tag imago-vX.Y.Z`.
-Interactive terminals show a confirmation prompt before installation.
-For automation or unattended runs, pass `-y` (for example, `curl -sSf https://cli.imago.sh | sh -s -- -y`).
-Repository-local fallback:
+## Install `imagod`
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imago.sh | sh
+curl -sSLf https://install.imago.sh | sh
 ```
 
-Option B:
-```bash
-cargo install imago-cli --git https://github.com/yieldspace/imago
-```
-
-## Install imagod
-
-Choose one installation method:
-
-Option A:
-```bash
-curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh
-```
-
-This installer defaults to the latest stable `imagod` release.
-If only prereleases are available, use `--prerelease`. To pin an exact build, use `--tag imagod-vX.Y.Z`.
-Interactive terminals show a confirmation prompt before installation.
-For automation or unattended runs, pass `-y` (for example, `curl -fsSL https://raw.githubusercontent.com/yieldspace/imago/main/scripts/install_imagod.sh | sh -s -- -y`).
-
-Option B:
-```bash
-cargo install --git https://github.com/yieldspace/imago imagod
-```
+This guide uses manual local startup with `imagod --config ./imagod.toml`.
+It does not configure a system service.
 
 ## Create a New Project from Template
 
@@ -61,7 +34,7 @@ imago project init app --template rust
 cd app
 ```
 
-## Install Wasm Target
+## Install the Wasm Target
 
 ```bash
 rustup target add wasm32-wasip2
@@ -69,21 +42,16 @@ rustup target add wasm32-wasip2
 
 ## Generate Local Key Material
 
-Generate one local keypair:
-
 ```bash
-CI=true imago trust client-key generate --out-dir certs
+imago trust client-key generate --out-dir certs
 ```
 
-From the command output, copy the value shown as:
+For this local quickstart, reuse `certs/client.key` as the daemon `tls.server_key`.
+Do not use this shortcut for production trust setup.
 
-```text
-client_public_key_hex=<YOUR_CLIENT_PUBLIC_KEY_HEX>
-```
+## Update `imago.toml`
 
-## Configure `imago.toml`
-
-Write the following content to `imago.toml` in your project root:
+Replace the generated `imago.toml` with:
 
 ```toml
 "$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imago.schema.json"
@@ -100,40 +68,25 @@ command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release"
 wasi = true
 
 [target.default]
-remote = "127.0.0.1:4443"
-server_name = "localhost"
-client_key = "certs/client.key"
+remote = "ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock"
 ```
-
-If the daemon is reachable only over SSH, switch the target to:
-
-```toml
-[target.default]
-remote = "ssh://root@your-host"
-```
-
-You can also override the daemon control socket path with `remote = "ssh://root@your-host?socket=/run/imago/imagod.sock"`.
-SSH targets use the system `ssh` command and must not set `server_name` or `client_key`.
 
 `name.cargo = true` reads `./Cargo.toml` `[package].name` from the same project root as `imago.toml`.
 If you prefer a literal value, keep using `name = "example-service"` instead.
 This lookup does not search parent directories; a missing sibling file or missing `[package].name` fails closed.
 
-## Configure `imagod.toml`
+Loopback targets without `user@` or `:port` such as `ssh://localhost?...` connect directly to
+the local control socket.
 
-For this local quickstart only, we reuse the generated key as both server key and allowed client key.
-Do not use this setup for production.
+For a remote host, use:
 
-Install imagod:
+`remote = "ssh://user@your-host?socket=/run/imago/imagod.sock"`
 
-```bash
-# For server
-curl -sSf https://install.imago.sh | sh
-# For local
-cargo install imagod --git https://github.com/yieldspace/imago
-```
+The CLI runs `ssh <host> imagod proxy-stdio`, and OpenSSH handles authentication and host verification.
 
-Write the following content to `imagod.toml` in your project root:
+## Create `imagod.toml`
+
+Create `imagod.toml` in the project root:
 
 ```toml
 "$schema" = "https://raw.githubusercontent.com/yieldspace/imago/main/schemas/imagod.schema.json"
@@ -145,27 +98,26 @@ server_version = "imagod/local-quickstart"
 
 [tls]
 server_key = "certs/client.key"
-admin_public_keys = []
-client_public_keys = ["<YOUR_CLIENT_PUBLIC_KEY_HEX>"]
+client_public_keys = []
 ```
 
-## Run Local Example
+`control_socket_path` must match the `?socket=` query in `imago.toml`.
+
+## Run the Quickstart
 
 ```bash
 # Terminal 1
-# Start daemon
 cd ~/imago-quickstart/app
-imagod --config imagod.toml
+imagod --config ./imagod.toml
 ```
 
 ```bash
 # Terminal 2
-# Build, deploy, and stream logs
 cd ~/imago-quickstart/app
-imago service deploy
+cargo build --target wasm32-wasip2 --release
+imago service deploy --target default --detach
+imago service logs example-service --tail 200
 ```
-
-For an SSH target, the CLI runs `ssh root@your-host imagod proxy-stdio` and forwards deploy/log/ls/start/stop requests through the daemon's local control socket. If the daemon uses a non-default `control_socket_path`, the SSH target must set the matching query, for example `remote = "ssh://root@your-host?socket=/tmp/imago-quickstart-imagod.sock"`. SSH log streaming requires a daemon that advertises `logs.stream`.
 
 ## Success Check
 
@@ -177,8 +129,10 @@ example-service stdout | Hello, World!
 
 ## Troubleshooting
 
-If deploy fails with a known-host mismatch, remove stale `localhost:4443` / `127.0.0.1:4443`
-entries from `~/.imago/known_hosts` and retry.
+- Confirm `imagod` is still running in Terminal 1.
+- Confirm `imago.toml` uses `remote = "ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock"`.
+- Confirm `imagod.toml` uses `control_socket_path = "/tmp/imago-quickstart-imagod.sock"`.
+- Run `imagod` and `imago service deploy` as the same user, or make sure the socket file is accessible to both.
 
 ## Next Steps
 
