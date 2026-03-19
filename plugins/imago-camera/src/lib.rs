@@ -129,7 +129,9 @@ mod component {
                 packet_bytes,
                 transfer_kind: alt_setting.transfer_kind,
                 sequence: Cell::new(0),
-                assembler: RefCell::new(MjpegFrameAssembler::default()),
+                assembler: RefCell::new(MjpegFrameAssembler::new(
+                    probe.max_video_frame_size as usize,
+                )),
                 closed: Cell::new(false),
             }))
         }
@@ -162,12 +164,17 @@ mod component {
                     .as_millis()
                     .clamp(1, u128::from(u32::MAX)) as u32;
                 let packet = self.read_packet(remaining_ms)?;
-                if let Some(frame_bytes) = self
-                    .assembler
-                    .borrow_mut()
-                    .push_packet(&packet)
-                    .map_err(map_parse_error)?
-                {
+                let maybe_frame = {
+                    let mut assembler = self.assembler.borrow_mut();
+                    match assembler.push_packet(&packet) {
+                        Ok(frame) => frame,
+                        Err(_) => {
+                            assembler.reset();
+                            return Err(types::CameraError::TransportFault);
+                        }
+                    }
+                };
+                if let Some(frame_bytes) = maybe_frame {
                     if !is_jpeg(&frame_bytes) {
                         self.assembler.borrow_mut().reset();
                         return Err(types::CameraError::TransportFault);

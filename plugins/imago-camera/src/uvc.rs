@@ -128,9 +128,6 @@ impl ParsedCamera {
         {
             return Some(*best);
         }
-        if let Some(best) = iso.last().copied() {
-            return Some(best);
-        }
 
         let mut bulk = self
             .alt_settings
@@ -138,7 +135,7 @@ impl ParsedCamera {
             .filter(|alt| alt.transfer_kind == TransferKind::Bulk)
             .collect::<Vec<_>>();
         bulk.sort_by_key(|alt| alt.effective_packet_bytes());
-        bulk.into_iter().next()
+        bulk.into_iter().last().or_else(|| iso.last().copied())
     }
 }
 
@@ -492,13 +489,28 @@ pub fn set_commit_control(interface_number: u8) -> (u8, u16, u16) {
     probe_control_setup(interface_number, UVC_SET_CUR, VS_COMMIT_CONTROL)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MjpegFrameAssembler {
     current_fid: Option<u8>,
     current_frame: Vec<u8>,
+    max_frame_bytes: usize,
+}
+
+impl Default for MjpegFrameAssembler {
+    fn default() -> Self {
+        Self::new(usize::MAX)
+    }
 }
 
 impl MjpegFrameAssembler {
+    pub fn new(max_frame_bytes: usize) -> Self {
+        Self {
+            current_fid: None,
+            current_frame: Vec::new(),
+            max_frame_bytes,
+        }
+    }
+
     pub fn push_packet(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
         if packet.len() < 2 {
             return Err(ParseError::new("UVC packet is shorter than 2 bytes"));
@@ -524,6 +536,17 @@ impl MjpegFrameAssembler {
 
         let payload = &packet[header_len..];
         if !payload.is_empty() {
+            let next_len = self
+                .current_frame
+                .len()
+                .checked_add(payload.len())
+                .ok_or_else(|| ParseError::new("assembled JPEG frame size overflowed"))?;
+            if next_len > self.max_frame_bytes {
+                self.current_frame.clear();
+                return Err(ParseError::new(
+                    "assembled JPEG frame exceeds negotiated max_video_frame_size",
+                ));
+            }
             self.current_frame.extend_from_slice(payload);
         }
 
@@ -697,6 +720,61 @@ mod tests {
             .expect("next packet should parse")
             .expect("next clean frame should complete");
         assert_eq!(frame, vec![0xff, 0xd8, 0xff, 0xd9]);
+    }
+
+    #[test]
+    fn select_alt_setting_prefers_bulk_when_iso_payload_is_too_small() {
+        let camera = ParsedCamera {
+            config_number: 1,
+            video_streaming_interface: 2,
+            uvc_version_bcd: 0x0110,
+            alt_settings: vec![
+                StreamingAltSetting {
+                    alt_setting: 1,
+                    endpoint_address: 0x81,
+                    transfer_kind: TransferKind::Isochronous,
+                    max_packet_size: 256,
+                },
+                StreamingAltSetting {
+                    alt_setting: 2,
+                    endpoint_address: 0x82,
+                    transfer_kind: TransferKind::Bulk,
+                    max_packet_size: 512,
+                },
+            ],
+            modes: Vec::new(),
+        };
+
+        let selected = camera
+            .select_alt_setting(1_024)
+            .expect("bulk fallback should be selected");
+        assert_eq!(selected.transfer_kind, TransferKind::Bulk);
+        assert_eq!(selected.endpoint_address, 0x82);
+    }
+
+    #[test]
+    fn mjpeg_frame_assembler_rejects_frames_larger_than_limit() {
+        let mut assembler = MjpegFrameAssembler::new(4);
+        assert!(
+            assembler
+                .push_packet(&[2, 0x00, 0xff, 0xd8])
+                .expect("first packet should parse")
+                .is_none()
+        );
+        let err = assembler
+            .push_packet(&[2, 0x02, 0x11, 0x22, 0xff, 0xd9])
+            .expect_err("oversized frame must fail");
+        assert!(
+            err.to_string()
+                .contains("exceeds negotiated max_video_frame_size"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            assembler
+                .push_packet(&[2, 0x03, 0xff, 0xd8, 0xff, 0xd9])
+                .expect("next packet should parse")
+                .is_some()
+        );
     }
 
     fn sample_uvc_configuration() -> Vec<u8> {
