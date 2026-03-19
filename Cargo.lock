@@ -2449,6 +2449,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "imago-plugin-imago-camera"
+version = "0.7.0"
+dependencies = [
+ "wit-bindgen 0.53.1",
+]
+
+[[package]]
 name = "imago-plugin-imago-experimental-gpio"
 version = "0.7.0"
 dependencies = [
@@ -3180,6 +3187,14 @@ name = "local-imagod-http-app"
 version = "0.7.0"
 dependencies = [
  "wasi 0.14.7+wasi-0.2.4",
+]
+
+[[package]]
+name = "local-imagod-plugin-camera-app"
+version = "0.7.0"
+dependencies = [
+ "wasi 0.14.7+wasi-0.2.4",
+ "wit-bindgen 0.53.1",
 ]
 
 [[package]]

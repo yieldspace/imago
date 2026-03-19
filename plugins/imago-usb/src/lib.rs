@@ -297,6 +297,10 @@ enum DeviceCommand {
     Configurations {
         reply: oneshot::Sender<Result<Vec<ConfigurationDescriptorRecord>, UsbError>>,
     },
+    ConfigurationDescriptorBytes {
+        configuration: u8,
+        reply: oneshot::Sender<Result<Vec<u8>, UsbError>>,
+    },
     Reset {
         reply: oneshot::Sender<Result<(), UsbError>>,
     },
@@ -333,6 +337,13 @@ enum DeviceCommand {
     BulkRead {
         interface: u8,
         endpoint: u8,
+        timeout_ms: u32,
+        reply: oneshot::Sender<Result<Vec<u8>, UsbError>>,
+    },
+    BulkIn {
+        interface: u8,
+        endpoint: u8,
+        length: u32,
         timeout_ms: u32,
         reply: oneshot::Sender<Result<Vec<u8>, UsbError>>,
     },
@@ -1125,6 +1136,69 @@ fn map_configuration_descriptor(
     }
 }
 
+fn raw_configuration_descriptor_bytes(
+    handle: &rusb::DeviceHandle<rusb::Context>,
+    configuration_value: u8,
+) -> Result<Vec<u8>, UsbError> {
+    use rusb::ffi::constants::{LIBUSB_DT_CONFIG, LIBUSB_REQUEST_GET_DESCRIPTOR};
+
+    let device = handle.device();
+    let descriptor = device.device_descriptor().map_err(map_rusb_error)?;
+    let config_index = (0..descriptor.num_configurations())
+        .find(|index| {
+            device
+                .config_descriptor(*index)
+                .map(|config| config.number() == configuration_value)
+                .unwrap_or(false)
+        })
+        .ok_or(UsbError::InvalidArgument)?;
+    let timeout = Duration::from_millis(DEFAULT_MAX_TIMEOUT_MS.into());
+
+    let mut header = [0u8; 9];
+    let header_len = handle
+        .read_control(
+            rusb::request_type(
+                rusb::Direction::In,
+                rusb::RequestType::Standard,
+                rusb::Recipient::Device,
+            ),
+            LIBUSB_REQUEST_GET_DESCRIPTOR,
+            u16::from(LIBUSB_DT_CONFIG) << 8 | u16::from(config_index),
+            0,
+            &mut header,
+            timeout,
+        )
+        .map_err(map_rusb_error)?;
+    if header_len < 9 {
+        return Err(UsbError::TransferFault);
+    }
+    let total_length = usize::from(u16::from_le_bytes([header[2], header[3]]));
+    if total_length < 9 {
+        return Err(UsbError::TransferFault);
+    }
+
+    let mut bytes = vec![0u8; total_length];
+    let actual_len = handle
+        .read_control(
+            rusb::request_type(
+                rusb::Direction::In,
+                rusb::RequestType::Standard,
+                rusb::Recipient::Device,
+            ),
+            LIBUSB_REQUEST_GET_DESCRIPTOR,
+            u16::from(LIBUSB_DT_CONFIG) << 8 | u16::from(config_index),
+            0,
+            &mut bytes,
+            timeout,
+        )
+        .map_err(map_rusb_error)?;
+    bytes.truncate(actual_len);
+    if bytes.len() < 9 {
+        return Err(UsbError::TransferFault);
+    }
+    Ok(bytes)
+}
+
 fn map_device_descriptor(descriptor: &rusb::DeviceDescriptor) -> DeviceDescriptorRecord {
     DeviceDescriptorRecord {
         device_class: descriptor.class_code(),
@@ -1829,6 +1903,13 @@ fn run_device_thread(
                 })();
                 let _ = reply.send(result);
             }
+            DeviceCommand::ConfigurationDescriptorBytes {
+                configuration,
+                reply,
+            } => {
+                let result = raw_configuration_descriptor_bytes(&state.handle, configuration);
+                let _ = reply.send(result);
+            }
             DeviceCommand::Reset { reply } => {
                 stop_all_bulk_readers(&mut state);
                 let result = state.handle.reset().map_err(map_rusb_error);
@@ -1966,6 +2047,28 @@ fn run_device_thread(
                         UsbError::Other("bulk reader runtime missing".to_string())
                     })?;
                     read_bulk_chunk_from_shared(&runtime.shared, timeout)
+                })();
+                let _ = reply.send(result);
+            }
+            DeviceCommand::BulkIn {
+                interface,
+                endpoint,
+                length,
+                timeout_ms,
+                reply,
+            } => {
+                let result = (|| {
+                    ensure_interface_claimed(&state, interface)?;
+                    validate_endpoint_in_address(endpoint)?;
+                    let timeout = validate_timeout(timeout_ms, &state.limits)?;
+                    let request_len = validate_transfer_len(length, &state.limits)?;
+                    let mut data = vec![0u8; request_len];
+                    let read = state
+                        .handle
+                        .read_bulk(endpoint, &mut data, timeout)
+                        .map_err(map_rusb_error)?;
+                    data.truncate(read);
+                    Ok(data)
                 })();
                 let _ = reply.send(result);
             }
@@ -2467,6 +2570,21 @@ impl imago_usb_plugin_bindings::imago::usb::device::HostDevice for WasiState {
         .await
     }
 
+    async fn configuration_descriptor_bytes(
+        &mut self,
+        self_: Resource<DeviceResource>,
+        configuration: u8,
+    ) -> Result<Vec<u8>, UsbError> {
+        let handle = lookup_device_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| {
+            DeviceCommand::ConfigurationDescriptorBytes {
+                configuration,
+                reply,
+            }
+        })
+        .await
+    }
+
     async fn reset(&mut self, self_: Resource<DeviceResource>) -> Result<(), UsbError> {
         let handle = lookup_device_handle(self_.rep()).map_err(map_lookup_error)?;
         request_device(&handle.sender, |reply| DeviceCommand::Reset { reply }).await
@@ -2620,6 +2738,24 @@ impl imago_usb_plugin_bindings::imago::usb::usb_interface::HostClaimedInterface 
         request_device(&handle.sender, |reply| DeviceCommand::BulkRead {
             interface: handle.number,
             endpoint,
+            timeout_ms,
+            reply,
+        })
+        .await
+    }
+
+    async fn bulk_in(
+        &mut self,
+        self_: Resource<ClaimedInterfaceResource>,
+        endpoint: u8,
+        length: u32,
+        timeout_ms: u32,
+    ) -> Result<Vec<u8>, UsbError> {
+        let interface = lookup_claimed_interface_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&interface.sender, |reply| DeviceCommand::BulkIn {
+            interface: interface.number,
+            endpoint,
+            length,
             timeout_ms,
             reply,
         })

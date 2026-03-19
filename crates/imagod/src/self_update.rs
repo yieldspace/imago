@@ -784,6 +784,9 @@ mod tests {
                 while !stop_for_thread.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _addr)) => {
+                            stream
+                                .set_nonblocking(false)
+                                .expect("accepted stream should become blocking");
                             let request = read_request(&mut stream);
                             requests_for_thread
                                 .lock()

@@ -9,14 +9,14 @@ use imagod_runtime_internal::{
     CapabilityChecker, PluginComponentInterfaces, PluginImportProvider, PluginResolver,
 };
 use wasmtime::{
-    Engine, Store,
-    component::{Component, Func, Linker, Val, types},
+    AsContextMut, Engine, Store,
+    component::{Component, Func, Linker, ResourceDynamic, Val, types},
 };
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi_http::add_only_http_to_linker_async;
 
 use crate::{
-    WasiState,
+    WasiState, WasmDependencyResourceKey,
     capability_checker::enforce_wasi_import_capabilities,
     map_runtime_error,
     native_plugins::NativePluginRegistry,
@@ -28,6 +28,13 @@ use crate::{
 pub(crate) struct AvailablePlugin {
     pub(crate) kind: PluginKind,
     pub(crate) instance: Option<wasmtime::component::Instance>,
+}
+
+#[derive(Debug, Clone)]
+struct DependencyResourceBinding {
+    import_resource: types::ResourceType,
+    host_dynamic_type_id: u32,
+    resource_name: String,
 }
 
 #[derive(Default)]
@@ -433,6 +440,69 @@ pub(crate) fn register_plugin_import_shims(
                 import_name
             ))
         })?;
+        let dependency_resource_bindings = match &provider {
+            PluginImportProvider::Dependency(target_dependency) => {
+                let plugin = available_plugins.get(target_dependency).ok_or_else(|| {
+                    map_runtime_error(format!(
+                        "missing target dependency '{}' for plugin import '{}'",
+                        target_dependency, import_name
+                    ))
+                })?;
+                if plugin.kind != PluginKind::Wasm {
+                    Vec::new()
+                } else {
+                    let bindings = collect_dependency_resource_bindings(
+                        store,
+                        target_dependency,
+                        import_name,
+                        &instance_ty,
+                        engine,
+                    );
+                    for binding in &bindings {
+                        let interface_name = import_name.to_string();
+                        let resource_name = binding.resource_name.clone();
+                        let host_dynamic_type_id = binding.host_dynamic_type_id;
+                        import_instance
+                            .resource(
+                                &resource_name.clone(),
+                                wasmtime::component::ResourceType::host_dynamic(
+                                    host_dynamic_type_id,
+                                ),
+                                move |mut store, rep| {
+                                    let stored = store
+                                        .data_mut()
+                                        .remove_wasm_dependency_resource(rep)
+                                        .ok_or_else(|| {
+                                            wasmtime::Error::msg(format!(
+                                                "missing bridged dependency resource '{}' rep={} for '{}'",
+                                                resource_name, rep, interface_name
+                                            ))
+                                        })?;
+                                    if stored.type_id != host_dynamic_type_id {
+                                        return Err(wasmtime::Error::msg(format!(
+                                            "bridged dependency resource '{}' rep={} for '{}' has unexpected host type {}",
+                                            resource_name,
+                                            rep,
+                                            interface_name,
+                                            stored.type_id
+                                        )));
+                                    }
+                                    stored.resource.resource_drop(store.as_context_mut())?;
+                                    Ok(())
+                                },
+                            )
+                            .map_err(|e| {
+                                map_runtime_error(format!(
+                                    "failed to define bridged dependency resource '{}.{}': {e}",
+                                    import_name, binding.resource_name
+                                ))
+                            })?;
+                    }
+                    bindings
+                }
+            }
+            PluginImportProvider::SelfComponent => Vec::new(),
+        };
 
         for (func_name, item) in instance_ty.exports(engine) {
             let types::ComponentItem::ComponentFunc(import_ty) = item else {
@@ -528,13 +598,50 @@ pub(crate) fn register_plugin_import_shims(
                                 import_name,
                                 func_name,
                             )?;
+                            let import_param_types =
+                                import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
+                            let import_result_types = import_ty.results().collect::<Vec<_>>();
+                            let resource_bindings = dependency_resource_bindings.clone();
 
                             import_instance
                                 .func_new_async(
                                     func_name,
                                     move |mut store, _ty, params, results| {
+                                        let import_param_types = import_param_types.clone();
+                                        let import_result_types = import_result_types.clone();
+                                        let resource_bindings = resource_bindings.clone();
                                         Box::new(async move {
-                                            callee.call_async(&mut store, params, results).await?;
+                                            let callee_params = import_param_types
+                                                .iter()
+                                                .zip(params.iter())
+                                                .map(|(param_ty, param)| {
+                                                    map_value_to_wasm_dependency(
+                                                        &mut store,
+                                                        param.clone(),
+                                                        param_ty,
+                                                        &resource_bindings,
+                                                    )
+                                                    .map_err(|err| {
+                                                        wasmtime::Error::msg(err.to_string())
+                                                    })
+                                                })
+                                                .collect::<Result<Vec<_>, _>>()?;
+                                            callee
+                                                .call_async(&mut store, &callee_params, results)
+                                                .await?;
+                                            for (result_ty, result) in
+                                                import_result_types.iter().zip(results.iter_mut())
+                                            {
+                                                *result = map_value_from_wasm_dependency(
+                                                    &mut store,
+                                                    result.clone(),
+                                                    result_ty,
+                                                    &resource_bindings,
+                                                )
+                                                .map_err(|err| {
+                                                    wasmtime::Error::msg(err.to_string())
+                                                })?;
+                                            }
                                             Ok(())
                                         })
                                     },
@@ -852,7 +959,12 @@ fn ensure_component_signatures_match(
 ) -> Result<(), ImagodError> {
     let import_params = import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
     let callee_params = callee_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
-    if import_params != callee_params {
+    if import_params.len() != callee_params.len()
+        || !import_params
+            .iter()
+            .zip(callee_params.iter())
+            .all(|(import_ty, callee_ty)| component_types_match(import_ty, callee_ty))
+    {
         return Err(map_runtime_error(format!(
             "plugin import type mismatch for '{}.{}': parameter types differ",
             interface_name, function_name
@@ -861,7 +973,12 @@ fn ensure_component_signatures_match(
 
     let import_results = import_ty.results().collect::<Vec<_>>();
     let callee_results = callee_ty.results().collect::<Vec<_>>();
-    if import_results != callee_results {
+    if import_results.len() != callee_results.len()
+        || !import_results
+            .iter()
+            .zip(callee_results.iter())
+            .all(|(import_ty, callee_ty)| component_types_match(import_ty, callee_ty))
+    {
         return Err(map_runtime_error(format!(
             "plugin import type mismatch for '{}.{}': result types differ",
             interface_name, function_name
@@ -869,6 +986,479 @@ fn ensure_component_signatures_match(
     }
 
     Ok(())
+}
+
+fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bool {
+    match (import_ty, callee_ty) {
+        (types::Type::Bool, types::Type::Bool)
+        | (types::Type::S8, types::Type::S8)
+        | (types::Type::U8, types::Type::U8)
+        | (types::Type::S16, types::Type::S16)
+        | (types::Type::U16, types::Type::U16)
+        | (types::Type::S32, types::Type::S32)
+        | (types::Type::U32, types::Type::U32)
+        | (types::Type::S64, types::Type::S64)
+        | (types::Type::U64, types::Type::U64)
+        | (types::Type::Float32, types::Type::Float32)
+        | (types::Type::Float64, types::Type::Float64)
+        | (types::Type::Char, types::Type::Char)
+        | (types::Type::String, types::Type::String)
+        | (types::Type::Own(_), types::Type::Own(_))
+        | (types::Type::Borrow(_), types::Type::Borrow(_))
+        | (types::Type::ErrorContext, types::Type::ErrorContext) => true,
+        (types::Type::List(import_list), types::Type::List(callee_list)) => {
+            component_types_match(&import_list.ty(), &callee_list.ty())
+        }
+        (types::Type::Record(import_record), types::Type::Record(callee_record)) => {
+            let import_fields = import_record.fields().collect::<Vec<_>>();
+            let callee_fields = callee_record.fields().collect::<Vec<_>>();
+            import_fields.len() == callee_fields.len()
+                && import_fields.iter().zip(callee_fields.iter()).all(
+                    |(import_field, callee_field)| {
+                        import_field.name == callee_field.name
+                            && component_types_match(&import_field.ty, &callee_field.ty)
+                    },
+                )
+        }
+        (types::Type::Tuple(import_tuple), types::Type::Tuple(callee_tuple)) => {
+            let import_fields = import_tuple.types().collect::<Vec<_>>();
+            let callee_fields = callee_tuple.types().collect::<Vec<_>>();
+            import_fields.len() == callee_fields.len()
+                && import_fields.iter().zip(callee_fields.iter()).all(
+                    |(import_field, callee_field)| {
+                        component_types_match(import_field, callee_field)
+                    },
+                )
+        }
+        (types::Type::Variant(import_variant), types::Type::Variant(callee_variant)) => {
+            let import_cases = import_variant.cases().collect::<Vec<_>>();
+            let callee_cases = callee_variant.cases().collect::<Vec<_>>();
+            import_cases.len() == callee_cases.len()
+                && import_cases
+                    .iter()
+                    .zip(callee_cases.iter())
+                    .all(|(import_case, callee_case)| {
+                        import_case.name == callee_case.name
+                            && option_component_types_match(
+                                import_case.ty.clone(),
+                                callee_case.ty.clone(),
+                            )
+                    })
+        }
+        (types::Type::Enum(import_enum), types::Type::Enum(callee_enum)) => {
+            import_enum.names().eq(callee_enum.names())
+        }
+        (types::Type::Option(import_option), types::Type::Option(callee_option)) => {
+            component_types_match(&import_option.ty(), &callee_option.ty())
+        }
+        (types::Type::Result(import_result), types::Type::Result(callee_result)) => {
+            option_component_types_match(import_result.ok(), callee_result.ok())
+                && option_component_types_match(import_result.err(), callee_result.err())
+        }
+        (types::Type::Flags(import_flags), types::Type::Flags(callee_flags)) => {
+            import_flags.names().eq(callee_flags.names())
+        }
+        (types::Type::Future(import_future), types::Type::Future(callee_future)) => {
+            option_component_types_match(import_future.ty(), callee_future.ty())
+        }
+        (types::Type::Stream(import_stream), types::Type::Stream(callee_stream)) => {
+            option_component_types_match(import_stream.ty(), callee_stream.ty())
+        }
+        _ => false,
+    }
+}
+
+fn option_component_types_match(
+    import_ty: Option<types::Type>,
+    callee_ty: Option<types::Type>,
+) -> bool {
+    match (import_ty, callee_ty) {
+        (Some(import_ty), Some(callee_ty)) => component_types_match(&import_ty, &callee_ty),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn collect_dependency_resource_bindings(
+    store: &mut Store<WasiState>,
+    target_dependency: &str,
+    interface_name: &str,
+    instance_ty: &types::ComponentInstance,
+    engine: &Engine,
+) -> Vec<DependencyResourceBinding> {
+    instance_ty
+        .exports(engine)
+        .filter_map(|(resource_name, item)| match item {
+            types::ComponentItem::Resource(resource_ty) => Some(DependencyResourceBinding {
+                import_resource: resource_ty,
+                host_dynamic_type_id: store.data_mut().wasm_dependency_resource_type_id(
+                    WasmDependencyResourceKey {
+                        dependency_name: target_dependency.to_string(),
+                        interface_name: interface_name.to_string(),
+                        resource_name: resource_name.to_string(),
+                    },
+                ),
+                resource_name: resource_name.to_string(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn dependency_resource_binding<'a>(
+    bindings: &'a [DependencyResourceBinding],
+    resource_ty: &types::ResourceType,
+) -> Result<&'a DependencyResourceBinding, ImagodError> {
+    bindings
+        .iter()
+        .find(|binding| binding.import_resource == *resource_ty)
+        .ok_or_else(|| {
+            map_runtime_error("missing bridged wasm dependency resource binding".to_string())
+        })
+}
+
+fn map_value_to_wasm_dependency(
+    store: &mut wasmtime::StoreContextMut<'_, WasiState>,
+    value: Val,
+    ty: &types::Type,
+    bindings: &[DependencyResourceBinding],
+) -> Result<Val, ImagodError> {
+    match (ty, value) {
+        (
+            types::Type::Bool
+            | types::Type::S8
+            | types::Type::U8
+            | types::Type::S16
+            | types::Type::U16
+            | types::Type::S32
+            | types::Type::U32
+            | types::Type::S64
+            | types::Type::U64
+            | types::Type::Float32
+            | types::Type::Float64
+            | types::Type::Char
+            | types::Type::String
+            | types::Type::Enum(_)
+            | types::Type::Flags(_)
+            | types::Type::Future(_)
+            | types::Type::Stream(_)
+            | types::Type::ErrorContext,
+            value,
+        ) => Ok(value),
+        (types::Type::List(list_ty), Val::List(values)) => Ok(Val::List(
+            values
+                .into_iter()
+                .map(|value| map_value_to_wasm_dependency(store, value, &list_ty.ty(), bindings))
+                .collect::<Result<_, _>>()?,
+        )),
+        (types::Type::Record(record_ty), Val::Record(values)) => {
+            let fields = record_ty.fields().collect::<Vec<_>>();
+            if values.len() != fields.len() {
+                return Err(map_runtime_error(
+                    "record field count mismatch in wasm dependency bridge".to_string(),
+                ));
+            }
+            let mut mapped = Vec::with_capacity(values.len());
+            for ((field_name, field_value), field_ty) in values.into_iter().zip(fields.iter()) {
+                if field_name != field_ty.name {
+                    return Err(map_runtime_error(format!(
+                        "record field mismatch in wasm dependency bridge: expected '{}', got '{}'",
+                        field_ty.name, field_name
+                    )));
+                }
+                mapped.push((
+                    field_name,
+                    map_value_to_wasm_dependency(store, field_value, &field_ty.ty, bindings)?,
+                ));
+            }
+            Ok(Val::Record(mapped))
+        }
+        (types::Type::Tuple(tuple_ty), Val::Tuple(values)) => {
+            let types = tuple_ty.types().collect::<Vec<_>>();
+            if values.len() != types.len() {
+                return Err(map_runtime_error(
+                    "tuple field count mismatch in wasm dependency bridge".to_string(),
+                ));
+            }
+            Ok(Val::Tuple(
+                values
+                    .into_iter()
+                    .zip(types.iter())
+                    .map(|(value, value_ty)| {
+                        map_value_to_wasm_dependency(store, value, value_ty, bindings)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (types::Type::Variant(variant_ty), Val::Variant(case_name, payload)) => {
+            let case_ty = variant_ty
+                .cases()
+                .find(|case_ty| case_ty.name == case_name)
+                .ok_or_else(|| {
+                    map_runtime_error(format!(
+                        "variant case '{}' is not defined in wasm dependency bridge",
+                        case_name
+                    ))
+                })?;
+            Ok(Val::Variant(
+                case_name,
+                map_optional_value_to_wasm_dependency(
+                    store,
+                    payload,
+                    case_ty.ty.clone(),
+                    bindings,
+                )?,
+            ))
+        }
+        (types::Type::Option(option_ty), Val::Option(value)) => Ok(Val::Option(
+            map_optional_value_to_wasm_dependency(store, value, Some(option_ty.ty()), bindings)?,
+        )),
+        (types::Type::Result(result_ty), Val::Result(value)) => Ok(Val::Result(match value {
+            Ok(ok) => Ok(map_optional_value_to_wasm_dependency(
+                store,
+                ok,
+                result_ty.ok(),
+                bindings,
+            )?),
+            Err(err) => Err(map_optional_value_to_wasm_dependency(
+                store,
+                err,
+                result_ty.err(),
+                bindings,
+            )?),
+        })),
+        (types::Type::Own(resource_ty), Val::Resource(resource)) => {
+            map_resource_to_wasm_dependency(store, resource, resource_ty, true, bindings)
+        }
+        (types::Type::Borrow(resource_ty), Val::Resource(resource)) => {
+            map_resource_to_wasm_dependency(store, resource, resource_ty, false, bindings)
+        }
+        _ => Err(map_runtime_error(
+            "unsupported value/type pair in wasm dependency bridge".to_string(),
+        )),
+    }
+}
+
+fn map_optional_value_to_wasm_dependency(
+    store: &mut wasmtime::StoreContextMut<'_, WasiState>,
+    value: Option<Box<Val>>,
+    ty: Option<types::Type>,
+    bindings: &[DependencyResourceBinding],
+) -> Result<Option<Box<Val>>, ImagodError> {
+    match (value, ty) {
+        (Some(value), Some(ty)) => Ok(Some(Box::new(map_value_to_wasm_dependency(
+            store, *value, &ty, bindings,
+        )?))),
+        (None, None) => Ok(None),
+        (None, Some(_)) => Ok(None),
+        (Some(_), None) => Err(map_runtime_error(
+            "unexpected optional payload in wasm dependency bridge".to_string(),
+        )),
+    }
+}
+
+fn map_value_from_wasm_dependency(
+    store: &mut wasmtime::StoreContextMut<'_, WasiState>,
+    value: Val,
+    ty: &types::Type,
+    bindings: &[DependencyResourceBinding],
+) -> Result<Val, ImagodError> {
+    match (ty, value) {
+        (
+            types::Type::Bool
+            | types::Type::S8
+            | types::Type::U8
+            | types::Type::S16
+            | types::Type::U16
+            | types::Type::S32
+            | types::Type::U32
+            | types::Type::S64
+            | types::Type::U64
+            | types::Type::Float32
+            | types::Type::Float64
+            | types::Type::Char
+            | types::Type::String
+            | types::Type::Enum(_)
+            | types::Type::Flags(_)
+            | types::Type::Future(_)
+            | types::Type::Stream(_)
+            | types::Type::ErrorContext,
+            value,
+        ) => Ok(value),
+        (types::Type::List(list_ty), Val::List(values)) => Ok(Val::List(
+            values
+                .into_iter()
+                .map(|value| map_value_from_wasm_dependency(store, value, &list_ty.ty(), bindings))
+                .collect::<Result<_, _>>()?,
+        )),
+        (types::Type::Record(record_ty), Val::Record(values)) => {
+            let fields = record_ty.fields().collect::<Vec<_>>();
+            if values.len() != fields.len() {
+                return Err(map_runtime_error(
+                    "record field count mismatch in wasm dependency bridge".to_string(),
+                ));
+            }
+            let mut mapped = Vec::with_capacity(values.len());
+            for ((field_name, field_value), field_ty) in values.into_iter().zip(fields.iter()) {
+                if field_name != field_ty.name {
+                    return Err(map_runtime_error(format!(
+                        "record field mismatch in wasm dependency bridge: expected '{}', got '{}'",
+                        field_ty.name, field_name
+                    )));
+                }
+                mapped.push((
+                    field_name,
+                    map_value_from_wasm_dependency(store, field_value, &field_ty.ty, bindings)?,
+                ));
+            }
+            Ok(Val::Record(mapped))
+        }
+        (types::Type::Tuple(tuple_ty), Val::Tuple(values)) => {
+            let types = tuple_ty.types().collect::<Vec<_>>();
+            if values.len() != types.len() {
+                return Err(map_runtime_error(
+                    "tuple field count mismatch in wasm dependency bridge".to_string(),
+                ));
+            }
+            Ok(Val::Tuple(
+                values
+                    .into_iter()
+                    .zip(types.iter())
+                    .map(|(value, value_ty)| {
+                        map_value_from_wasm_dependency(store, value, value_ty, bindings)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (types::Type::Variant(variant_ty), Val::Variant(case_name, payload)) => {
+            let case_ty = variant_ty
+                .cases()
+                .find(|case_ty| case_ty.name == case_name)
+                .ok_or_else(|| {
+                    map_runtime_error(format!(
+                        "variant case '{}' is not defined in wasm dependency bridge",
+                        case_name
+                    ))
+                })?;
+            Ok(Val::Variant(
+                case_name,
+                map_optional_value_from_wasm_dependency(
+                    store,
+                    payload,
+                    case_ty.ty.clone(),
+                    bindings,
+                )?,
+            ))
+        }
+        (types::Type::Option(option_ty), Val::Option(value)) => Ok(Val::Option(
+            map_optional_value_from_wasm_dependency(store, value, Some(option_ty.ty()), bindings)?,
+        )),
+        (types::Type::Result(result_ty), Val::Result(value)) => Ok(Val::Result(match value {
+            Ok(ok) => Ok(map_optional_value_from_wasm_dependency(
+                store,
+                ok,
+                result_ty.ok(),
+                bindings,
+            )?),
+            Err(err) => Err(map_optional_value_from_wasm_dependency(
+                store,
+                err,
+                result_ty.err(),
+                bindings,
+            )?),
+        })),
+        (types::Type::Own(resource_ty), Val::Resource(resource)) => {
+            map_resource_from_wasm_dependency(store, resource, resource_ty, true, bindings)
+        }
+        (types::Type::Borrow(resource_ty), Val::Resource(resource)) => {
+            map_resource_from_wasm_dependency(store, resource, resource_ty, false, bindings)
+        }
+        _ => Err(map_runtime_error(
+            "unsupported value/type pair in wasm dependency bridge".to_string(),
+        )),
+    }
+}
+
+fn map_optional_value_from_wasm_dependency(
+    store: &mut wasmtime::StoreContextMut<'_, WasiState>,
+    value: Option<Box<Val>>,
+    ty: Option<types::Type>,
+    bindings: &[DependencyResourceBinding],
+) -> Result<Option<Box<Val>>, ImagodError> {
+    match (value, ty) {
+        (Some(value), Some(ty)) => Ok(Some(Box::new(map_value_from_wasm_dependency(
+            store, *value, &ty, bindings,
+        )?))),
+        (None, None) => Ok(None),
+        (None, Some(_)) => Ok(None),
+        (Some(_), None) => Err(map_runtime_error(
+            "unexpected optional payload in wasm dependency bridge".to_string(),
+        )),
+    }
+}
+
+fn map_resource_to_wasm_dependency(
+    store: &mut wasmtime::StoreContextMut<'_, WasiState>,
+    resource: wasmtime::component::ResourceAny,
+    resource_ty: &types::ResourceType,
+    take_ownership: bool,
+    bindings: &[DependencyResourceBinding],
+) -> Result<Val, ImagodError> {
+    let binding = dependency_resource_binding(bindings, resource_ty)?;
+    let dynamic = ResourceDynamic::try_from_resource_any(resource, store.as_context_mut())
+        .map_err(|e| {
+            map_runtime_error(format!("failed to unwrap bridged dependency resource: {e}"))
+        })?;
+    if dynamic.ty() != binding.host_dynamic_type_id {
+        return Err(map_runtime_error(format!(
+            "bridged dependency resource '{}' expected host type {} but saw {}",
+            binding.resource_name,
+            binding.host_dynamic_type_id,
+            dynamic.ty()
+        )));
+    }
+
+    let stored = if take_ownership {
+        store
+            .data_mut()
+            .remove_wasm_dependency_resource(dynamic.rep())
+    } else {
+        store.data().wasm_dependency_resource(dynamic.rep())
+    }
+    .ok_or_else(|| {
+        map_runtime_error(format!(
+            "missing bridged dependency resource '{}' rep={}",
+            binding.resource_name,
+            dynamic.rep()
+        ))
+    })?;
+
+    Ok(Val::Resource(stored.resource))
+}
+
+fn map_resource_from_wasm_dependency(
+    store: &mut wasmtime::StoreContextMut<'_, WasiState>,
+    resource: wasmtime::component::ResourceAny,
+    resource_ty: &types::ResourceType,
+    is_owned: bool,
+    bindings: &[DependencyResourceBinding],
+) -> Result<Val, ImagodError> {
+    if !is_owned {
+        return Err(map_runtime_error(
+            "borrowed resource results are unsupported for wasm dependency bridge".to_string(),
+        ));
+    }
+
+    let binding = dependency_resource_binding(bindings, resource_ty)?;
+    let rep = store
+        .data_mut()
+        .store_wasm_dependency_resource(binding.host_dynamic_type_id, resource)?;
+    let bridged = ResourceDynamic::new_own(rep, binding.host_dynamic_type_id)
+        .try_into_resource_any(store.as_context_mut())
+        .map_err(|e| {
+            map_runtime_error(format!("failed to wrap bridged dependency resource: {e}"))
+        })?;
+    Ok(Val::Resource(bridged))
 }
 
 fn resolve_component_export_type(

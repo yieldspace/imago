@@ -1,0 +1,45 @@
+name = "local-imagod-plugin-camera-app"
+main = "target/wasm32-wasip2/release/local-imagod-plugin-camera-app.wasm"
+type = "cli"
+
+[build]
+command = "CARGO_TARGET_DIR=target cargo build --target wasm32-wasip2 --release -p imago-plugin-imago-camera -p local-imagod-plugin-camera-app"
+
+[[dependencies]]
+version = "0.3.0"
+kind = "native"
+path = "../../plugins/imago-usb/wit"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "wasm"
+path = "../../plugins/imago-camera/wit"
+requires = ["imago:usb"]
+
+[dependencies.component]
+path = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
+
+[dependencies.capabilities]
+wasi = true
+
+[dependencies.capabilities.deps]
+"imago:usb" = ["*"]
+
+[capabilities]
+privileged = false
+wasi = true
+
+[capabilities.deps]
+"imago:camera" = ["*"]
+
+[resources.usb]
+# Replace this with the Linux UVC device path that should be visible to the guest.
+paths = ["/dev/bus/usb/001/002"]
+max_transfer_bytes = 1048576
+max_timeout_ms = 30000
+max_paths = 128
+bulk_ring_chunk_bytes = 16384
+bulk_ring_slots = 16
+
+[target.default]
+remote = "ssh://localhost?socket=/tmp/imagod-local-plugin-camera.sock"

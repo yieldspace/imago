@@ -1,0 +1,129 @@
+package imago:camera@0.1.0;
+
+/// Shared camera capture types.
+@since(version = 0.1.0)
+interface types {
+  /// Error codes returned by camera operations.
+  @since(version = 0.1.0)
+  variant camera-error {
+    /// The requested camera identifier does not exist.
+    not-found,
+    /// Policy denies access to the underlying device.
+    not-allowed,
+    /// The operation timed out before a frame was available.
+    timeout,
+    /// The camera disconnected while the operation was in progress.
+    disconnected,
+    /// The camera or session is busy.
+    busy,
+    /// The caller supplied an invalid argument.
+    invalid-argument,
+    /// The requested operation is unsupported by this backend.
+    not-supported,
+    /// The transport or device reported a capture fault.
+    transport-fault,
+    /// Any other implementation-defined error with detail text.
+    other(string),
+  }
+
+  /// Encoded frame payload format.
+  @since(version = 0.1.0)
+  enum encoded-format {
+    /// Motion JPEG payload bytes.
+    mjpeg,
+  }
+
+  /// One discoverable camera stream.
+  @since(version = 0.1.0)
+  record camera-info {
+    /// Opaque stable camera identifier.
+    id: string,
+    /// Human-readable label.
+    label: string,
+    /// USB vendor ID.
+    vendor-id: u16,
+    /// USB product ID.
+    product-id: u16,
+    /// USB bus number.
+    bus: u8,
+    /// USB device address.
+    address: u8,
+  }
+
+  /// One selectable capture mode.
+  @since(version = 0.1.0)
+  record capture-mode {
+    /// Encoded payload format.
+    format: encoded-format,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Frames-per-second numerator.
+    fps-num: u32,
+    /// Frames-per-second denominator.
+    fps-den: u32,
+  }
+
+  /// One captured encoded frame.
+  @since(version = 0.1.0)
+  record encoded-frame {
+    /// Encoded frame payload bytes.
+    bytes: list<u8>,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Capture timestamp in Unix nanoseconds.
+    timestamp-ns: u64,
+    /// Monotonic per-session frame sequence number.
+    sequence: u64,
+    /// Encoded payload format.
+    format: encoded-format,
+  }
+}
+
+/// Provider entry points for generic camera capture.
+@since(version = 0.1.0)
+interface provider {
+  @since(version = 0.1.0)
+  use types.{camera-error, camera-info, capture-mode, encoded-frame};
+
+  /// Open capture session for one camera and mode.
+  @since(version = 0.1.0)
+  resource session {
+    /// Return the negotiated capture mode.
+    @since(version = 0.1.0)
+    current-mode: func() -> capture-mode;
+    /// Capture the next complete encoded frame.
+    @since(version = 0.1.0)
+    next-frame: func(timeout-ms: u32) -> result<encoded-frame, camera-error>;
+    /// Close the session and release underlying resources.
+    @since(version = 0.1.0)
+    close: func();
+  }
+
+  /// List discoverable cameras.
+  @since(version = 0.1.0)
+  list-cameras: func() -> result<list<camera-info>, camera-error>;
+
+  /// List supported capture modes for one camera.
+  @since(version = 0.1.0)
+  list-modes: func(camera-id: string) -> result<list<capture-mode>, camera-error>;
+
+  /// Open a capture session for one camera.
+  @since(version = 0.1.0)
+  open-session: func(camera-id: string, mode: capture-mode) -> result<session, camera-error>;
+}
+
+/// Component world for the Wasm camera plugin.
+@since(version = 0.1.0)
+world camera-plugin {
+  import imago:usb/types@0.3.0;
+  import imago:usb/usb-interface@0.3.0;
+  import imago:usb/device@0.3.0;
+  import imago:usb/provider@0.3.0;
+
+  export types;
+  export provider;
+}
