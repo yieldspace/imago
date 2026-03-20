@@ -1003,9 +1003,11 @@ fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bo
         | (types::Type::Float64, types::Type::Float64)
         | (types::Type::Char, types::Type::Char)
         | (types::Type::String, types::Type::String)
-        | (types::Type::Own(_), types::Type::Own(_))
-        | (types::Type::Borrow(_), types::Type::Borrow(_))
         | (types::Type::ErrorContext, types::Type::ErrorContext) => true,
+        (types::Type::Own(import_resource), types::Type::Own(callee_resource))
+        | (types::Type::Borrow(import_resource), types::Type::Borrow(callee_resource)) => {
+            import_resource == callee_resource
+        }
         (types::Type::List(import_list), types::Type::List(callee_list)) => {
             component_types_match(&import_list.ty(), &callee_list.ty())
         }
@@ -1609,6 +1611,27 @@ mod tests {
         fn link_call_count(&self) -> usize {
             self.link_calls.load(Ordering::Relaxed)
         }
+    }
+
+    #[test]
+    fn component_types_match_rejects_distinct_own_resource_types() {
+        let import_ty = types::Type::Own(wasmtime::component::ResourceType::host_dynamic(1));
+        let callee_ty = types::Type::Own(wasmtime::component::ResourceType::host_dynamic(2));
+        assert!(
+            !component_types_match(&import_ty, &callee_ty),
+            "distinct own resource identities must not compare equal"
+        );
+    }
+
+    #[test]
+    fn component_types_match_accepts_matching_borrow_resource_types() {
+        let resource_ty = wasmtime::component::ResourceType::host_dynamic(7);
+        let import_ty = types::Type::Borrow(resource_ty);
+        let callee_ty = types::Type::Borrow(resource_ty);
+        assert!(
+            component_types_match(&import_ty, &callee_ty),
+            "identical borrow resource identities should compare equal"
+        );
     }
 
     #[derive(Clone)]

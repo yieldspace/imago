@@ -186,7 +186,13 @@ mod component {
                     return Err(types::CameraError::Timeout);
                 }
                 let remaining_ms = remaining_timeout_ms(deadline, now);
-                let packet = self.read_packet(remaining_ms)?;
+                let packet = match self.read_packet(remaining_ms) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        self.assembler.borrow_mut().reset();
+                        return Err(error);
+                    }
+                };
                 let maybe_frame = {
                     let mut assembler = self.assembler.borrow_mut();
                     match assembler.push_packet(&packet) {
