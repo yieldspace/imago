@@ -1,5 +1,22 @@
 pub mod uvc;
 
+#[cfg(any(target_arch = "wasm32", test))]
+use uvc::TransferKind;
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn packet_bytes_for_transfer(
+    transfer_kind: TransferKind,
+    negotiated_payload_bytes: u32,
+    endpoint_packet_bytes: u32,
+) -> u32 {
+    match transfer_kind {
+        // Bulk reads may contain multiple USB packets that together form one UVC payload.
+        TransferKind::Bulk => negotiated_payload_bytes.max(endpoint_packet_bytes),
+        TransferKind::Isochronous => negotiated_payload_bytes,
+    }
+    .max(1)
+}
+
 #[cfg(target_arch = "wasm32")]
 mod component {
     use std::cell::{Cell, RefCell};
@@ -7,6 +24,7 @@ mod component {
 
     use self::exports::imago::camera::provider::Session;
     use self::exports::imago::camera::types;
+    use super::packet_bytes_for_transfer;
     use super::uvc::{
         CameraSelector, MjpegFrameAssembler, ParseError, ParsedCamera, ParsedMode, ProbeCommitData,
         TransferKind, build_probe_control, get_probe_control, is_jpeg, parse_probe_control,
@@ -115,11 +133,11 @@ mod component {
                 .set_alternate_setting(alt_setting.alt_setting)
                 .map_err(map_usb_error)?;
 
-            let packet_bytes = match alt_setting.transfer_kind {
-                TransferKind::Bulk => alt_setting.effective_packet_bytes(),
-                TransferKind::Isochronous => probe.max_payload_transfer_size,
-            }
-            .max(1);
+            let packet_bytes = packet_bytes_for_transfer(
+                alt_setting.transfer_kind,
+                probe.max_payload_transfer_size,
+                alt_setting.effective_packet_bytes(),
+            );
 
             Ok(Session::new(CameraSession {
                 device: RefCell::new(Some(device)),
@@ -336,4 +354,34 @@ mod component {
     }
 
     export!(CameraPlugin);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::packet_bytes_for_transfer;
+    use super::uvc::TransferKind;
+
+    #[test]
+    fn packet_bytes_for_bulk_uses_negotiated_payload_size() {
+        assert_eq!(
+            packet_bytes_for_transfer(TransferKind::Bulk, 3_072, 1_024),
+            3_072
+        );
+    }
+
+    #[test]
+    fn packet_bytes_for_bulk_keeps_endpoint_size_when_probe_is_smaller() {
+        assert_eq!(
+            packet_bytes_for_transfer(TransferKind::Bulk, 512, 1_024),
+            1_024
+        );
+    }
+
+    #[test]
+    fn packet_bytes_for_isochronous_uses_negotiated_payload_size() {
+        assert_eq!(
+            packet_bytes_for_transfer(TransferKind::Isochronous, 3_072, 1_024),
+            3_072
+        );
+    }
 }
