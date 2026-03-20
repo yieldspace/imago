@@ -1193,6 +1193,7 @@ fn raw_configuration_descriptor_bytes(
             timeout,
         )
         .map_err(map_rusb_error)?;
+    validate_configuration_descriptor_read_len(actual_len, total_length)?;
     bytes.truncate(actual_len);
     if bytes.len() < 9 {
         return Err(UsbError::TransferFault);
@@ -1202,6 +1203,16 @@ fn raw_configuration_descriptor_bytes(
 
 fn descriptor_read_timeout(limits: &UsbLimitsConfig) -> Duration {
     Duration::from_millis(u64::from(limits.max_timeout_ms))
+}
+
+fn validate_configuration_descriptor_read_len(
+    actual_len: usize,
+    expected_len: usize,
+) -> Result<(), UsbError> {
+    if actual_len != expected_len {
+        return Err(UsbError::TransferFault);
+    }
+    Ok(())
 }
 
 fn map_device_descriptor(descriptor: &rusb::DeviceDescriptor) -> DeviceDescriptorRecord {
@@ -3158,6 +3169,12 @@ mod tests {
             descriptor_read_timeout(&limits),
             Duration::from_millis(5_000)
         );
+    }
+
+    #[test]
+    fn validate_configuration_descriptor_read_len_requires_full_body() {
+        assert!(validate_configuration_descriptor_read_len(64, 64).is_ok());
+        assert!(validate_configuration_descriptor_read_len(63, 64).is_err());
     }
 
     #[test]

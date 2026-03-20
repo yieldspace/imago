@@ -1,7 +1,7 @@
 pub mod uvc;
 
 #[cfg(any(target_arch = "wasm32", test))]
-use uvc::TransferKind;
+use uvc::{ProbeCommitData, TransferKind};
 
 #[cfg(any(target_arch = "wasm32", test))]
 const MAX_NEGOTIATED_FRAME_BYTES: u32 = 8 * 1024 * 1024;
@@ -12,6 +12,13 @@ enum FrameLimitError {
     DescriptorZero,
     NegotiatedZero,
     NegotiatedExceedsLimit,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeCommitError {
+    ZeroFrameSize,
+    ZeroPayloadSize,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -47,6 +54,17 @@ fn negotiated_frame_limit_bytes(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn validate_probe_commit_data(probe: ProbeCommitData) -> Result<ProbeCommitData, ProbeCommitError> {
+    if probe.max_video_frame_size == 0 {
+        return Err(ProbeCommitError::ZeroFrameSize);
+    }
+    if probe.max_payload_transfer_size == 0 {
+        return Err(ProbeCommitError::ZeroPayloadSize);
+    }
+    Ok(probe)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn remaining_timeout_ms(deadline: std::time::Instant, now: std::time::Instant) -> u32 {
     deadline
         .saturating_duration_since(now)
@@ -65,10 +83,11 @@ mod component {
     use super::packet_bytes_for_transfer;
     use super::remaining_timeout_ms;
     use super::uvc::{
-        CameraSelector, MjpegFrameAssembler, ParseError, ParsedCamera, ParsedMode, ProbeCommitData,
-        TransferKind, build_probe_control, get_probe_control, is_jpeg, parse_probe_control,
-        parse_uvc_cameras, probe_control_len, set_commit_control, set_probe_control,
+        CameraSelector, MjpegFrameAssembler, ParseError, ParsedCamera, ParsedMode, TransferKind,
+        build_probe_control, get_probe_control, is_jpeg, parse_probe_control, parse_uvc_cameras,
+        probe_control_len, set_commit_control, set_probe_control,
     };
+    use super::validate_probe_commit_data;
 
     wit_bindgen::generate!({
         path: "wit",
@@ -347,13 +366,8 @@ mod component {
                 1_000,
             )
             .map_err(map_usb_error)?;
-        let ProbeCommitData {
-            max_video_frame_size,
-            ..
-        } = parse_probe_control(&probe).map_err(map_parse_error)?;
-        if max_video_frame_size == 0 {
-            return Err(types::CameraError::TransportFault);
-        }
+        validate_probe_commit_data(parse_probe_control(&probe).map_err(map_parse_error)?)
+            .map_err(|_| types::CameraError::TransportFault)?;
         let (request, value, index) = set_commit_control(interface_number);
         interface
             .control_out(
@@ -411,10 +425,11 @@ mod component {
 
 #[cfg(test)]
 mod tests {
-    use super::uvc::TransferKind;
+    use super::uvc::{ProbeCommitData, TransferKind};
     use super::{
-        FrameLimitError, MAX_NEGOTIATED_FRAME_BYTES, negotiated_frame_limit_bytes,
-        packet_bytes_for_transfer, remaining_timeout_ms,
+        FrameLimitError, MAX_NEGOTIATED_FRAME_BYTES, ProbeCommitError,
+        negotiated_frame_limit_bytes, packet_bytes_for_transfer, remaining_timeout_ms,
+        validate_probe_commit_data,
     };
     use std::time::{Duration, Instant};
 
@@ -493,6 +508,42 @@ mod tests {
         assert_eq!(
             negotiated_frame_limit_bytes(1, 0),
             Err(FrameLimitError::NegotiatedZero)
+        );
+    }
+
+    #[test]
+    fn validate_probe_commit_data_accepts_non_zero_sizes() {
+        assert_eq!(
+            validate_probe_commit_data(ProbeCommitData {
+                max_video_frame_size: 614_400,
+                max_payload_transfer_size: 3_072,
+            }),
+            Ok(ProbeCommitData {
+                max_video_frame_size: 614_400,
+                max_payload_transfer_size: 3_072,
+            })
+        );
+    }
+
+    #[test]
+    fn validate_probe_commit_data_rejects_zero_frame_size() {
+        assert_eq!(
+            validate_probe_commit_data(ProbeCommitData {
+                max_video_frame_size: 0,
+                max_payload_transfer_size: 3_072,
+            }),
+            Err(ProbeCommitError::ZeroFrameSize)
+        );
+    }
+
+    #[test]
+    fn validate_probe_commit_data_rejects_zero_payload_size() {
+        assert_eq!(
+            validate_probe_commit_data(ProbeCommitData {
+                max_video_frame_size: 614_400,
+                max_payload_transfer_size: 0,
+            }),
+            Err(ProbeCommitError::ZeroPayloadSize)
         );
     }
 }
