@@ -17,14 +17,23 @@ fn packet_bytes_for_transfer(
     .max(1)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn remaining_timeout_ms(deadline: std::time::Instant, now: std::time::Instant) -> u32 {
+    deadline
+        .saturating_duration_since(now)
+        .as_millis()
+        .clamp(1, u128::from(u32::MAX)) as u32
+}
+
 #[cfg(target_arch = "wasm32")]
 mod component {
     use std::cell::{Cell, RefCell};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use self::exports::imago::camera::provider::Session;
     use self::exports::imago::camera::types;
     use super::packet_bytes_for_transfer;
+    use super::remaining_timeout_ms;
     use super::uvc::{
         CameraSelector, MjpegFrameAssembler, ParseError, ParsedCamera, ParsedMode, ProbeCommitData,
         TransferKind, build_probe_control, get_probe_control, is_jpeg, parse_probe_control,
@@ -166,21 +175,17 @@ mod component {
                     "camera session is closed".to_string(),
                 ));
             }
-            let deadline = SystemTime::now()
+            let deadline = Instant::now()
                 .checked_add(Duration::from_millis(u64::from(timeout_ms)))
                 .ok_or_else(|| types::CameraError::InvalidArgument)?;
 
             loop {
-                let now = SystemTime::now();
+                let now = Instant::now();
                 if now >= deadline {
                     self.assembler.borrow_mut().reset();
                     return Err(types::CameraError::Timeout);
                 }
-                let remaining_ms = deadline
-                    .duration_since(now)
-                    .unwrap_or_else(|_| Duration::from_millis(0))
-                    .as_millis()
-                    .clamp(1, u128::from(u32::MAX)) as u32;
+                let remaining_ms = remaining_timeout_ms(deadline, now);
                 let packet = self.read_packet(remaining_ms)?;
                 let maybe_frame = {
                     let mut assembler = self.assembler.borrow_mut();
@@ -358,8 +363,9 @@ mod component {
 
 #[cfg(test)]
 mod tests {
-    use super::packet_bytes_for_transfer;
     use super::uvc::TransferKind;
+    use super::{packet_bytes_for_transfer, remaining_timeout_ms};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn packet_bytes_for_bulk_uses_negotiated_payload_size() {
@@ -383,5 +389,19 @@ mod tests {
             packet_bytes_for_transfer(TransferKind::Isochronous, 3_072, 1_024),
             3_072
         );
+    }
+
+    #[test]
+    fn remaining_timeout_ms_uses_monotonic_duration() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(250);
+        assert_eq!(remaining_timeout_ms(deadline, now), 250);
+    }
+
+    #[test]
+    fn remaining_timeout_ms_clamps_elapsed_deadlines_to_one() {
+        let now = Instant::now();
+        let deadline = now - Duration::from_millis(1);
+        assert_eq!(remaining_timeout_ms(deadline, now), 1);
     }
 }
