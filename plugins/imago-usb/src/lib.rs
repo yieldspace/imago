@@ -1139,6 +1139,7 @@ fn map_configuration_descriptor(
 fn raw_configuration_descriptor_bytes(
     handle: &rusb::DeviceHandle<rusb::Context>,
     configuration_value: u8,
+    limits: &UsbLimitsConfig,
 ) -> Result<Vec<u8>, UsbError> {
     use rusb::ffi::constants::{LIBUSB_DT_CONFIG, LIBUSB_REQUEST_GET_DESCRIPTOR};
 
@@ -1152,7 +1153,7 @@ fn raw_configuration_descriptor_bytes(
                 .unwrap_or(false)
         })
         .ok_or(UsbError::InvalidArgument)?;
-    let timeout = Duration::from_millis(DEFAULT_MAX_TIMEOUT_MS.into());
+    let timeout = descriptor_read_timeout(limits);
 
     let mut header = [0u8; 9];
     let header_len = handle
@@ -1197,6 +1198,10 @@ fn raw_configuration_descriptor_bytes(
         return Err(UsbError::TransferFault);
     }
     Ok(bytes)
+}
+
+fn descriptor_read_timeout(limits: &UsbLimitsConfig) -> Duration {
+    Duration::from_millis(u64::from(limits.max_timeout_ms))
 }
 
 fn map_device_descriptor(descriptor: &rusb::DeviceDescriptor) -> DeviceDescriptorRecord {
@@ -1907,7 +1912,8 @@ fn run_device_thread(
                 configuration,
                 reply,
             } => {
-                let result = raw_configuration_descriptor_bytes(&state.handle, configuration);
+                let result =
+                    raw_configuration_descriptor_bytes(&state.handle, configuration, &state.limits);
                 let _ = reply.send(result);
             }
             DeviceCommand::Reset { reply } => {
@@ -3140,6 +3146,18 @@ mod tests {
         assert!(validate_timeout(1, &limits).is_ok());
         assert!(validate_timeout(0, &limits).is_err());
         assert!(validate_timeout(limits.max_timeout_ms + 1, &limits).is_err());
+    }
+
+    #[test]
+    fn descriptor_read_timeout_uses_configured_limit() {
+        let limits = UsbLimitsConfig {
+            max_timeout_ms: 5_000,
+            ..UsbLimitsConfig::default()
+        };
+        assert_eq!(
+            descriptor_read_timeout(&limits),
+            Duration::from_millis(5_000)
+        );
     }
 
     #[test]

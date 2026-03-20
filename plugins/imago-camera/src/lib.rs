@@ -98,28 +98,11 @@ mod component {
                 imago::usb::provider::list_openable_devices().map_err(map_usb_error)?;
             let mut cameras = Vec::new();
             for openable in openable_devices {
-                let device = match imago::usb::provider::open_device(&openable.path) {
-                    Ok(device) => device,
-                    Err(error) => return Err(map_usb_error(error)),
+                let device_cameras = match list_device_cameras(&openable) {
+                    Ok(device_cameras) => device_cameras,
+                    Err(_) => continue,
                 };
-                let configs = device.configurations().map_err(map_usb_error)?;
-                for config in configs {
-                    let raw = device
-                        .configuration_descriptor_bytes(config.number)
-                        .map_err(map_usb_error)?;
-                    let parsed = parse_uvc_cameras(config.number, &raw).map_err(map_parse_error)?;
-                    cameras.extend(parsed.into_iter().map(|camera| types::CameraInfo {
-                        id: camera.camera_id(&openable.path),
-                        label: format!(
-                            "{:04x}:{:04x} {}",
-                            openable.vendor_id, openable.product_id, openable.path
-                        ),
-                        vendor_id: openable.vendor_id,
-                        product_id: openable.product_id,
-                        bus: openable.bus,
-                        address: openable.address,
-                    }));
-                }
+                cameras.extend(device_cameras);
             }
             Ok(cameras)
         }
@@ -295,6 +278,32 @@ mod component {
             .find(|camera| camera.video_streaming_interface == selector.video_streaming_interface)
             .ok_or(types::CameraError::NotFound)?;
         Ok((device, camera))
+    }
+
+    fn list_device_cameras(
+        openable: &imago::usb::types::OpenableDevice,
+    ) -> Result<Vec<types::CameraInfo>, types::CameraError> {
+        let device = imago::usb::provider::open_device(&openable.path).map_err(map_usb_error)?;
+        let configs = device.configurations().map_err(map_usb_error)?;
+        let mut cameras = Vec::new();
+        for config in configs {
+            let raw = device
+                .configuration_descriptor_bytes(config.number)
+                .map_err(map_usb_error)?;
+            let parsed = parse_uvc_cameras(config.number, &raw).map_err(map_parse_error)?;
+            cameras.extend(parsed.into_iter().map(|camera| types::CameraInfo {
+                id: camera.camera_id(&openable.path),
+                label: format!(
+                    "{:04x}:{:04x} {}",
+                    openable.vendor_id, openable.product_id, openable.path
+                ),
+                vendor_id: openable.vendor_id,
+                product_id: openable.product_id,
+                bus: openable.bus,
+                address: openable.address,
+            }));
+        }
+        Ok(cameras)
     }
 
     fn negotiate_probe(
