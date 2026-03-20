@@ -4,6 +4,17 @@ pub mod uvc;
 use uvc::TransferKind;
 
 #[cfg(any(target_arch = "wasm32", test))]
+const MAX_NEGOTIATED_FRAME_BYTES: u32 = 8 * 1024 * 1024;
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameLimitError {
+    DescriptorZero,
+    NegotiatedZero,
+    NegotiatedExceedsLimit,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn packet_bytes_for_transfer(
     transfer_kind: TransferKind,
     negotiated_payload_bytes: u32,
@@ -15,6 +26,24 @@ fn packet_bytes_for_transfer(
         TransferKind::Isochronous => negotiated_payload_bytes,
     }
     .max(1)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn negotiated_frame_limit_bytes(
+    descriptor_max_video_frame_size: u32,
+    negotiated_max_video_frame_size: u32,
+) -> Result<usize, FrameLimitError> {
+    if descriptor_max_video_frame_size == 0 {
+        return Err(FrameLimitError::DescriptorZero);
+    }
+    if negotiated_max_video_frame_size == 0 {
+        return Err(FrameLimitError::NegotiatedZero);
+    }
+    let max_frame_bytes = descriptor_max_video_frame_size.min(MAX_NEGOTIATED_FRAME_BYTES);
+    if negotiated_max_video_frame_size > max_frame_bytes {
+        return Err(FrameLimitError::NegotiatedExceedsLimit);
+    }
+    Ok(negotiated_max_video_frame_size as usize)
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -32,6 +61,7 @@ mod component {
 
     use self::exports::imago::camera::provider::Session;
     use self::exports::imago::camera::types;
+    use super::negotiated_frame_limit_bytes;
     use super::packet_bytes_for_transfer;
     use super::remaining_timeout_ms;
     use super::uvc::{
@@ -147,6 +177,11 @@ mod component {
                 probe.max_payload_transfer_size,
                 alt_setting.effective_packet_bytes(),
             );
+            let frame_limit_bytes = negotiated_frame_limit_bytes(
+                requested_mode.max_video_frame_size,
+                probe.max_video_frame_size,
+            )
+            .map_err(|_| types::CameraError::TransportFault)?;
 
             Ok(Session::new(CameraSession {
                 device: RefCell::new(Some(device)),
@@ -156,9 +191,7 @@ mod component {
                 packet_bytes,
                 transfer_kind: alt_setting.transfer_kind,
                 sequence: Cell::new(0),
-                assembler: RefCell::new(MjpegFrameAssembler::new(
-                    probe.max_video_frame_size as usize,
-                )),
+                assembler: RefCell::new(MjpegFrameAssembler::new(frame_limit_bytes)),
                 closed: Cell::new(false),
             }))
         }
@@ -370,7 +403,10 @@ mod component {
 #[cfg(test)]
 mod tests {
     use super::uvc::TransferKind;
-    use super::{packet_bytes_for_transfer, remaining_timeout_ms};
+    use super::{
+        FrameLimitError, MAX_NEGOTIATED_FRAME_BYTES, negotiated_frame_limit_bytes,
+        packet_bytes_for_transfer, remaining_timeout_ms,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -409,5 +445,45 @@ mod tests {
         let now = Instant::now();
         let deadline = now - Duration::from_millis(1);
         assert_eq!(remaining_timeout_ms(deadline, now), 1);
+    }
+
+    #[test]
+    fn negotiated_frame_limit_bytes_uses_probe_size_within_bounds() {
+        assert_eq!(negotiated_frame_limit_bytes(614_400, 512_000), Ok(512_000));
+    }
+
+    #[test]
+    fn negotiated_frame_limit_bytes_rejects_probe_larger_than_descriptor() {
+        assert_eq!(
+            negotiated_frame_limit_bytes(614_400, 700_000),
+            Err(FrameLimitError::NegotiatedExceedsLimit)
+        );
+    }
+
+    #[test]
+    fn negotiated_frame_limit_bytes_rejects_probe_larger_than_local_cap() {
+        assert_eq!(
+            negotiated_frame_limit_bytes(
+                MAX_NEGOTIATED_FRAME_BYTES.saturating_mul(2),
+                MAX_NEGOTIATED_FRAME_BYTES.saturating_add(1)
+            ),
+            Err(FrameLimitError::NegotiatedExceedsLimit)
+        );
+    }
+
+    #[test]
+    fn negotiated_frame_limit_bytes_rejects_zero_descriptor_size() {
+        assert_eq!(
+            negotiated_frame_limit_bytes(0, 1),
+            Err(FrameLimitError::DescriptorZero)
+        );
+    }
+
+    #[test]
+    fn negotiated_frame_limit_bytes_rejects_zero_probe_size() {
+        assert_eq!(
+            negotiated_frame_limit_bytes(1, 0),
+            Err(FrameLimitError::NegotiatedZero)
+        );
     }
 }
