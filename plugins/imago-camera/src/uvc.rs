@@ -135,7 +135,7 @@ impl ParsedCamera {
             .filter(|alt| alt.transfer_kind == TransferKind::Bulk)
             .collect::<Vec<_>>();
         bulk.sort_by_key(|alt| alt.effective_packet_bytes());
-        bulk.into_iter().last().or_else(|| iso.last().copied())
+        bulk.into_iter().last()
     }
 }
 
@@ -773,6 +773,24 @@ mod tests {
             .expect("bulk fallback should be selected");
         assert_eq!(selected.transfer_kind, TransferKind::Bulk);
         assert_eq!(selected.endpoint_address, 0x82);
+    }
+
+    #[test]
+    fn select_alt_setting_rejects_undersized_iso_without_bulk_fallback() {
+        let camera = ParsedCamera {
+            config_number: 1,
+            video_streaming_interface: 2,
+            uvc_version_bcd: 0x0110,
+            alt_settings: vec![StreamingAltSetting {
+                alt_setting: 1,
+                endpoint_address: 0x81,
+                transfer_kind: TransferKind::Isochronous,
+                max_packet_size: 256,
+            }],
+            modes: Vec::new(),
+        };
+
+        assert!(camera.select_alt_setting(1_024).is_none());
     }
 
     #[test]
