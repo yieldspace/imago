@@ -1652,6 +1652,15 @@ fn stop_bulk_reader_runtime(runtime: &mut BulkReaderRuntime) {
     }
 }
 
+fn stop_bulk_reader_for_key(
+    bulk_readers: &mut BTreeMap<(u8, u8), BulkReaderRuntime>,
+    key: (u8, u8),
+) {
+    if let Some(mut runtime) = bulk_readers.remove(&key) {
+        stop_bulk_reader_runtime(&mut runtime);
+    }
+}
+
 fn stop_bulk_readers_for_interface(state: &mut DeviceThreadState, interface: u8) {
     let keys: Vec<_> = state
         .bulk_readers
@@ -1660,18 +1669,14 @@ fn stop_bulk_readers_for_interface(state: &mut DeviceThreadState, interface: u8)
         .copied()
         .collect();
     for key in keys {
-        if let Some(mut runtime) = state.bulk_readers.remove(&key) {
-            stop_bulk_reader_runtime(&mut runtime);
-        }
+        stop_bulk_reader_for_key(&mut state.bulk_readers, key);
     }
 }
 
 fn stop_all_bulk_readers(state: &mut DeviceThreadState) {
     let keys: Vec<_> = state.bulk_readers.keys().copied().collect();
     for key in keys {
-        if let Some(mut runtime) = state.bulk_readers.remove(&key) {
-            stop_bulk_reader_runtime(&mut runtime);
-        }
+        stop_bulk_reader_for_key(&mut state.bulk_readers, key);
     }
 }
 
@@ -2077,6 +2082,7 @@ fn run_device_thread(
                 let result = (|| {
                     ensure_interface_claimed(&state, interface)?;
                     validate_endpoint_in_address(endpoint)?;
+                    stop_bulk_reader_for_key(&mut state.bulk_readers, (interface, endpoint));
                     let timeout = validate_timeout(timeout_ms, &state.limits)?;
                     let request_len = validate_transfer_len(length, &state.limits)?;
                     let mut data = vec![0u8; request_len];
@@ -3425,6 +3431,23 @@ mod tests {
         assert_eq!(started, 1);
         let runtime = bulk_readers.get(&key).expect("runtime should exist");
         assert!(Arc::ptr_eq(&runtime.shared, &replacement_shared));
+    }
+
+    #[test]
+    fn stop_bulk_reader_for_key_removes_matching_runtime() {
+        let key = (1u8, 0x81u8);
+        let mut bulk_readers = BTreeMap::new();
+        bulk_readers.insert(
+            key,
+            BulkReaderRuntime {
+                shared: Arc::new((Mutex::new(BulkReaderSharedState::default()), Condvar::new())),
+                thread_handle: None,
+            },
+        );
+
+        stop_bulk_reader_for_key(&mut bulk_readers, key);
+
+        assert!(!bulk_readers.contains_key(&key));
     }
 
     #[test]
