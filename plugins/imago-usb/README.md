@@ -1,6 +1,6 @@
 # imago-usb native plugin
 
-`imago:usb@0.2.0` provides native USB access APIs backed by `rusb` (libusb).
+`imago:usb@0.3.0` provides native USB access APIs backed by `rusb` (libusb).
 
 ## Features
 
@@ -34,7 +34,7 @@
 ```toml
 [[dependencies]]
 name = "imago:usb"
-version = "0.2.0"
+version = "0.3.0"
 kind = "native"
 wit = "file://../../plugins/imago-usb/wit"
 
@@ -62,9 +62,9 @@ If omitted, `bulk_ring_chunk_bytes` defaults to `min(16384, max_transfer_bytes)`
 package example:usb-client;
 
 world plugin-imports {
-    import imago:usb/provider@0.2.0;
-    import imago:usb/device@0.2.0;
-    import imago:usb/usb-interface@0.2.0;
+    import imago:usb/provider@0.3.0;
+    import imago:usb/device@0.3.0;
+    import imago:usb/usb-interface@0.3.0;
 }
 ```
 
@@ -80,6 +80,7 @@ let limits = imago::usb::provider::get_limits();
 if let Some(dev) = openable.first() {
     let device = imago::usb::provider::open_device(&dev.path)?;
     let iface = device.claim_interface(0)?;
+    let _ = iface.bulk_in(0x81, 512, 1000)?;
     let _ = iface.bulk_out(0x01, &[0x10, 0x20], 1000)?;
 }
 ```
@@ -90,6 +91,7 @@ if let Some(dev) = openable.first() {
 let device = imago::usb::provider::open_device("/dev/bus/usb/001/001")?;
 let desc = device.device_descriptor()?;
 let configs = device.configurations()?;
+let raw = device.configuration_descriptor_bytes(1)?;
 let active = device.active_configuration()?;
 
 if active != 1 {

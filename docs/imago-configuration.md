@@ -422,6 +422,7 @@ paths = ["/dev/bus/usb/001/001", "/dev/bus/usb/001/002"]
 ```
 
 - Validation error notes: missing field, wrong type, non-absolute paths, or normalized duplicates fail runtime startup validation.
+- Usage note: when a service uses `imago:camera`, this allowlist must include the actual UVC device path that the camera plugin should open.
 
 ### The `usb.max_transfer_bytes` field
 
@@ -659,6 +660,40 @@ This section defines plugin dependencies and their resolution sources.
 - Source keys: exactly one of `wit`, `oci`, or `path`.
 - `registry` is allowed only with `component.wit`.
 - `sha256` is optional (64 hex chars) and verified when provided.
+
+### Wasm camera plugin example
+
+The `imago:camera@0.1.0` plugin is a Wasm dependency that imports `imago:usb@0.3.0` as a native dependency. The app manifest needs both entries, plus a component source path for the camera plugin artifact:
+
+```toml
+[[dependencies]]
+version = "0.3.0"
+kind = "native"
+path = "../../plugins/imago-usb/wit"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "wasm"
+path = "../../plugins/imago-camera/wit"
+requires = ["imago:usb"]
+
+[dependencies.component]
+path = "../../target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
+
+[dependencies.capabilities.deps]
+"imago:usb" = ["*"]
+```
+
+The service itself still needs `[capabilities.deps] "imago:camera" = ["*"]` to call the camera API. A typical local flow is:
+
+```bash
+cd examples/local-imagod-plugin-camera
+cargo build --manifest-path ../../Cargo.toml -p imago-plugin-imago-camera --target wasm32-wasip2 --release
+cargo run --manifest-path ../../Cargo.toml -p imago-cli -- deps sync
+cargo run --manifest-path ../../Cargo.toml -p imagod -- --config "$(pwd)/imagod.toml"
+```
+
+After that, `cargo build --target wasm32-wasip2 --release` in the example directory builds the app, and `imago-cli service deploy --target default --detach` deploys it against the local `imagod` instance.
 
 ### Resolution and lock behavior
 

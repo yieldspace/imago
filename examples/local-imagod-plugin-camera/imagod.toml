@@ -1,0 +1,18 @@
+listen_addr = "127.0.0.1:4443"
+control_socket_path = "/tmp/imagod-local-plugin-camera.sock"
+storage_root = ".imagod-data"
+server_version = "imagod/local-plugin-camera-example"
+
+[tls]
+server_key = "certs/server.key"
+client_public_keys = ["c067e1cd0edd79ebd91e2bdb81c131ed601906af13c82c4e8f02ad6c4cfc5960"]
+
+[runtime]
+features = ["imago:usb"]
+chunk_size = 1048576
+max_inflight_chunks = 16
+upload_session_ttl_secs = 900
+stop_grace_timeout_secs = 30
+runner_ready_timeout_secs = 60
+runner_log_buffer_bytes = 262144
+epoch_tick_interval_ms = 50

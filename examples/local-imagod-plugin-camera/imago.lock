@@ -1,0 +1,63 @@
+version = 1
+
+[requested]
+fingerprint = "fbd43ff3625f126959985aafe2acfc28e257e18e827736c8ede1084bb36a7e49"
+
+[[requested.dependencies]]
+id = "dep:549706f97524ae8eecf4d6cbb108c842d048b972742bb772dc698d09262a44ea"
+kind = "wasm"
+version = "0.1.0"
+source_kind = "path"
+source = "../../plugins/imago-camera/wit"
+declared_requires = ["imago:usb"]
+component_source_kind = "path"
+component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
+
+[requested.dependencies.capabilities]
+privileged = false
+
+[requested.dependencies.capabilities.deps]
+"imago:usb" = ["*"]
+
+[requested.dependencies.capabilities.wasi]
+"*" = ["*"]
+
+[[requested.dependencies]]
+id = "dep:613c2069fdb93e30721186b004249d8d490ad0c2913d1251e51cb56174d6e3ec"
+kind = "native"
+version = "0.3.0"
+source_kind = "path"
+source = "../../plugins/imago-usb/wit"
+declared_requires = []
+
+[[resolved.dependencies]]
+request_id = "dep:549706f97524ae8eecf4d6cbb108c842d048b972742bb772dc698d09262a44ea"
+resolved_name = "imago:camera"
+resolved_version = "0.1.0"
+wit_path = "wit/deps/imago-camera-0.1.0"
+wit_tree_digest = "9251dda5fd5fc15936fe17c345d06abd68051588024bc7fea20c2573370540f7"
+component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
+component_sha256 = "1b6b9b8b9a0d5e492faa67ec4eb40d63e1a270fc75c6760a1ed0ec273851d38f"
+requires_request_ids = ["dep:613c2069fdb93e30721186b004249d8d490ad0c2913d1251e51cb56174d6e3ec"]
+
+[[resolved.dependencies]]
+request_id = "dep:613c2069fdb93e30721186b004249d8d490ad0c2913d1251e51cb56174d6e3ec"
+resolved_name = "imago:usb"
+resolved_version = "0.3.0"
+wit_path = "wit/deps/imago-usb-0.3.0"
+wit_tree_digest = "14f6ab09515e26d42e02237163cc5f257e192e0fb31657ab20f7649d1646728e"
+requires_request_ids = []
+
+[[resolved.packages]]
+package_ref = "imago:usb@0.3.0#"
+name = "imago:usb"
+version = "0.3.0"
+requirement = "=0.3.0"
+path = "wit/deps/imago-usb-0.3.0"
+digest = "sha256:d0421171c18a4683350f33298898485c201eaa1375bc533cd07c4e66e0b82427"
+
+[[resolved.package_edges]]
+from_kind = "dependency"
+from_ref = "dep:549706f97524ae8eecf4d6cbb108c842d048b972742bb772dc698d09262a44ea"
+to_package_ref = "imago:usb@0.3.0#"
+reason = "wit-import"

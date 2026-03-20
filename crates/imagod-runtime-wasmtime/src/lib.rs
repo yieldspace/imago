@@ -10,10 +10,12 @@ mod rpc_values;
 mod runtime_entry;
 mod wasi_nn;
 
+use std::collections::BTreeMap;
+
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{ResourceMap, RunnerAppType, WasiHttpOutboundRule};
-use wasmtime::component::ResourceTable;
+use wasmtime::component::{ResourceAny, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
     WasiHttpCtx, WasiHttpView,
@@ -88,6 +90,72 @@ impl NativePluginContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct WasmDependencyResourceKey {
+    pub(crate) dependency_name: String,
+    pub(crate) interface_name: String,
+    pub(crate) resource_name: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StoredWasmDependencyResource {
+    pub(crate) type_id: u32,
+    pub(crate) resource: ResourceAny,
+}
+
+#[derive(Debug)]
+pub(crate) struct WasmDependencyResourceState {
+    next_type_id: u32,
+    next_rep: u32,
+    types: BTreeMap<WasmDependencyResourceKey, u32>,
+    resources: BTreeMap<u32, StoredWasmDependencyResource>,
+}
+
+impl Default for WasmDependencyResourceState {
+    fn default() -> Self {
+        Self {
+            next_type_id: 1,
+            next_rep: 1,
+            types: BTreeMap::new(),
+            resources: BTreeMap::new(),
+        }
+    }
+}
+
+impl WasmDependencyResourceState {
+    fn type_id_for(&mut self, key: WasmDependencyResourceKey) -> u32 {
+        if let Some(type_id) = self.types.get(&key) {
+            return *type_id;
+        }
+
+        let type_id = self.next_type_id;
+        self.next_type_id = self
+            .next_type_id
+            .checked_add(1)
+            .expect("wasm dependency resource type ids exhausted");
+        self.types.insert(key, type_id);
+        type_id
+    }
+
+    fn insert_resource(&mut self, type_id: u32, resource: ResourceAny) -> Result<u32, ImagodError> {
+        let rep = self.next_rep;
+        self.next_rep = self.next_rep.checked_add(1).ok_or_else(|| {
+            map_runtime_error("wasm dependency resource ids exhausted".to_string())
+        })?;
+        self.resources
+            .insert(rep, StoredWasmDependencyResource { type_id, resource });
+        Ok(rep)
+    }
+
+    fn resource(&self, rep: u32) -> Option<StoredWasmDependencyResource> {
+        self.resources.get(&rep).copied()
+    }
+
+    fn remove_resource(&mut self, rep: u32) -> Option<StoredWasmDependencyResource> {
+        self.resources.remove(&rep)
+    }
+}
+
 pub fn app_type_text(app_type: RunnerAppType) -> &'static str {
     match app_type {
         RunnerAppType::Cli => "cli",
@@ -105,6 +173,7 @@ pub struct WasiState {
     pub(crate) wasi_nn: wasmtime_wasi_nn::wit::WasiNnCtx,
     pub(crate) wasi_http_outbound: Vec<WasiHttpOutboundRule>,
     pub(crate) native_plugin_context: NativePluginContext,
+    pub(crate) wasm_dependency_resources: WasmDependencyResourceState,
 }
 
 impl WasiState {
@@ -121,11 +190,42 @@ impl WasiState {
             wasi_nn: wasi_nn::new_context(),
             wasi_http_outbound,
             native_plugin_context,
+            wasm_dependency_resources: WasmDependencyResourceState::default(),
         }
     }
 
     pub fn native_plugin_context(&self) -> &NativePluginContext {
         &self.native_plugin_context
+    }
+
+    pub(crate) fn wasm_dependency_resource_type_id(
+        &mut self,
+        key: WasmDependencyResourceKey,
+    ) -> u32 {
+        self.wasm_dependency_resources.type_id_for(key)
+    }
+
+    pub(crate) fn store_wasm_dependency_resource(
+        &mut self,
+        type_id: u32,
+        resource: ResourceAny,
+    ) -> Result<u32, ImagodError> {
+        self.wasm_dependency_resources
+            .insert_resource(type_id, resource)
+    }
+
+    pub(crate) fn wasm_dependency_resource(
+        &self,
+        rep: u32,
+    ) -> Option<StoredWasmDependencyResource> {
+        self.wasm_dependency_resources.resource(rep)
+    }
+
+    pub(crate) fn remove_wasm_dependency_resource(
+        &mut self,
+        rep: u32,
+    ) -> Option<StoredWasmDependencyResource> {
+        self.wasm_dependency_resources.remove_resource(rep)
     }
 }
 

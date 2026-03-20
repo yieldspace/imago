@@ -55,16 +55,24 @@ fi
 
 checked=0
 failures=0
+skipped_wasm=0
 
 for plugin_dir in "${plugin_dirs[@]}"; do
   plugin_name="$(basename "${plugin_dir}")"
   wit_package="${plugin_dir}/wit/package.wit"
+  cargo_toml="${plugin_dir}/Cargo.toml"
 
   if [[ ! -f "${wit_package}" ]]; then
     if (($# == 1)); then
       echo "error: ${plugin_name} does not contain wit/package.wit" >&2
       exit 1
     fi
+    continue
+  fi
+
+  if [[ -f "${cargo_toml}" ]] && grep -Eq 'crate-type[[:space:]]*=[[:space:]]*\["cdylib"\]' "${cargo_toml}"; then
+    echo "info: skipping wasm plugin WIT lock verification for ${plugin_name}" >&2
+    skipped_wasm=$((skipped_wasm + 1))
     continue
   fi
 
@@ -111,6 +119,10 @@ for plugin_dir in "${plugin_dirs[@]}"; do
 done
 
 if ((checked == 0)); then
+  if ((skipped_wasm > 0 && failures == 0)); then
+    echo "wkg.lock verification skipped for ${skipped_wasm} wasm plugin(s)." >&2
+    exit 0
+  fi
   echo "error: no plugin with wit/package.wit was found" >&2
   exit 1
 fi

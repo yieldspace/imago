@@ -36,6 +36,7 @@ members = [
     "examples/local-imagod",
     "examples/local-imagod-http",
     "examples/local-imagod-wasi-nn-openvino-person-detection",
+    "examples/local-imagod-plugin-camera",
     "examples/local-imagod-plugin-native-admin",
     "examples/local-imagod-plugin-native-experimental-gpio",
     "examples/local-imagod-plugin-native-experimental-i2c",
