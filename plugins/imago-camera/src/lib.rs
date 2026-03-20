@@ -30,6 +30,13 @@ enum ControlTimeoutError {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferRequestError {
+    LimitZero,
+    RequestExceedsLimit,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn packet_bytes_for_transfer(
     transfer_kind: TransferKind,
     negotiated_payload_bytes: u32,
@@ -81,6 +88,20 @@ fn control_timeout_ms(max_timeout_ms: u32) -> Result<u32, ControlTimeoutError> {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn validate_transfer_request_bytes(
+    request_bytes: u32,
+    max_transfer_bytes: u32,
+) -> Result<u32, TransferRequestError> {
+    if max_transfer_bytes == 0 {
+        return Err(TransferRequestError::LimitZero);
+    }
+    if request_bytes > max_transfer_bytes {
+        return Err(TransferRequestError::RequestExceedsLimit);
+    }
+    Ok(request_bytes)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn remaining_timeout_ms(deadline: std::time::Instant, now: std::time::Instant) -> u32 {
     deadline
         .saturating_duration_since(now)
@@ -105,6 +126,7 @@ mod component {
         probe_control_len, set_commit_control, set_probe_control,
     };
     use super::validate_probe_commit_data;
+    use super::validate_transfer_request_bytes;
 
     wit_bindgen::generate!({
         path: "wit",
@@ -175,13 +197,14 @@ mod component {
                 .claim_interface(selector.video_streaming_interface)
                 .map_err(map_usb_error)?;
             interface.set_alternate_setting(0).map_err(map_usb_error)?;
+            let usb_limits = imago::usb::provider::get_limits();
 
             let probe_bytes = negotiate_probe(
                 &interface,
                 selector.video_streaming_interface,
                 camera.uvc_version_bcd,
                 &requested_mode,
-                control_timeout_ms(imago::usb::provider::get_limits().max_timeout_ms)
+                control_timeout_ms(usb_limits.max_timeout_ms)
                     .map_err(|_| types::CameraError::TransportFault)?,
             )?;
             let probe = parse_probe_control(&probe_bytes).map_err(map_parse_error)?;
@@ -193,11 +216,15 @@ mod component {
                 .set_alternate_setting(alt_setting.alt_setting)
                 .map_err(map_usb_error)?;
 
-            let packet_bytes = packet_bytes_for_transfer(
-                alt_setting.transfer_kind,
-                probe.max_payload_transfer_size,
-                alt_setting.effective_packet_bytes(),
-            );
+            let packet_bytes = validate_transfer_request_bytes(
+                packet_bytes_for_transfer(
+                    alt_setting.transfer_kind,
+                    probe.max_payload_transfer_size,
+                    alt_setting.effective_packet_bytes(),
+                ),
+                usb_limits.max_transfer_bytes,
+            )
+            .map_err(|_| types::CameraError::TransportFault)?;
             let frame_limit_bytes = negotiated_frame_limit_bytes(
                 requested_mode.max_video_frame_size,
                 probe.max_video_frame_size,
@@ -448,9 +475,9 @@ mod tests {
     use super::uvc::{ProbeCommitData, TransferKind};
     use super::{
         ControlTimeoutError, DEFAULT_CONTROL_TIMEOUT_MS, FrameLimitError,
-        MAX_NEGOTIATED_FRAME_BYTES, ProbeCommitError, control_timeout_ms,
+        MAX_NEGOTIATED_FRAME_BYTES, ProbeCommitError, TransferRequestError, control_timeout_ms,
         negotiated_frame_limit_bytes, packet_bytes_for_transfer, remaining_timeout_ms,
-        validate_probe_commit_data,
+        validate_probe_commit_data, validate_transfer_request_bytes,
     };
     use std::time::{Duration, Instant};
 
@@ -581,5 +608,26 @@ mod tests {
     #[test]
     fn control_timeout_ms_rejects_zero_limit() {
         assert_eq!(control_timeout_ms(0), Err(ControlTimeoutError::LimitZero));
+    }
+
+    #[test]
+    fn validate_transfer_request_bytes_accepts_request_within_limit() {
+        assert_eq!(validate_transfer_request_bytes(3_072, 4_096), Ok(3_072));
+    }
+
+    #[test]
+    fn validate_transfer_request_bytes_rejects_request_above_limit() {
+        assert_eq!(
+            validate_transfer_request_bytes(4_097, 4_096),
+            Err(TransferRequestError::RequestExceedsLimit)
+        );
+    }
+
+    #[test]
+    fn validate_transfer_request_bytes_rejects_zero_limit() {
+        assert_eq!(
+            validate_transfer_request_bytes(1, 0),
+            Err(TransferRequestError::LimitZero)
+        );
     }
 }
