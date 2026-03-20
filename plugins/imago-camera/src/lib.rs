@@ -5,6 +5,8 @@ use uvc::{ProbeCommitData, TransferKind};
 
 #[cfg(any(target_arch = "wasm32", test))]
 const MAX_NEGOTIATED_FRAME_BYTES: u32 = 8 * 1024 * 1024;
+#[cfg(any(target_arch = "wasm32", test))]
+const DEFAULT_CONTROL_TIMEOUT_MS: u32 = 1_000;
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +21,12 @@ enum FrameLimitError {
 enum ProbeCommitError {
     ZeroFrameSize,
     ZeroPayloadSize,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlTimeoutError {
+    LimitZero,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -65,6 +73,14 @@ fn validate_probe_commit_data(probe: ProbeCommitData) -> Result<ProbeCommitData,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn control_timeout_ms(max_timeout_ms: u32) -> Result<u32, ControlTimeoutError> {
+    if max_timeout_ms == 0 {
+        return Err(ControlTimeoutError::LimitZero);
+    }
+    Ok(max_timeout_ms.min(DEFAULT_CONTROL_TIMEOUT_MS))
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn remaining_timeout_ms(deadline: std::time::Instant, now: std::time::Instant) -> u32 {
     deadline
         .saturating_duration_since(now)
@@ -79,6 +95,7 @@ mod component {
 
     use self::exports::imago::camera::provider::Session;
     use self::exports::imago::camera::types;
+    use super::control_timeout_ms;
     use super::negotiated_frame_limit_bytes;
     use super::packet_bytes_for_transfer;
     use super::remaining_timeout_ms;
@@ -164,6 +181,8 @@ mod component {
                 selector.video_streaming_interface,
                 camera.uvc_version_bcd,
                 &requested_mode,
+                control_timeout_ms(imago::usb::provider::get_limits().max_timeout_ms)
+                    .map_err(|_| types::CameraError::TransportFault)?,
             )?;
             let probe = parse_probe_control(&probe_bytes).map_err(map_parse_error)?;
             let alt_setting = camera
@@ -330,6 +349,7 @@ mod component {
         interface_number: u8,
         uvc_version_bcd: u16,
         mode: &ParsedMode,
+        timeout_ms: u32,
     ) -> Result<Vec<u8>, types::CameraError> {
         let set_probe = build_probe_control(
             uvc_version_bcd,
@@ -348,7 +368,7 @@ mod component {
                     index,
                 },
                 &set_probe,
-                1_000,
+                timeout_ms,
             )
             .map_err(map_usb_error)?;
 
@@ -363,7 +383,7 @@ mod component {
                     index,
                 },
                 probe_control_len(uvc_version_bcd) as u32,
-                1_000,
+                timeout_ms,
             )
             .map_err(map_usb_error)?;
         validate_probe_commit_data(parse_probe_control(&probe).map_err(map_parse_error)?)
@@ -379,7 +399,7 @@ mod component {
                     index,
                 },
                 &probe,
-                1_000,
+                timeout_ms,
             )
             .map_err(map_usb_error)?;
         Ok(probe)
@@ -427,7 +447,8 @@ mod component {
 mod tests {
     use super::uvc::{ProbeCommitData, TransferKind};
     use super::{
-        FrameLimitError, MAX_NEGOTIATED_FRAME_BYTES, ProbeCommitError,
+        ControlTimeoutError, DEFAULT_CONTROL_TIMEOUT_MS, FrameLimitError,
+        MAX_NEGOTIATED_FRAME_BYTES, ProbeCommitError, control_timeout_ms,
         negotiated_frame_limit_bytes, packet_bytes_for_transfer, remaining_timeout_ms,
         validate_probe_commit_data,
     };
@@ -545,5 +566,20 @@ mod tests {
             }),
             Err(ProbeCommitError::ZeroPayloadSize)
         );
+    }
+
+    #[test]
+    fn control_timeout_ms_clamps_to_default_timeout() {
+        assert_eq!(control_timeout_ms(5_000), Ok(DEFAULT_CONTROL_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn control_timeout_ms_uses_stricter_usb_limit() {
+        assert_eq!(control_timeout_ms(250), Ok(250));
+    }
+
+    #[test]
+    fn control_timeout_ms_rejects_zero_limit() {
+        assert_eq!(control_timeout_ms(0), Err(ControlTimeoutError::LimitZero));
     }
 }

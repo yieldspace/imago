@@ -204,12 +204,12 @@ pub fn parse_uvc_cameras(
     struct StreamBuilder {
         alt_settings: Vec<StreamingAltSetting>,
         modes: Vec<ParsedMode>,
+        uvc_version_bcd: Option<u16>,
     }
 
     let mut streams = BTreeMap::<u8, StreamBuilder>::new();
     let mut current_context = None::<InterfaceContext>;
     let mut current_mjpeg_format = BTreeMap::<u8, u8>::new();
-    let mut uvc_version_bcd = 0x0110;
 
     let mut offset = 0usize;
     while offset + 2 <= bytes.len() {
@@ -273,8 +273,20 @@ pub fn parse_uvc_cameras(
                 }
                 match context.subclass_code {
                     USB_SUBCLASS_VIDEOCONTROL => {
-                        if descriptor[2] == VC_HEADER && len >= 5 {
-                            uvc_version_bcd = le_u16(&descriptor[3..5]);
+                        if descriptor[2] == VC_HEADER {
+                            if len < 12 {
+                                return Err(ParseError::new("short VC header descriptor"));
+                            }
+                            let uvc_version_bcd = le_u16(&descriptor[3..5]);
+                            let stream_count = usize::from(descriptor[11]);
+                            let needed_len = 12usize + stream_count;
+                            if len < needed_len {
+                                return Err(ParseError::new("VC header descriptor is truncated"));
+                            }
+                            for interface_number in descriptor[12..needed_len].iter().copied() {
+                                streams.entry(interface_number).or_default().uvc_version_bcd =
+                                    Some(uvc_version_bcd);
+                            }
                         }
                     }
                     USB_SUBCLASS_VIDEOSTREAMING => {
@@ -332,7 +344,7 @@ pub fn parse_uvc_cameras(
             Some(ParsedCamera {
                 config_number: configuration_number,
                 video_streaming_interface,
-                uvc_version_bcd,
+                uvc_version_bcd: stream.uvc_version_bcd.unwrap_or(0x0110),
                 alt_settings: stream.alt_settings,
                 modes: stream.modes,
             })
@@ -612,6 +624,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_uvc_cameras_tracks_uvc_version_per_stream() {
+        let cameras = parse_uvc_cameras(1, &sample_multi_stream_uvc_configuration())
+            .expect("multi-stream configuration should parse");
+        assert_eq!(cameras.len(), 2);
+        assert_eq!(cameras[0].video_streaming_interface, 1);
+        assert_eq!(cameras[0].uvc_version_bcd, 0x0110);
+        assert_eq!(cameras[1].video_streaming_interface, 3);
+        assert_eq!(cameras[1].uvc_version_bcd, 0x0150);
+    }
+
+    #[test]
     fn camera_id_round_trip() {
         let selector = CameraSelector::parse("usb:/dev/bus/usb/001/002#cfg=1&vs=3")
             .expect("camera id should parse");
@@ -781,7 +804,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[9, 0x02, 96, 0x00, 2, 1, 0, 0x80, 50]);
         bytes.extend_from_slice(&[9, 0x04, 0, 0, 0, 0x0e, 0x01, 0x00, 0]);
-        bytes.extend_from_slice(&[12, 0x24, 0x01, 0x10, 0x01, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[13, 0x24, 0x01, 0x10, 0x01, 0, 0, 0, 0, 0, 0, 1, 1]);
         bytes.extend_from_slice(&[9, 0x04, 1, 0, 0, 0x0e, 0x02, 0x00, 0]);
         bytes.extend_from_slice(&[13, 0x24, 0x01, 1, 0x81, 0, 0, 0, 0, 0, 0, 0, 0]);
         bytes.extend_from_slice(&[11, 0x24, 0x06, 1, 1, 0, 0, 0, 0, 0, 0]);
@@ -805,11 +828,39 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[9, 0x02, 59, 0x00, 2, 1, 0, 0x80, 50]);
         bytes.extend_from_slice(&[9, 0x04, 0, 0, 0, 0x0e, 0x01, 0x00, 0]);
-        bytes.extend_from_slice(&[12, 0x24, 0x01, 0x10, 0x01, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[13, 0x24, 0x01, 0x10, 0x01, 0, 0, 0, 0, 0, 0, 1, 1]);
         bytes.extend_from_slice(&[9, 0x04, 1, 0, 0, 0x0e, 0x02, 0x00, 0]);
         bytes.extend_from_slice(&[13, 0x24, 0x01, 1, 0x81, 0, 0, 0, 0, 0, 0, 0, 0]);
         bytes.extend_from_slice(&[9, 0x04, 1, 1, 1, 0x0e, 0x02, 0x00, 0]);
         bytes.extend_from_slice(&[7, 0x05, 0x81, 0x01, 0x00, 0x14, 1]);
+        bytes
+    }
+
+    fn sample_multi_stream_uvc_configuration() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[9, 0x02, 0, 0, 4, 1, 0, 0x80, 50]);
+        bytes.extend_from_slice(&[9, 0x04, 0, 0, 0, 0x0e, 0x01, 0x00, 0]);
+        bytes.extend_from_slice(&[13, 0x24, 0x01, 0x10, 0x01, 0, 0, 0, 0, 0, 0, 1, 1]);
+        bytes.extend_from_slice(&[9, 0x04, 1, 0, 0, 0x0e, 0x02, 0x00, 0]);
+        bytes.extend_from_slice(&[13, 0x24, 0x01, 1, 0x81, 0, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[11, 0x24, 0x06, 1, 1, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[
+            30, 0x24, 0x07, 1, 0, 0x80, 0x02, 0xe0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x60, 0x09,
+            0x00, 0x15, 0x16, 0x05, 0x00, 1, 0x15, 0x16, 0x05, 0x00,
+        ]);
+        bytes.extend_from_slice(&[9, 0x04, 1, 1, 1, 0x0e, 0x02, 0x00, 0]);
+        bytes.extend_from_slice(&[7, 0x05, 0x81, 0x01, 0x00, 0x14, 1]);
+        bytes.extend_from_slice(&[9, 0x04, 2, 0, 0, 0x0e, 0x01, 0x00, 0]);
+        bytes.extend_from_slice(&[13, 0x24, 0x01, 0x50, 0x01, 0, 0, 0, 0, 0, 0, 1, 3]);
+        bytes.extend_from_slice(&[9, 0x04, 3, 0, 0, 0x0e, 0x02, 0x00, 0]);
+        bytes.extend_from_slice(&[13, 0x24, 0x01, 1, 0x83, 0, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[11, 0x24, 0x06, 1, 1, 0, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[
+            30, 0x24, 0x07, 1, 0, 0x80, 0x02, 0xe0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x60, 0x09,
+            0x00, 0x15, 0x16, 0x05, 0x00, 1, 0x15, 0x16, 0x05, 0x00,
+        ]);
+        bytes.extend_from_slice(&[9, 0x04, 3, 1, 1, 0x0e, 0x02, 0x00, 0]);
+        bytes.extend_from_slice(&[7, 0x05, 0x83, 0x01, 0x00, 0x14, 1]);
         bytes
     }
 }
