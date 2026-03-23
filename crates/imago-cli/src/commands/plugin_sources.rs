@@ -457,17 +457,15 @@ pub(crate) async fn materialize_wit_source(
                 }
                 Ok(DecodedWasm::Component(resolve, world)) => {
                     let source_desc = format!("file source '{}'", path.display());
-                    let top_package = if expected_package.is_some() {
-                        select_top_package_for_component(
-                            &resolve,
-                            world,
-                            expected_package,
-                            &source_desc,
-                        )?
-                    } else {
-                        component_world_package_id(&resolve, world, &source_desc)?
-                    };
-                    let foreign_world = if expected_package.is_some() {
+                    let top_package = select_top_package_for_component(
+                        &resolve,
+                        world,
+                        expected_package,
+                        &source_desc,
+                    )?;
+                    let selected_package_only =
+                        should_materialize_selected_package_only(&resolve, world, top_package);
+                    let foreign_world = if selected_package_only {
                         select_component_world_for_package(
                             &resolve,
                             world,
@@ -483,7 +481,7 @@ pub(crate) async fn materialize_wit_source(
                             foreign_world,
                             &source_desc,
                         )?;
-                    let transitive_packages = if expected_package.is_some() {
+                    let transitive_packages = if selected_package_only {
                         materialize_top_wit_package_for_component_dependency(
                             destination_dir,
                             &resolve,
@@ -578,17 +576,15 @@ pub(crate) async fn materialize_wit_source(
                     })
                 }
                 Ok(DecodedWasm::Component(resolve, world)) => {
-                    let top_package = if expected_package.is_some() {
-                        select_top_package_for_component(
-                            &resolve,
-                            world,
-                            expected_package,
-                            &source_desc,
-                        )?
-                    } else {
-                        component_world_package_id(&resolve, world, &source_desc)?
-                    };
-                    let foreign_world = if expected_package.is_some() {
+                    let top_package = select_top_package_for_component(
+                        &resolve,
+                        world,
+                        expected_package,
+                        &source_desc,
+                    )?;
+                    let selected_package_only =
+                        should_materialize_selected_package_only(&resolve, world, top_package);
+                    let foreign_world = if selected_package_only {
                         select_component_world_for_package(
                             &resolve,
                             world,
@@ -604,7 +600,7 @@ pub(crate) async fn materialize_wit_source(
                             foreign_world,
                             &source_desc,
                         )?;
-                    let transitive_packages = if expected_package.is_some() {
+                    let transitive_packages = if selected_package_only {
                         materialize_top_wit_package_for_component_dependency(
                             destination_dir,
                             &resolve,
@@ -1448,14 +1444,16 @@ fn materialize_remote_wit_bytes(
                 request.expected_package,
                 &source_desc,
             )?;
-            let foreign_world = if request.expected_package.is_some() {
+            let selected_package_only =
+                should_materialize_selected_package_only(&resolve, world, top_package);
+            let foreign_world = if selected_package_only {
                 select_component_world_for_package(&resolve, world, top_package, &source_desc)?
             } else {
                 world
             };
             let component_world_foreign_packages =
                 collect_component_world_foreign_packages(&resolve, foreign_world, &source_desc)?;
-            let transitive_packages = if request.expected_package.is_some() {
+            let transitive_packages = if selected_package_only {
                 materialize_top_wit_package_for_component_dependency(
                     destination_dir,
                     &resolve,
@@ -2430,6 +2428,42 @@ fn merge_component_world_foreign_package(
     Ok(())
 }
 
+fn should_materialize_selected_package_only(
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    top_package: wit_parser::PackageId,
+) -> bool {
+    resolve.worlds[world].package != Some(top_package)
+}
+
+fn select_single_exported_foreign_package_from_root_component(
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    world_package: wit_parser::PackageId,
+) -> Option<wit_parser::PackageId> {
+    if !is_root_component_package(resolve, world_package) {
+        return None;
+    }
+
+    let mut exported_foreign_packages = BTreeSet::new();
+    for world_item in resolve.worlds[world].exports.values() {
+        let WorldItem::Interface { id, .. } = world_item else {
+            return None;
+        };
+        let interface_package = resolve.interfaces[*id].package?;
+        if interface_package == world_package {
+            return None;
+        }
+        exported_foreign_packages.insert(interface_package);
+    }
+
+    if exported_foreign_packages.len() == 1 {
+        return exported_foreign_packages.into_iter().next();
+    }
+
+    None
+}
+
 fn select_top_package_for_component(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
@@ -2450,7 +2484,33 @@ fn select_top_package_for_component(
             return Ok(*package_id);
         }
     }
-    component_world_package_id(resolve, world, source_desc)
+    let world_package = component_world_package_id(resolve, world, source_desc)?;
+    if let Some(exported_package) =
+        select_single_exported_foreign_package_from_root_component(resolve, world, world_package)
+    {
+        return Ok(exported_package);
+    }
+    Ok(world_package)
+}
+
+pub(crate) fn resolved_top_package_name_from_component_bytes(
+    bytes: &[u8],
+    expected_package: Option<&str>,
+    source_desc: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut reader = std::io::Cursor::new(bytes);
+    let Ok(decoded) = wit_component::decode_reader(&mut reader) else {
+        return Ok(None);
+    };
+    let DecodedWasm::Component(resolve, world) = decoded else {
+        return Ok(None);
+    };
+    let top_package =
+        select_top_package_for_component(&resolve, world, expected_package, source_desc)?;
+    Ok(Some(format!(
+        "{}:{}",
+        resolve.packages[top_package].name.namespace, resolve.packages[top_package].name.name
+    )))
 }
 
 fn render_wit_package(
@@ -2993,6 +3053,29 @@ mod tests {
         fs::write(path, bytes).expect("file write should succeed");
     }
 
+    fn encode_wit_component(root: &Path, world: &str) -> Vec<u8> {
+        let mut resolve = wit_parser::Resolve::default();
+        let (pkg, _) = resolve
+            .push_dir(root)
+            .expect("fixture WIT directory should parse");
+        let world_id = resolve
+            .select_world(&[pkg], Some(world))
+            .expect("fixture world should exist");
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+        wit_component::embed_component_metadata(
+            &mut module,
+            &resolve,
+            world_id,
+            wit_component::StringEncoding::UTF8,
+        )
+        .expect("component metadata embedding should succeed");
+        wit_component::ComponentEncoder::default()
+            .module(&module)
+            .expect("component encoder should accept module")
+            .encode()
+            .expect("component encoding should succeed")
+    }
+
     #[test]
     fn parse_warg_spec_accepts_nested_package_name() {
         let (package, version) =
@@ -3533,6 +3616,134 @@ mod tests {
         )
         .expect("selection should succeed");
         assert_eq!(selected, top_package);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn select_top_package_for_component_prefers_single_foreign_export_from_root_component() {
+        let root = new_temp_dir("select-top-package-root-component-foreign-export");
+        let source = root.join("source");
+        write(
+            &source.join("package.wit"),
+            br#"
+    package root:component@0.1.0;
+
+    world camera-plugin {
+      import imago:usb/provider@0.3.0;
+      export imago:camera/types@0.1.0;
+      export imago:camera/provider@0.1.0;
+    }
+    "#,
+        );
+        write(
+            &source.join("deps/imago-camera/package.wit"),
+            br#"
+    package imago:camera@0.1.0;
+
+    interface types {}
+
+    interface provider {}
+    "#,
+        );
+        write(
+            &source.join("deps/imago-usb/package.wit"),
+            br#"
+    package imago:usb@0.3.0;
+
+    interface provider {}
+    "#,
+        );
+
+        let mut resolve = wit_parser::Resolve::default();
+        let (top_package, _) = resolve
+            .push_path(&source)
+            .expect("WIT package dir should parse");
+        let world = resolve.packages[top_package]
+            .worlds
+            .get("camera-plugin")
+            .copied()
+            .expect("camera-plugin world should exist");
+
+        let selected = select_top_package_for_component(&resolve, world, None, "test component")
+            .expect("selection should succeed");
+        let selected_name = &resolve.packages[selected].name;
+        assert_eq!(
+            format!("{}:{}", selected_name.namespace, selected_name.name),
+            "imago:camera"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn materialize_component_file_prefers_single_foreign_export_package_when_expected_missing()
+     {
+        let root = new_temp_dir("materialize-component-file-foreign-export-package");
+        let fixture = root.join("fixture");
+        let source = root.join("source.wasm");
+        let destination = root.join("dest/wit/deps/yieldspace-imago-camera-0.1.0");
+        write(
+            &fixture.join("package.wit"),
+            br#"
+    package root:component@0.1.0;
+
+    world camera-plugin {
+      import imago:usb/provider@0.3.0;
+      export imago:camera/types@0.1.0;
+      export imago:camera/provider@0.1.0;
+    }
+    "#,
+        );
+        write(
+            &fixture.join("deps/imago-camera/package.wit"),
+            br#"
+    package imago:camera@0.1.0;
+
+    interface types {}
+
+    interface provider {}
+    "#,
+        );
+        write(
+            &fixture.join("deps/imago-usb/package.wit"),
+            br#"
+    package imago:usb@0.3.0;
+
+    interface provider {}
+    "#,
+        );
+        write(&source, &encode_wit_component(&fixture, "camera-plugin"));
+        fs::create_dir_all(&destination).expect("destination dir should be created");
+
+        let materialized = materialize_wit_source(
+            &root,
+            SourceKind::Path,
+            "source.wasm",
+            Some("0.1.0"),
+            None,
+            None,
+            None,
+            None,
+            &destination,
+        )
+        .await
+        .expect("materialize should succeed");
+
+        assert_eq!(
+            materialized.top_package_name.as_deref(),
+            Some("imago:camera")
+        );
+        assert!(
+            materialized.transitive_packages.is_empty(),
+            "selected export package should be materialized without root:component transitives"
+        );
+        let package_text = fs::read_to_string(destination.join("package.wit"))
+            .expect("selected package should be written");
+        assert!(
+            package_text.starts_with("package imago:camera@0.1.0;"),
+            "unexpected materialized package: {package_text}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
