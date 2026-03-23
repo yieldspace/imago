@@ -101,7 +101,7 @@ wasm-pkg-client = "0.15.0"
 wasm-pkg-common = "0.15.0"
 wasmtime = "42.0.0"
 wasmtime-wasi = "42.0.0"
-wasmtime-wasi-http = "42.0.1"
+wasmtime-wasi-http = "43.0.0"
 wasmtime-wasi-nn = { version = "42.0.1", default-features = false }
 wasmparser = { version = "0.245.1", features = ["component-model"] }
 wat = "1.245.1"
