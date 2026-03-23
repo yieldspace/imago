@@ -33,6 +33,7 @@ pub(crate) struct AvailablePlugin {
 #[derive(Debug, Clone)]
 struct DependencyResourceBinding {
     import_resource: types::ResourceType,
+    callee_resource: types::ResourceType,
     host_dynamic_type_id: u32,
     resource_name: String,
 }
@@ -451,13 +452,20 @@ pub(crate) fn register_plugin_import_shims(
                 if plugin.kind != PluginKind::Wasm {
                     Vec::new()
                 } else {
+                    let dependency_instance = plugin.instance.as_ref().ok_or_else(|| {
+                        map_runtime_error(format!(
+                            "internal error: wasm plugin dependency '{}' is missing instance during bridge registration",
+                            target_dependency
+                        ))
+                    })?;
                     let bindings = collect_dependency_resource_bindings(
                         store,
                         target_dependency,
                         import_name,
                         &instance_ty,
+                        dependency_instance,
                         engine,
-                    );
+                    )?;
                     for binding in &bindings {
                         let interface_name = import_name.to_string();
                         let resource_name = binding.resource_name.clone();
@@ -524,6 +532,7 @@ pub(crate) fn register_plugin_import_shims(
                         &self_export_ty,
                         import_name,
                         func_name,
+                        None,
                     )?;
 
                     let interface_name = import_name.to_string();
@@ -597,6 +606,7 @@ pub(crate) fn register_plugin_import_shims(
                                 &callee_ty,
                                 import_name,
                                 func_name,
+                                Some(&dependency_resource_bindings),
                             )?;
                             let import_param_types =
                                 import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
@@ -956,6 +966,7 @@ fn ensure_component_signatures_match(
     callee_ty: &types::ComponentFunc,
     interface_name: &str,
     function_name: &str,
+    resource_bindings: Option<&[DependencyResourceBinding]>,
 ) -> Result<(), ImagodError> {
     let import_params = import_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
     let callee_params = callee_ty.params().map(|(_, ty)| ty).collect::<Vec<_>>();
@@ -963,7 +974,9 @@ fn ensure_component_signatures_match(
         || !import_params
             .iter()
             .zip(callee_params.iter())
-            .all(|(import_ty, callee_ty)| component_types_match(import_ty, callee_ty))
+            .all(|(import_ty, callee_ty)| {
+                component_types_match(import_ty, callee_ty, resource_bindings)
+            })
     {
         return Err(map_runtime_error(format!(
             "plugin import type mismatch for '{}.{}': parameter types differ",
@@ -977,7 +990,9 @@ fn ensure_component_signatures_match(
         || !import_results
             .iter()
             .zip(callee_results.iter())
-            .all(|(import_ty, callee_ty)| component_types_match(import_ty, callee_ty))
+            .all(|(import_ty, callee_ty)| {
+                component_types_match(import_ty, callee_ty, resource_bindings)
+            })
     {
         return Err(map_runtime_error(format!(
             "plugin import type mismatch for '{}.{}': result types differ",
@@ -988,7 +1003,11 @@ fn ensure_component_signatures_match(
     Ok(())
 }
 
-fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bool {
+fn component_types_match(
+    import_ty: &types::Type,
+    callee_ty: &types::Type,
+    resource_bindings: Option<&[DependencyResourceBinding]>,
+) -> bool {
     match (import_ty, callee_ty) {
         (types::Type::Bool, types::Type::Bool)
         | (types::Type::S8, types::Type::S8)
@@ -1006,10 +1025,10 @@ fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bo
         | (types::Type::ErrorContext, types::Type::ErrorContext) => true,
         (types::Type::Own(import_resource), types::Type::Own(callee_resource))
         | (types::Type::Borrow(import_resource), types::Type::Borrow(callee_resource)) => {
-            import_resource == callee_resource
+            dependency_resource_types_match(import_resource, callee_resource, resource_bindings)
         }
         (types::Type::List(import_list), types::Type::List(callee_list)) => {
-            component_types_match(&import_list.ty(), &callee_list.ty())
+            component_types_match(&import_list.ty(), &callee_list.ty(), resource_bindings)
         }
         (types::Type::Record(import_record), types::Type::Record(callee_record)) => {
             let import_fields = import_record.fields().collect::<Vec<_>>();
@@ -1018,7 +1037,11 @@ fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bo
                 && import_fields.iter().zip(callee_fields.iter()).all(
                     |(import_field, callee_field)| {
                         import_field.name == callee_field.name
-                            && component_types_match(&import_field.ty, &callee_field.ty)
+                            && component_types_match(
+                                &import_field.ty,
+                                &callee_field.ty,
+                                resource_bindings,
+                            )
                     },
                 )
         }
@@ -1028,7 +1051,7 @@ fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bo
             import_fields.len() == callee_fields.len()
                 && import_fields.iter().zip(callee_fields.iter()).all(
                     |(import_field, callee_field)| {
-                        component_types_match(import_field, callee_field)
+                        component_types_match(import_field, callee_field, resource_bindings)
                     },
                 )
         }
@@ -1044,6 +1067,7 @@ fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bo
                             && option_component_types_match(
                                 import_case.ty.clone(),
                                 callee_case.ty.clone(),
+                                resource_bindings,
                             )
                     })
         }
@@ -1051,31 +1075,57 @@ fn component_types_match(import_ty: &types::Type, callee_ty: &types::Type) -> bo
             import_enum.names().eq(callee_enum.names())
         }
         (types::Type::Option(import_option), types::Type::Option(callee_option)) => {
-            component_types_match(&import_option.ty(), &callee_option.ty())
+            component_types_match(&import_option.ty(), &callee_option.ty(), resource_bindings)
         }
         (types::Type::Result(import_result), types::Type::Result(callee_result)) => {
-            option_component_types_match(import_result.ok(), callee_result.ok())
-                && option_component_types_match(import_result.err(), callee_result.err())
+            option_component_types_match(import_result.ok(), callee_result.ok(), resource_bindings)
+                && option_component_types_match(
+                    import_result.err(),
+                    callee_result.err(),
+                    resource_bindings,
+                )
         }
         (types::Type::Flags(import_flags), types::Type::Flags(callee_flags)) => {
             import_flags.names().eq(callee_flags.names())
         }
         (types::Type::Future(import_future), types::Type::Future(callee_future)) => {
-            option_component_types_match(import_future.ty(), callee_future.ty())
+            option_component_types_match(import_future.ty(), callee_future.ty(), resource_bindings)
         }
         (types::Type::Stream(import_stream), types::Type::Stream(callee_stream)) => {
-            option_component_types_match(import_stream.ty(), callee_stream.ty())
+            option_component_types_match(import_stream.ty(), callee_stream.ty(), resource_bindings)
         }
         _ => false,
     }
 }
 
+// Component methods carry an implicit self resource parameter. When a wasm
+// dependency bridge pairs import/export resources by name, accept the paired
+// identities even though instantiation freshens the guest resource type.
+fn dependency_resource_types_match(
+    import_resource: &types::ResourceType,
+    callee_resource: &types::ResourceType,
+    resource_bindings: Option<&[DependencyResourceBinding]>,
+) -> bool {
+    if import_resource == callee_resource {
+        return true;
+    }
+    resource_bindings.is_some_and(|bindings| {
+        bindings.iter().any(|binding| {
+            binding.import_resource == *import_resource
+                && binding.callee_resource == *callee_resource
+        })
+    })
+}
+
 fn option_component_types_match(
     import_ty: Option<types::Type>,
     callee_ty: Option<types::Type>,
+    resource_bindings: Option<&[DependencyResourceBinding]>,
 ) -> bool {
     match (import_ty, callee_ty) {
-        (Some(import_ty), Some(callee_ty)) => component_types_match(&import_ty, &callee_ty),
+        (Some(import_ty), Some(callee_ty)) => {
+            component_types_match(&import_ty, &callee_ty, resource_bindings)
+        }
         (None, None) => true,
         _ => false,
     }
@@ -1086,25 +1136,69 @@ fn collect_dependency_resource_bindings(
     target_dependency: &str,
     interface_name: &str,
     instance_ty: &types::ComponentInstance,
+    dependency_instance: &wasmtime::component::Instance,
     engine: &Engine,
-) -> Vec<DependencyResourceBinding> {
-    instance_ty
-        .exports(engine)
-        .filter_map(|(resource_name, item)| match item {
-            types::ComponentItem::Resource(resource_ty) => Some(DependencyResourceBinding {
-                import_resource: resource_ty,
-                host_dynamic_type_id: store.data_mut().wasm_dependency_resource_type_id(
-                    WasmDependencyResourceKey {
-                        dependency_name: target_dependency.to_string(),
-                        interface_name: interface_name.to_string(),
-                        resource_name: resource_name.to_string(),
-                    },
-                ),
-                resource_name: resource_name.to_string(),
-            }),
-            _ => None,
+) -> Result<Vec<DependencyResourceBinding>, ImagodError> {
+    let mut bindings = Vec::new();
+    for (resource_name, item) in instance_ty.exports(engine) {
+        let types::ComponentItem::Resource(resource_ty) = item else {
+            continue;
+        };
+        bindings.push(DependencyResourceBinding {
+            import_resource: resource_ty,
+            callee_resource: resolve_dependency_resource_type(
+                &mut *store,
+                dependency_instance,
+                interface_name,
+                resource_name,
+            )?,
+            host_dynamic_type_id: store.data_mut().wasm_dependency_resource_type_id(
+                WasmDependencyResourceKey {
+                    dependency_name: target_dependency.to_string(),
+                    interface_name: interface_name.to_string(),
+                    resource_name: resource_name.to_string(),
+                },
+            ),
+            resource_name: resource_name.to_string(),
+        });
+    }
+    Ok(bindings)
+}
+
+fn resolve_dependency_resource_type(
+    mut store: impl wasmtime::AsContextMut<Data = WasiState>,
+    dependency_instance: &wasmtime::component::Instance,
+    interface_name: &str,
+    resource_name: &str,
+) -> Result<types::ResourceType, ImagodError> {
+    let interface_export = dependency_instance
+        .get_export_index(store.as_context_mut(), None, interface_name)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "wasm dependency export interface '{}' was not found",
+                interface_name
+            ))
+        })?;
+    let resource_export = dependency_instance
+        .get_export_index(
+            store.as_context_mut(),
+            Some(&interface_export),
+            resource_name,
+        )
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "wasm dependency export resource '{}.{}' was not found",
+                interface_name, resource_name
+            ))
+        })?;
+    dependency_instance
+        .get_resource(store.as_context_mut(), resource_export)
+        .ok_or_else(|| {
+            map_runtime_error(format!(
+                "wasm dependency export '{}.{}' is not a resource",
+                interface_name, resource_name
+            ))
         })
-        .collect()
 }
 
 fn dependency_resource_binding<'a>(
@@ -1613,12 +1707,24 @@ mod tests {
         }
     }
 
+    fn paired_dependency_binding(
+        import_resource: types::ResourceType,
+        callee_resource: types::ResourceType,
+    ) -> Vec<DependencyResourceBinding> {
+        vec![DependencyResourceBinding {
+            import_resource,
+            callee_resource,
+            host_dynamic_type_id: 99,
+            resource_name: "session".to_string(),
+        }]
+    }
+
     #[test]
     fn component_types_match_rejects_distinct_own_resource_types() {
         let import_ty = types::Type::Own(wasmtime::component::ResourceType::host_dynamic(1));
         let callee_ty = types::Type::Own(wasmtime::component::ResourceType::host_dynamic(2));
         assert!(
-            !component_types_match(&import_ty, &callee_ty),
+            !component_types_match(&import_ty, &callee_ty, None),
             "distinct own resource identities must not compare equal"
         );
     }
@@ -1629,8 +1735,34 @@ mod tests {
         let import_ty = types::Type::Borrow(resource_ty);
         let callee_ty = types::Type::Borrow(resource_ty);
         assert!(
-            component_types_match(&import_ty, &callee_ty),
+            component_types_match(&import_ty, &callee_ty, None),
             "identical borrow resource identities should compare equal"
+        );
+    }
+
+    #[test]
+    fn component_types_match_accepts_paired_own_resource_types_for_dependency_bridge() {
+        let import_resource = wasmtime::component::ResourceType::host_dynamic(11);
+        let callee_resource = wasmtime::component::ResourceType::host_dynamic(22);
+        let bindings = paired_dependency_binding(import_resource, callee_resource);
+        let import_ty = types::Type::Own(import_resource);
+        let callee_ty = types::Type::Own(callee_resource);
+        assert!(
+            component_types_match(&import_ty, &callee_ty, Some(&bindings)),
+            "paired own resource identities should compare equal for dependency bridges"
+        );
+    }
+
+    #[test]
+    fn component_types_match_accepts_paired_borrow_resource_types_for_dependency_bridge() {
+        let import_resource = wasmtime::component::ResourceType::host_dynamic(33);
+        let callee_resource = wasmtime::component::ResourceType::host_dynamic(44);
+        let bindings = paired_dependency_binding(import_resource, callee_resource);
+        let import_ty = types::Type::Borrow(import_resource);
+        let callee_ty = types::Type::Borrow(callee_resource);
+        assert!(
+            component_types_match(&import_ty, &callee_ty, Some(&bindings)),
+            "paired borrow resource identities should compare equal for dependency bridges"
         );
     }
 
@@ -1730,6 +1862,23 @@ mod tests {
         Store::new(engine, state)
     }
 
+    fn imported_instance_type(
+        component: &Component,
+        engine: &Engine,
+        interface_name: &str,
+    ) -> types::ComponentInstance {
+        component
+            .component_type()
+            .imports(engine)
+            .find_map(|(name, item)| match item {
+                types::ComponentItem::ComponentInstance(instance_ty) if name == interface_name => {
+                    Some(instance_ty)
+                }
+                _ => None,
+            })
+            .expect("imported interface should exist")
+    }
+
     fn write_minimal_component_file(name: &str) -> (TempDir, PathBuf) {
         let tempdir = tempfile::Builder::new()
             .prefix(name)
@@ -1762,6 +1911,84 @@ mod tests {
             }),
             capabilities: CapabilityPolicy::default(),
         }
+    }
+
+    #[test]
+    fn collect_dependency_resource_bindings_resolves_callee_resource_types_from_instance() {
+        let engine = Engine::default();
+        let import_component = Component::new(
+            &engine,
+            r#"
+                (component
+                  (import "test:camera/provider@0.1.0"
+                    (instance
+                      (export "session" (type $session (sub resource)))
+                    )
+                  )
+                )
+            "#,
+        )
+        .expect("import component should compile");
+        let import_instance_ty =
+            imported_instance_type(&import_component, &engine, "test:camera/provider@0.1.0");
+        let dependency_component = Component::new(
+            &engine,
+            r#"
+                (component
+                  (type $session (resource (rep i32)))
+                  (component $provider
+                    (import "import-type-session" (type $import-session (sub resource)))
+                    (export "session" (type $import-session))
+                  )
+                  (instance $provider-instance
+                    (instantiate $provider
+                      (with "import-type-session" (type $session))
+                    )
+                  )
+                  (export "test:camera/provider@0.1.0" (instance $provider-instance))
+                )
+            "#,
+        )
+        .expect("dependency component should compile");
+        let mut store = test_store_with_resources(&engine, imagod_ipc::ResourceMap::default());
+        let linker = Linker::new(&engine);
+        let dependency_instance = linker
+            .instantiate(&mut store, &dependency_component)
+            .expect("dependency component should instantiate");
+
+        let bindings = collect_dependency_resource_bindings(
+            &mut store,
+            "test:camera",
+            "test:camera/provider@0.1.0",
+            &import_instance_ty,
+            &dependency_instance,
+            &engine,
+        )
+        .expect("resource bindings should be collected");
+
+        assert_eq!(bindings.len(), 1, "expected one session resource binding");
+        let binding = &bindings[0];
+        assert_eq!(binding.resource_name, "session");
+        assert_ne!(
+            binding.import_resource, binding.callee_resource,
+            "instantiated dependency resource should be fresh"
+        );
+        assert!(
+            component_types_match(
+                &types::Type::Own(binding.import_resource),
+                &types::Type::Own(binding.callee_resource),
+                Some(&bindings),
+            ),
+            "paired own resource types should compare equal once the binding is known"
+        );
+        assert!(
+            component_types_match(
+                &types::Type::Borrow(binding.import_resource),
+                &types::Type::Borrow(binding.callee_resource),
+                Some(&bindings),
+            ),
+            "paired borrow resource types should compare equal once the binding is known"
+        );
     }
 
     impl NativePlugin for TestMultiImportPlugin {
