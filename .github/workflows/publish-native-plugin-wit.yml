@@ -117,15 +117,9 @@ jobs:
           plugin_kind="native"
           cargo_package=""
           cargo_target=""
-          if [[ -f "$cargo_toml" ]] && grep -Eq 'crate-type[[:space:]]*=[[:space:]]*\[[^]]*"cdylib"' "$cargo_toml"; then
-            plugin_kind="wasm"
+          if [[ -f "$cargo_toml" ]]; then
             metadata_json="$(cargo metadata --locked --no-deps --format-version 1)"
             manifest_path="${GITHUB_WORKSPACE}/${cargo_toml}"
-            cargo_package="$(jq -r --arg manifest_path "$manifest_path" '
-              .packages[]
-              | select(.manifest_path == $manifest_path)
-              | .name
-            ' <<<"${metadata_json}")"
             cargo_target="$(jq -r --arg manifest_path "$manifest_path" '
               .packages[]
               | select(.manifest_path == $manifest_path)
@@ -133,13 +127,20 @@ jobs:
               | select((.kind | index("cdylib")) and (.crate_types | index("cdylib")))
               | .name
             ' <<<"${metadata_json}" | head -n1)"
-            if [[ -z "$cargo_package" || "$cargo_package" == "null" ]]; then
-              echo "::error::failed to resolve cargo package for wasm plugin: $cargo_toml"
-              exit 1
-            fi
-            if [[ -z "$cargo_target" || "$cargo_target" == "null" ]]; then
-              echo "::error::failed to resolve cdylib target for wasm plugin: $cargo_toml"
-              exit 1
+
+            if [[ -n "$cargo_target" && "$cargo_target" != "null" ]]; then
+              plugin_kind="wasm"
+              cargo_package="$(jq -r --arg manifest_path "$manifest_path" '
+                .packages[]
+                | select(.manifest_path == $manifest_path)
+                | .name
+              ' <<<"${metadata_json}")"
+              if [[ -z "$cargo_package" || "$cargo_package" == "null" ]]; then
+                echo "::error::failed to resolve cargo package for wasm plugin: $cargo_toml"
+                exit 1
+              fi
+            else
+              cargo_target=""
             fi
           fi
 

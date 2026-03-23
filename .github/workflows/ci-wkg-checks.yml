@@ -79,6 +79,12 @@ jobs:
             fi
 
             case "$file" in
+              Cargo.toml|Cargo.lock|build.rs|rust-toolchain|rust-toolchain.toml|.cargo/*)
+                wasm_plugin_related=true
+                ;;
+            esac
+
+            case "$file" in
               .github/workflows/ci-wkg-checks.yml|.github/workflows/publish-native-plugin-wit.yml)
                 workflow_related=true
                 ;;
