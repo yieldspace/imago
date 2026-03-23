@@ -660,8 +660,29 @@ This section defines plugin dependencies and their resolution sources.
 - Source keys: exactly one of `wit`, `oci`, or `path`.
 - `registry` is allowed only with `component.wit`.
 - `sha256` is optional (64 hex chars) and verified when provided.
+- If the dependency `wit` / `oci` source already resolves to a Wasm component release, this section can be omitted and `imago deps sync` derives the component from that same source.
 
-### Wasm camera plugin example
+### Published Wasm camera plugin example
+
+The published `imago:camera@0.1.0` plugin can be consumed directly from GHCR without an explicit `[dependencies.component]` block. The `imago:usb@0.3.0` dependency remains native:
+
+```toml
+[[dependencies]]
+version = "0.3.0"
+kind = "native"
+oci = "ghcr.io/yieldspace/imago/usb"
+
+[[dependencies]]
+version = "0.1.0"
+kind = "wasm"
+oci = "ghcr.io/yieldspace/imago/camera"
+requires = ["imago:usb"]
+
+[dependencies.capabilities.deps]
+"imago:usb" = ["*"]
+```
+
+### Local Wasm camera plugin example
 
 The `imago:camera@0.1.0` plugin is a Wasm dependency that imports `imago:usb@0.3.0` as a native dependency. The app manifest needs both entries, plus a component source path for the camera plugin artifact:
 

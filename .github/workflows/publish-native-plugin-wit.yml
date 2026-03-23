@@ -1,4 +1,4 @@
-name: publish-native-plugin-wit
+name: publish-plugin-package
 
 on:
   push:
@@ -16,12 +16,12 @@ permissions:
   packages: write
 
 concurrency:
-  group: publish-native-plugin-wit-${{ github.ref_name || inputs.tag }}
+  group: publish-plugin-package-${{ github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: publish native plugin WIT
+    name: publish plugin package
     runs-on: ubuntu-24.04
     env:
       WKG_OCI_USERNAME: ${{ github.actor }}
@@ -73,6 +73,7 @@ jobs:
 
           plugin_path="plugins/${plugin_dir}"
           wit_file="${plugin_path}/wit/package.wit"
+          cargo_toml="${plugin_path}/Cargo.toml"
 
           if [[ ! -d "$plugin_path" ]]; then
             echo "::error::plugin directory was not found: $plugin_path"
@@ -113,26 +114,100 @@ jobs:
           owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
           reference="ghcr.io/${owner_lc}/${wit_package_oci}:${tag_version}"
 
+          plugin_kind="native"
+          cargo_package=""
+          cargo_target=""
+          if [[ -f "$cargo_toml" ]]; then
+            metadata_json="$(cargo metadata --locked --no-deps --format-version 1)"
+            manifest_path="${GITHUB_WORKSPACE}/${cargo_toml}"
+            cargo_target="$(jq -r --arg manifest_path "$manifest_path" '
+              .packages[]
+              | select(.manifest_path == $manifest_path)
+              | .targets[]
+              | select((.kind | index("cdylib")) and (.crate_types | index("cdylib")))
+              | .name
+            ' <<<"${metadata_json}" | head -n1)"
+
+            if [[ -n "$cargo_target" && "$cargo_target" != "null" ]]; then
+              plugin_kind="wasm"
+              cargo_package="$(jq -r --arg manifest_path "$manifest_path" '
+                .packages[]
+                | select(.manifest_path == $manifest_path)
+                | .name
+              ' <<<"${metadata_json}")"
+              if [[ -z "$cargo_package" || "$cargo_package" == "null" ]]; then
+                echo "::error::failed to resolve cargo package for wasm plugin: $cargo_toml"
+                exit 1
+              fi
+            else
+              cargo_target=""
+            fi
+          fi
+
           {
             echo "tag=${tag}"
             echo "plugin_dir=${plugin_dir}"
+            echo "plugin_kind=${plugin_kind}"
             echo "tag_version=${tag_version}"
             echo "wit_package=${wit_package}"
             echo "wit_package_oci=${wit_package_oci}"
+            echo "cargo_package=${cargo_package}"
+            echo "cargo_target=${cargo_target}"
             echo "reference=${reference}"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved publish target: ${plugin_dir} -> ${reference}"
+          echo "Resolved publish target: ${plugin_dir} (${plugin_kind}) -> ${reference}"
 
       - name: Verify plugin wkg.lock
+        if: steps.target.outputs.plugin_kind != 'wasm'
         run: ./.github/scripts/verify_plugin_wkg_locks.sh "${{ steps.target.outputs.plugin_dir }}"
 
-      - name: Build WIT package artifact
+      - name: Setup Rust toolchain for wasm plugin
+        if: steps.target.outputs.plugin_kind == 'wasm'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Install wasm-tools
+        if: steps.target.outputs.plugin_kind == 'wasm'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
+      - name: Build plugin artifact
         id: build
         shell: bash
         run: |
           set -euo pipefail
 
           plugin_dir='${{ steps.target.outputs.plugin_dir }}'
+          plugin_kind='${{ steps.target.outputs.plugin_kind }}'
+
+          if [[ "${plugin_kind}" == "wasm" ]]; then
+            cargo_package='${{ steps.target.outputs.cargo_package }}'
+            cargo_target='${{ steps.target.outputs.cargo_target }}'
+            wit_package='${{ steps.target.outputs.wit_package }}'
+            tag_version='${{ steps.target.outputs.tag_version }}'
+
+            cargo build --locked --release --target wasm32-wasip2 -p "${cargo_package}"
+
+            wasm_file="target/wasm32-wasip2/release/${cargo_target}.wasm"
+            if [[ ! -f "${wasm_file}" ]]; then
+              echo "::error::built wasm plugin artifact was not found: ${wasm_file}"
+              exit 1
+            fi
+
+            wit_output="$(mktemp)"
+            wasm-tools component wit "${wasm_file}" >"${wit_output}"
+            if ! grep -Eq "^[[:space:]]*export[[:space:]]+${wit_package}/[^[:space:]@;]+@${tag_version};$" "${wit_output}"; then
+              echo "::error::component does not export the expected package/version: ${wit_package}@${tag_version}"
+              sed -n '1,160p' "${wit_output}"
+              exit 1
+            fi
+
+            echo "wasm_file=${wasm_file}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           temp_root="$(mktemp -d)"
           cp -R "plugins/${plugin_dir}/wit" "${temp_root}/wit"
 
@@ -177,7 +252,7 @@ jobs:
           sed -n '1,120p' "${pull_log}"
           exit 1
 
-      - name: Publish WIT package to GHCR
+      - name: Publish plugin artifact to GHCR
         shell: bash
         run: |
           set -euo pipefail

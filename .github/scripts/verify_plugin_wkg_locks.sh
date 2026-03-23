@@ -19,6 +19,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PLUGINS_ROOT="${REPO_ROOT}/plugins"
 
+is_wasm_plugin() {
+  local cargo_toml="$1"
+  [[ -f "${cargo_toml}" ]] || return 1
+
+  python3 - "$cargo_toml" <<'PY'
+import pathlib
+import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore
+
+path = pathlib.Path(sys.argv[1])
+data = tomllib.loads(path.read_text())
+crate_types = data.get("lib", {}).get("crate-type", [])
+sys.exit(0 if "cdylib" in crate_types else 1)
+PY
+}
+
 if [[ ! -d "${PLUGINS_ROOT}" ]]; then
   echo "error: plugins directory was not found: ${PLUGINS_ROOT}" >&2
   exit 1
@@ -70,7 +90,7 @@ for plugin_dir in "${plugin_dirs[@]}"; do
     continue
   fi
 
-  if [[ -f "${cargo_toml}" ]] && grep -Eq 'crate-type[[:space:]]*=[[:space:]]*\["cdylib"\]' "${cargo_toml}"; then
+  if is_wasm_plugin "${cargo_toml}"; then
     echo "info: skipping wasm plugin WIT lock verification for ${plugin_name}" >&2
     skipped_wasm=$((skipped_wasm + 1))
     continue

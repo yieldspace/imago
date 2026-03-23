@@ -1,6 +1,6 @@
 # WIT Plugins
 
-Imago supports plugin dependencies through WIT sources and, for Wasm plugins, optional component sources.
+Imago supports plugin dependencies through WIT sources and, for Wasm plugins, optional component sources. When a remote `wit` or `oci` source already resolves to a Wasm component, `imago deps sync` derives the exported WIT surface and the component bytes from that same release, so `[dependencies.component]` can be omitted.
 
 ## Plugin Kinds
 
@@ -77,6 +77,24 @@ For plugin crates under `plugins/*` with `wit/package.wit`:
 - Validate lock consistency in CI.
 - Publish tags in `<plugin-dir>@<version>` format.
 - Keep the tag version aligned with the WIT package version.
+
+## GHCR Publishing
+
+For plugin crates under `plugins/*` with `wit/package.wit`:
+
+- Native plugins publish the WIT package built by `wkg wit build` to `ghcr.io/<owner>/<namespace>/<package>:<version>`.
+- Wasm plugins (`crate-type = ["cdylib"]`) publish the built component `.wasm` to that same OCI reference.
+- Wasm plugin publish does not require a plugin-local `wkg.lock`; CI still validates the component build and exported package/version.
+- Consumers can declare a published Wasm plugin with only `[[dependencies]] kind = "wasm"` and `oci = "ghcr.io/<owner>/<namespace>/<package>"`. If the OCI release is a component, `[dependencies.component]` is optional.
+
+Example published Wasm plugin dependency:
+
+```toml
+[[dependencies]]
+version = "0.1.0"
+kind = "wasm"
+oci = "ghcr.io/yieldspace/imago/camera"
+```
 
 ## Source References
 
