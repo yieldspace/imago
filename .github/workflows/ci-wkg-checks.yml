@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       wkg_related: ${{ steps.detect.outputs.wkg_related }}
+      wasm_plugin_related: ${{ steps.detect.outputs.wasm_plugin_related }}
       workflow_related: ${{ steps.detect.outputs.workflow_related }}
     steps:
       - name: Checkout
@@ -39,6 +40,7 @@ jobs:
           set -euo pipefail
 
           wkg_related=false
+          wasm_plugin_related=false
           workflow_related=false
 
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
@@ -72,15 +74,22 @@ jobs:
                 ;;
             esac
 
+            if [[ "$file" =~ ^plugins/[^/]+/(Cargo\.toml|src/|wit/) ]]; then
+              wasm_plugin_related=true
+            fi
+
             case "$file" in
-              .github/workflows/ci-wkg-checks.yml)
+              .github/workflows/ci-wkg-checks.yml|.github/workflows/publish-native-plugin-wit.yml)
                 workflow_related=true
                 ;;
             esac
           done <<< "$diff_output"
 
-          echo "wkg_related=$wkg_related" >> "$GITHUB_OUTPUT"
-          echo "workflow_related=$workflow_related" >> "$GITHUB_OUTPUT"
+          {
+            echo "wkg_related=$wkg_related"
+            echo "wasm_plugin_related=$wasm_plugin_related"
+            echo "workflow_related=$workflow_related"
+          } >> "$GITHUB_OUTPUT"
 
   wkg_checks:
     name: wkg checks
@@ -99,11 +108,97 @@ jobs:
       - name: Verify plugin wkg locks
         run: ./.github/scripts/verify_plugin_wkg_locks.sh
 
+  wasm_plugin_builds:
+    name: wasm plugin builds
+    needs: changed
+    if: ${{ needs.changed.outputs.wasm_plugin_related == 'true' || needs.changed.outputs.workflow_related == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Install wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
+      - name: Build and verify wasm plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          metadata_json="$(cargo metadata --locked --no-deps --format-version 1)"
+          built_any=false
+
+          while IFS='|' read -r manifest_path package_name target_name; do
+            [[ -n "${manifest_path}" ]] || continue
+            built_any=true
+
+            rel_manifest="${manifest_path#"${GITHUB_WORKSPACE}/"}"
+            plugin_dir="$(basename "$(dirname "${manifest_path}")")"
+            wit_file="plugins/${plugin_dir}/wit/package.wit"
+
+            if [[ ! -f "${wit_file}" ]]; then
+              echo "::error::WIT package file was not found for wasm plugin: ${wit_file}"
+              exit 1
+            fi
+
+            package_decl="$(sed -nE 's/^[[:space:]]*package[[:space:]]+([^;]+);[[:space:]]*$/\1/p' "${wit_file}" | head -n1)"
+            if [[ -z "${package_decl}" || "${package_decl}" != *@* ]]; then
+              echo "::error::failed to parse versioned WIT package declaration from ${wit_file}"
+              exit 1
+            fi
+
+            wit_package="${package_decl%@*}"
+            wit_version="${package_decl##*@}"
+
+            echo "Building wasm plugin ${plugin_dir} (${package_name})"
+            cargo build --locked --release --target wasm32-wasip2 -p "${package_name}"
+
+            wasm_file="target/wasm32-wasip2/release/${target_name}.wasm"
+            if [[ ! -f "${wasm_file}" ]]; then
+              echo "::error::built wasm plugin artifact was not found: ${wasm_file}"
+              exit 1
+            fi
+
+            wit_output="$(mktemp)"
+            wasm-tools component wit "${wasm_file}" >"${wit_output}"
+            if ! grep -Eq "^[[:space:]]*export[[:space:]]+${wit_package}/[^[:space:]@;]+@${wit_version};$" "${wit_output}"; then
+              echo "::error::component does not export the expected package/version for ${plugin_dir}: ${wit_package}@${wit_version}"
+              sed -n '1,160p' "${wit_output}"
+              exit 1
+            fi
+
+            echo "Verified ${plugin_dir} (${rel_manifest})"
+          done < <(
+            jq -r '
+              .packages[]
+              | select(.manifest_path | contains("/plugins/"))
+              | select(any(.targets[]; (.kind | index("cdylib")) and (.crate_types | index("cdylib"))))
+              | .manifest_path as $manifest_path
+              | .name as $package_name
+              | (.targets[]
+                  | select((.kind | index("cdylib")) and (.crate_types | index("cdylib")))
+                  | .name) as $target_name
+              | "\($manifest_path)|\($package_name)|\($target_name)"
+            ' <<<"${metadata_json}"
+          )
+
+          if [[ "${built_any}" != "true" ]]; then
+            echo "No wasm plugins were detected under plugins/*."
+          fi
+
   checks:
     name: checks
     needs:
       - changed
       - wkg_checks
+      - wasm_plugin_builds
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -115,14 +210,18 @@ jobs:
           event_name='${{ github.event_name }}'
           changed_result='${{ needs.changed.result }}'
           wkg_related='${{ needs.changed.outputs.wkg_related }}'
+          wasm_plugin_related='${{ needs.changed.outputs.wasm_plugin_related }}'
           workflow_related='${{ needs.changed.outputs.workflow_related }}'
           wkg_result='${{ needs.wkg_checks.result }}'
+          wasm_result='${{ needs.wasm_plugin_builds.result }}'
 
           echo "event_name: $event_name"
           echo "changed: $changed_result"
           echo "wkg_related: $wkg_related"
+          echo "wasm_plugin_related: $wasm_plugin_related"
           echo "workflow_related: $workflow_related"
           echo "wkg_checks: $wkg_result"
+          echo "wasm_plugin_builds: $wasm_result"
 
           [[ "$changed_result" == "success" ]] || {
             echo "::error::changed job failed ($changed_result)"
@@ -132,6 +231,10 @@ jobs:
           if [[ "$event_name" == "workflow_dispatch" ]]; then
             [[ "$wkg_result" == "success" ]] || {
               echo "::error::wkg_checks must succeed on workflow_dispatch events."
+              exit 1
+            }
+            [[ "$wasm_result" == "success" ]] || {
+              echo "::error::wasm_plugin_builds must succeed on workflow_dispatch events."
               exit 1
             }
             exit 0
@@ -145,6 +248,18 @@ jobs:
           else
             [[ "$wkg_result" == "skipped" || "$wkg_result" == "success" ]] || {
               echo "::error::wkg_checks must be skipped or succeed when no WKG-related files are changed."
+              exit 1
+            }
+          fi
+
+          if [[ "$wasm_plugin_related" == "true" || "$workflow_related" == "true" ]]; then
+            [[ "$wasm_result" == "success" ]] || {
+              echo "::error::wasm_plugin_builds must succeed when wasm/workflow files are changed."
+              exit 1
+            }
+          else
+            [[ "$wasm_result" == "skipped" || "$wasm_result" == "success" ]] || {
+              echo "::error::wasm_plugin_builds must be skipped or succeed when no wasm-related files are changed."
               exit 1
             }
           fi

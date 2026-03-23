@@ -70,7 +70,7 @@ for plugin_dir in "${plugin_dirs[@]}"; do
     continue
   fi
 
-  if [[ -f "${cargo_toml}" ]] && grep -Eq 'crate-type[[:space:]]*=[[:space:]]*\["cdylib"\]' "${cargo_toml}"; then
+  if [[ -f "${cargo_toml}" ]] && grep -Eq 'crate-type[[:space:]]*=[[:space:]]*\[[^]]*"cdylib"' "${cargo_toml}"; then
     echo "info: skipping wasm plugin WIT lock verification for ${plugin_name}" >&2
     skipped_wasm=$((skipped_wasm + 1))
     continue
