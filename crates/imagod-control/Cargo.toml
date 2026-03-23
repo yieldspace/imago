@@ -18,7 +18,6 @@ imagod-config = { workspace = true }
 imagod-ipc = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }

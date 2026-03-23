@@ -8,11 +8,11 @@ use imagod_runtime_internal::{
 };
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::Store;
-use wasmtime_wasi_http::{WasiHttpView, bindings::Proxy, bindings::http::types::Scheme};
+use wasmtime_wasi_http::p2::{WasiHttpView, bindings::Proxy, bindings::http::types::Scheme};
 
 use crate::{STAGE_RUNTIME, WasiState, map_runtime_error};
 
-type HyperOutgoingBody = wasmtime_wasi_http::body::HyperOutgoingBody;
+type HyperOutgoingBody = wasmtime_wasi_http::p2::body::HyperOutgoingBody;
 
 #[derive(Default)]
 pub(crate) struct DefaultHttpComponentSupervisor {
@@ -88,12 +88,14 @@ async fn handle_http_request_in_store(
     let request = runtime_request_to_hyper_request(request)?;
     let req = store
         .data_mut()
+        .http()
         .new_incoming_request(Scheme::Http, request)
         .map_err(|e| map_runtime_error(format!("failed to map incoming HTTP request: {e}")))?;
 
     let (sender, receiver) = oneshot::channel();
     let out = store
         .data_mut()
+        .http()
         .new_response_outparam(sender)
         .map_err(|e| map_runtime_error(format!("failed to allocate response outparam: {e}")))?;
 

@@ -493,6 +493,7 @@ mod tests {
     use super::*;
     use crate::cli::BindingsCertUploadArgs;
     use crate::runtime::{self, BufferedOutputSink, CliRuntime, OutputSink, SshTargetConnector};
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -712,9 +713,7 @@ mod tests {
     fn assert_has_private_key(path: &Path) {
         let file = std::fs::File::open(path).expect("open key");
         let mut reader = std::io::BufReader::new(file);
-        let key = rustls_pemfile::private_key(&mut reader)
-            .expect("parse key PEM")
-            .expect("key should exist");
+        let key = PrivateKeyDer::from_pem_reader(&mut reader).expect("parse key PEM");
         let key_bytes = key.secret_der();
         assert!(
             !key_bytes.is_empty(),
