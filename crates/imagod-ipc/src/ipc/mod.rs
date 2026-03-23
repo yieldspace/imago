@@ -68,6 +68,8 @@ pub type BoxFutureResult<'a, T> = Pin<Box<dyn Future<Output = Result<T, ImagodEr
 
 /// Arbitrary resource policy map propagated to runtime/native plugins.
 pub type ResourceMap = BTreeMap<String, JsonValue>;
+/// Default loopback bind used when older HTTP manifests omit `listen_addr`.
+pub const DEFAULT_HTTP_LISTEN_ADDR: &str = "127.0.0.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Binding rule that allows one service to invoke an interface on another service.
@@ -662,6 +664,8 @@ pub struct RunnerBootstrap {
     pub app_type: RunnerAppType,
     /// TCP port used by local HTTP ingress when `app_type=http`.
     pub http_port: Option<u16>,
+    /// IP literal used by local HTTP ingress bind when `app_type=http`.
+    pub http_listen_addr: Option<String>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
     /// Compatibility worker-count value forwarded from manager configuration.
@@ -763,6 +767,18 @@ impl Validate for RunnerBootstrap {
                         "must be greater than zero",
                     ));
                 }
+
+                let listen_addr = self
+                    .http_listen_addr
+                    .as_deref()
+                    .ok_or(ValidationError::missing("http_listen_addr"))?;
+                validate_non_empty(listen_addr, "http_listen_addr")?;
+                listen_addr.parse::<IpAddr>().map_err(|_| {
+                    ValidationError::invalid(
+                        "http_listen_addr",
+                        "must be a valid IP address literal",
+                    )
+                })?;
 
                 if let Some(max_body_bytes) = self.http_max_body_bytes {
                     validate_positive_u64(max_body_bytes, "http_max_body_bytes")?;
@@ -1378,6 +1394,7 @@ mod tests {
             release_hash: "release-a".to_string(),
             app_type: RunnerAppType::Http,
             http_port: Some(8080),
+            http_listen_addr: Some(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
             http_max_body_bytes: Some(1024),
             http_worker_count: 2,
             http_worker_queue_capacity: 4,
@@ -1445,6 +1462,7 @@ mod tests {
             release_hash: "release-a".to_string(),
             app_type: RunnerAppType::Socket,
             http_port: None,
+            http_listen_addr: None,
             http_max_body_bytes: None,
             http_worker_count: 2,
             http_worker_queue_capacity: 4,
@@ -1508,6 +1526,7 @@ mod tests {
             .expect("bootstrap decoding should work");
         assert_eq!(decoded.app_type, RunnerAppType::Socket);
         assert_eq!(decoded.http_port, None);
+        assert_eq!(decoded.http_listen_addr, None);
         assert_eq!(decoded.http_max_body_bytes, None);
         assert_eq!(
             decoded.socket.as_ref().map(|cfg| cfg.listen_port),
@@ -1634,6 +1653,28 @@ mod tests {
             .validate()
             .expect_err("bootstrap should reject out-of-range http_worker_count");
         assert!(err.to_string().contains("http_worker_count"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_missing_http_listen_addr() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.http_listen_addr = None;
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject missing http_listen_addr");
+        assert!(err.to_string().contains("http_listen_addr"));
+    }
+
+    #[test]
+    fn runner_bootstrap_validate_rejects_invalid_http_listen_addr() {
+        let mut bootstrap = valid_http_bootstrap();
+        bootstrap.http_listen_addr = Some("localhost".to_string());
+
+        let err = bootstrap
+            .validate()
+            .expect_err("bootstrap should reject invalid http_listen_addr");
+        assert!(err.to_string().contains("http_listen_addr"));
     }
 
     #[test]

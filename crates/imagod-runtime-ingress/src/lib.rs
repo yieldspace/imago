@@ -1,6 +1,9 @@
 //! Runner-side HTTP ingress server and request/response translation utilities.
 
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -9,7 +12,7 @@ use hyper::{Request, Response, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
-use imagod_ipc::RunnerBootstrap;
+use imagod_ipc::{DEFAULT_HTTP_LISTEN_ADDR, RunnerBootstrap};
 pub use imagod_runtime_internal::{ComponentRuntime, RuntimeHttpRequest, RuntimeHttpResponse};
 use tokio::{
     net::TcpListener,
@@ -38,9 +41,10 @@ where
     R: ComponentRuntime + 'static,
 {
     let port = required_http_port(&bootstrap)?;
+    let listen_addr = required_http_listen_addr(&bootstrap)?;
     let max_http_body_bytes = required_http_max_body_bytes(&bootstrap)?;
-    let bind_addr = format!("127.0.0.1:{port}");
-    let listener = TcpListener::bind(&bind_addr).await.map_err(|e| {
+    let bind_addr = SocketAddr::new(listen_addr, port);
+    let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
         ImagodError::new(
             ErrorCode::Internal,
             STAGE_HTTP_INGRESS,
@@ -67,6 +71,30 @@ pub fn required_http_port(bootstrap: &RunnerBootstrap) -> Result<u16, ImagodErro
             "type=http requires http_port in runner bootstrap",
         )),
     }
+}
+
+pub fn required_http_listen_addr(bootstrap: &RunnerBootstrap) -> Result<IpAddr, ImagodError> {
+    let listen_addr = bootstrap
+        .http_listen_addr
+        .as_deref()
+        .unwrap_or(DEFAULT_HTTP_LISTEN_ADDR)
+        .trim();
+    if listen_addr.is_empty() {
+        return Err(ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            "http_listen_addr must be a valid IP address literal (got empty value)",
+        ));
+    }
+    listen_addr.parse::<IpAddr>().map_err(|err| {
+        ImagodError::new(
+            ErrorCode::Internal,
+            STAGE_HTTP_INGRESS,
+            format!(
+                "http_listen_addr must be a valid IP address literal (got '{listen_addr}'): {err}"
+            ),
+        )
+    })
 }
 
 pub fn required_http_max_body_bytes(bootstrap: &RunnerBootstrap) -> Result<usize, ImagodError> {
@@ -421,6 +449,7 @@ mod tests {
             release_hash: "release-test".to_string(),
             app_type: RunnerAppType::Cli,
             http_port: None,
+            http_listen_addr: None,
             http_max_body_bytes: None,
             http_worker_count: 2,
             http_worker_queue_capacity: 4,
@@ -545,6 +574,34 @@ mod tests {
     }
 
     #[test]
+    fn http_ingress_uses_default_listen_addr_when_missing() {
+        let root = new_test_root("http-listen-addr-default");
+        let mut bootstrap = new_test_bootstrap(&root);
+        bootstrap.app_type = RunnerAppType::Http;
+        bootstrap.http_listen_addr = None;
+        assert_eq!(
+            required_http_listen_addr(&bootstrap).expect("default listen addr should be accepted"),
+            DEFAULT_HTTP_LISTEN_ADDR
+                .parse::<IpAddr>()
+                .expect("default IP should parse")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn http_ingress_rejects_invalid_listen_addr() {
+        let root = new_test_root("http-listen-addr-invalid");
+        let mut bootstrap = new_test_bootstrap(&root);
+        bootstrap.app_type = RunnerAppType::Http;
+        bootstrap.http_listen_addr = Some("localhost".to_string());
+        let err = required_http_listen_addr(&bootstrap)
+            .expect_err("invalid http_listen_addr should fail");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("http_listen_addr"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn http_ingress_rejects_invalid_max_body_bytes() {
         let root = new_test_root("http-max-body-invalid");
         let mut bootstrap = new_test_bootstrap(&root);
@@ -617,6 +674,56 @@ mod tests {
                 .expect("mutex should lock")
                 .as_deref(),
             Some("/health")
+        );
+
+        let _ = shutdown_tx.send(true);
+        let joined = tokio::time::timeout(Duration::from_secs(2), ingress_task)
+            .await
+            .expect("ingress task should stop after shutdown")
+            .expect("ingress task join should succeed");
+        assert!(joined.is_ok(), "ingress should stop cleanly");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn http_ingress_binds_explicit_http_listen_addr() {
+        let root = new_test_root("http-ingress-explicit-listen");
+        let mut bootstrap = new_test_bootstrap(&root);
+        bootstrap.app_type = RunnerAppType::Http;
+        bootstrap.http_listen_addr = Some("0.0.0.0".to_string());
+        let port = reserve_test_http_port();
+        bootstrap.http_port = Some(port);
+
+        let runtime = Arc::new(MockHttpRuntime::default());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let ingress_task =
+            spawn_http_ingress_server(runtime.clone(), bootstrap, shutdown_tx.clone(), shutdown_rx)
+                .await
+                .expect("http ingress should start");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("client should connect via loopback to wildcard bind");
+        stream
+            .write_all(b"GET /wildcard HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request write should succeed");
+
+        let mut response_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            stream.read_to_end(&mut response_bytes),
+        )
+        .await
+        .expect("response read should complete")
+        .expect("response read should succeed");
+        let response_text = String::from_utf8_lossy(&response_bytes);
+        assert!(
+            response_text.starts_with("HTTP/1.1 200"),
+            "unexpected status line: {response_text}"
         );
 
         let _ = shutdown_tx.send(true);

@@ -5,12 +5,16 @@ use std::{
 };
 
 use imagod_common::ImagodError;
-use imagod_ipc::{CapabilityPolicy, RunnerAppType, RunnerSocketConfig, ServiceBinding};
+use imagod_ipc::{
+    CapabilityPolicy, DEFAULT_HTTP_LISTEN_ADDR, RunnerAppType, RunnerSocketConfig, ServiceBinding,
+};
 use sha2::{Digest, Sha256};
 
 use super::{
     DEFAULT_HTTP_MAX_BODY_BYTES, HashTarget, MAX_HTTP_MAX_BODY_BYTES, Manifest, ManifestBinding,
 };
+
+type ValidatedHttpConfig = (Option<u16>, Option<String>, Option<u64>);
 
 pub(super) trait ManifestValidator: Send + Sync {
     fn parse_manifest(&self, manifest_bytes: &[u8]) -> Result<Manifest, ImagodError>;
@@ -28,8 +32,7 @@ pub(super) trait ManifestValidator: Send + Sync {
         expected_service_name: &str,
     ) -> Result<(), ImagodError>;
 
-    fn validate_http(&self, manifest: &Manifest)
-    -> Result<(Option<u16>, Option<u64>), ImagodError>;
+    fn validate_http(&self, manifest: &Manifest) -> Result<ValidatedHttpConfig, ImagodError>;
 
     fn validate_socket(
         &self,
@@ -105,10 +108,7 @@ impl ManifestValidator for DefaultManifestValidator {
         Ok(())
     }
 
-    fn validate_http(
-        &self,
-        manifest: &Manifest,
-    ) -> Result<(Option<u16>, Option<u64>), ImagodError> {
+    fn validate_http(&self, manifest: &Manifest) -> Result<ValidatedHttpConfig, ImagodError> {
         match manifest.app_type {
             RunnerAppType::Http => {
                 let http = manifest.http.as_ref().ok_or_else(|| {
@@ -121,13 +121,23 @@ impl ManifestValidator for DefaultManifestValidator {
                         "manifest.http.port must be in range 1..=65535".to_string(),
                     ));
                 }
+                http.listen_addr.parse::<IpAddr>().map_err(|err| {
+                    super::map_bad_manifest(format!(
+                        "manifest.http.listen_addr must be a valid IP address literal (got '{}'): {err}",
+                        http.listen_addr
+                    ))
+                })?;
                 if http.max_body_bytes == 0 || http.max_body_bytes > MAX_HTTP_MAX_BODY_BYTES {
                     return Err(super::map_bad_manifest(format!(
                         "manifest.http.max_body_bytes must be in range 1..={} (got {})",
                         MAX_HTTP_MAX_BODY_BYTES, http.max_body_bytes
                     )));
                 }
-                Ok((Some(http.port), Some(http.max_body_bytes)))
+                Ok((
+                    Some(http.port),
+                    Some(http.listen_addr.clone()),
+                    Some(http.max_body_bytes),
+                ))
             }
             RunnerAppType::Cli | RunnerAppType::Rpc | RunnerAppType::Socket => {
                 if manifest.http.is_some() {
@@ -135,7 +145,7 @@ impl ManifestValidator for DefaultManifestValidator {
                         "manifest.http is only allowed when type=\"http\"".to_string(),
                     ));
                 }
-                Ok((None, None))
+                Ok((None, None, None))
             }
         }
     }
@@ -399,6 +409,10 @@ fn normalize_capability_rule_map(
 
 pub(super) fn default_http_max_body_bytes() -> u64 {
     DEFAULT_HTTP_MAX_BODY_BYTES
+}
+
+pub(super) fn default_http_listen_addr() -> String {
+    DEFAULT_HTTP_LISTEN_ADDR.to_string()
 }
 
 pub(super) fn required_hash_targets_valid(targets: &[HashTarget]) -> bool {
