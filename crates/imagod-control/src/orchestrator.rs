@@ -95,6 +95,8 @@ struct ManifestBinding {
 /// Manifest HTTP execution settings.
 struct ManifestHttp {
     port: u16,
+    #[serde(default = "default_http_listen_addr")]
+    listen_addr: String,
     #[serde(default = "default_http_max_body_bytes")]
     max_body_bytes: u64,
 }
@@ -710,6 +712,10 @@ async fn build_launch_from_release(
 
 fn default_http_max_body_bytes() -> u64 {
     manifest::default_http_max_body_bytes()
+}
+
+fn default_http_listen_addr() -> String {
+    manifest::default_http_listen_addr()
 }
 
 #[cfg(test)]
@@ -1375,8 +1381,9 @@ mod tests {
     use imago_protocol::{DeployCommandPayload, ErrorCode, ServiceState, ServiceStatusEntry};
     use imagod_common::ImagodError;
     use imagod_ipc::{
-        CapabilityPolicy, PluginComponent, PluginDependency, PluginKind, RunnerSocketConfig,
-        RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount, WasiHttpOutboundRule,
+        CapabilityPolicy, DEFAULT_HTTP_LISTEN_ADDR, PluginComponent, PluginDependency, PluginKind,
+        RunnerSocketConfig, RunnerSocketDirection, RunnerSocketProtocol, RunnerWasiMount,
+        WasiHttpOutboundRule,
     };
     use sha2::{Digest, Sha256};
     use std::{
@@ -2050,6 +2057,7 @@ mod tests {
         manifest.app_type = RunnerAppType::Http;
         manifest.http = Some(ManifestHttp {
             port: 18080,
+            listen_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
         });
 
@@ -2058,6 +2066,10 @@ mod tests {
             .expect("launch should be built");
         assert_eq!(launch.app_type, RunnerAppType::Http);
         assert_eq!(launch.http_port, Some(18080));
+        assert_eq!(
+            launch.http_listen_addr.as_deref(),
+            Some(DEFAULT_HTTP_LISTEN_ADDR)
+        );
         assert_eq!(
             launch.http_max_body_bytes,
             Some(DEFAULT_HTTP_MAX_BODY_BYTES)
@@ -2445,6 +2457,7 @@ mod tests {
         manifest.app_type = RunnerAppType::Cli;
         manifest.http = Some(ManifestHttp {
             port: 18080,
+            listen_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
             max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
         });
 
@@ -2549,6 +2562,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manifest_parse_defaults_http_listen_addr_when_missing() {
+        let manifest_json = r#"{
+  "name": "svc-a",
+  "main": "component.wasm",
+  "type": "http",
+  "http": {
+    "port": 18080,
+    "max_body_bytes": 4096
+  },
+  "assets": [],
+  "bindings": [],
+  "hash": {
+    "algorithm": "sha256",
+    "targets": ["wasm", "manifest", "assets"]
+  }
+}"#;
+
+        let manifest = serde_json::from_str::<Manifest>(manifest_json)
+            .expect("http manifest without listen_addr should parse");
+        assert_eq!(
+            manifest.http.map(|http| http.listen_addr),
+            Some(DEFAULT_HTTP_LISTEN_ADDR.to_string())
+        );
+    }
+
     #[tokio::test]
     async fn build_launch_rejects_http_max_body_bytes_out_of_range() {
         let root = temp_dir_path("orchestrator-http-max-body-range");
@@ -2560,6 +2599,7 @@ mod tests {
             manifest.app_type = RunnerAppType::Http;
             manifest.http = Some(ManifestHttp {
                 port: 18080,
+                listen_addr: DEFAULT_HTTP_LISTEN_ADDR.to_string(),
                 max_body_bytes: invalid,
             });
 
@@ -2569,6 +2609,29 @@ mod tests {
             assert_eq!(err.code, ErrorCode::BadManifest);
             assert!(err.message.contains("max_body_bytes"));
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_launch_rejects_invalid_http_listen_addr() {
+        let root = temp_dir_path("orchestrator-http-listen-addr-range");
+        fs::create_dir_all(&root).expect("release dir should exist");
+        fs::write(root.join("component.wasm"), b"wasm").expect("component should exist");
+
+        let mut manifest = valid_manifest();
+        manifest.app_type = RunnerAppType::Http;
+        manifest.http = Some(ManifestHttp {
+            port: 18080,
+            listen_addr: "localhost".to_string(),
+            max_body_bytes: DEFAULT_HTTP_MAX_BODY_BYTES,
+        });
+
+        let err = build_launch_from_release(&root, "release-a", &root, &manifest)
+            .await
+            .expect_err("invalid listen_addr should fail");
+        assert_eq!(err.code, ErrorCode::BadManifest);
+        assert!(err.message.contains("listen_addr"));
 
         let _ = fs::remove_dir_all(root);
     }

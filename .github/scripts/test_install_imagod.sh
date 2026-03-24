@@ -122,8 +122,87 @@ run_install() {
       "$@"
 }
 
+run_install_default_dir() {
+  local description="$1"
+  shift
+
+  echo "== ${description}"
+  local release_base_url="${IMAGOD_TEST_RELEASE_BASE_URL:-${download_base}}"
+  IMAGOD_RELEASES_API_URL="${base_url}/api/releases.json" \
+    IMAGOD_RELEASE_TAG_API_BASE="${base_url}/api/tags" \
+    IMAGOD_RELEASE_BASE_URL="${release_base_url}" \
+    IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION="${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" \
+    IMAGOD_TEST_STUB_LOG="${IMAGOD_TEST_STUB_LOG:-}" \
+    bash "${repo_root}/scripts/install_imagod.sh" \
+      "$@"
+}
+
+run_install_tty() {
+  local description="$1"
+  local install_dir="$2"
+  local transcript_path="$3"
+  local tty_input="$4"
+  shift 4
+
+  echo "== ${description}"
+  local release_base_url="${IMAGOD_TEST_RELEASE_BASE_URL:-${download_base}}"
+  IMAGOD_RELEASES_API_URL="${base_url}/api/releases.json" \
+    IMAGOD_RELEASE_TAG_API_BASE="${base_url}/api/tags" \
+    IMAGOD_RELEASE_BASE_URL="${release_base_url}" \
+    IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION="${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" \
+    IMAGOD_TEST_STUB_LOG="${IMAGOD_TEST_STUB_LOG:-}" \
+    INSTALL_IMAGOD_DIR="${install_dir}" \
+    INSTALL_IMAGOD_INPUT="${tty_input}" \
+    INSTALL_IMAGOD_SCRIPT="${repo_root}/scripts/install_imagod.sh" \
+    INSTALL_IMAGOD_TRANSCRIPT="${transcript_path}" \
+    python3 - "$@" <<'PY'
+import os
+import pty
+import sys
+
+script = os.environ["INSTALL_IMAGOD_SCRIPT"]
+install_dir = os.environ["INSTALL_IMAGOD_DIR"]
+transcript_path = os.environ["INSTALL_IMAGOD_TRANSCRIPT"]
+tty_input = os.environ.get("INSTALL_IMAGOD_INPUT", "").encode()
+cmd = ["bash", script, "--install-dir", install_dir, *sys.argv[1:]]
+
+pid, master_fd = pty.fork()
+if pid == 0:
+    os.execvpe(cmd[0], cmd, os.environ)
+
+if tty_input:
+    os.write(master_fd, tty_input)
+
+chunks = []
+while True:
+    try:
+        chunk = os.read(master_fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    chunks.append(chunk)
+
+os.close(master_fd)
+_, status = os.waitpid(pid, 0)
+with open(transcript_path, "wb") as transcript_file:
+    transcript_file.write(b"".join(chunks))
+sys.exit(os.waitstatus_to_exitcode(status))
+PY
+}
+
 plain_dir="${tmp_root}/plain-install"
 feature_dir="${tmp_root}/feature-install"
+linux_default_home="${tmp_root}/linux-default-home"
+linux_default_transcript="${tmp_root}/linux-default.transcript"
+macos_default_transcript="${tmp_root}/macos-default.transcript"
+macos_shadow_root="${tmp_root}/macos-shadow"
+macos_stub_bin="${tmp_root}/macos-default-bin"
+macos_stub_log="${tmp_root}/macos-default.log"
+tty_default_dir="${tmp_root}/tty-default-install"
+tty_default_transcript="${tmp_root}/tty-default.transcript"
+tty_variant_dir="${tmp_root}/tty-variant-install"
+tty_variant_transcript="${tmp_root}/tty-variant.transcript"
 service_dir="${tmp_root}/service-install"
 service_log="${tmp_root}/service-install.log"
 legacy_service_dir="${tmp_root}/legacy-service-install"
@@ -131,6 +210,129 @@ legacy_service_log="${tmp_root}/legacy-service.log"
 legacy_stub_bin="${tmp_root}/legacy-service-bin"
 legacy_systemd_unit="${tmp_root}/legacy-imagod.service"
 legacy_download_base="${base_url}/downloads/imagod-v0.5.0"
+is_root=0
+if [ "$(id -u)" -eq 0 ]; then
+  is_root=1
+fi
+
+mkdir -p "${linux_default_home}" "${macos_stub_bin}"
+
+cat > "${macos_stub_bin}/sudo" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+  printf "sudo %s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+fi
+
+IMAGOD_TEST_SUDO_ACTIVE=1 exec "$@"
+EOF
+chmod +x "${macos_stub_bin}/sudo"
+
+cat > "${macos_stub_bin}/install" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+  printf "install %s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+fi
+
+shadow_root="${IMAGOD_TEST_SHADOW_ROOT:-}"
+mode=""
+create_dir=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m)
+      mode="$2"
+      shift 2
+      ;;
+    -d)
+      create_dir=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+map_destination() {
+  case "$1" in
+    /usr/local/bin|/usr/local/bin/*)
+      if [ "${IMAGOD_TEST_SUDO_ACTIVE:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
+        exit 1
+      fi
+      if [ -n "${shadow_root}" ]; then
+        printf '%s%s\n' "${shadow_root}" "$1"
+        return 0
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$1"
+}
+
+if [ "${create_dir}" = "1" ]; then
+  dest="$(map_destination "$1")"
+  mkdir -p -- "${dest}"
+  exit 0
+fi
+
+src="$1"
+dest="$(map_destination "$2")"
+mkdir -p -- "$(dirname "${dest}")"
+cp "${src}" "${dest}"
+if [ -n "${mode}" ]; then
+  chmod "${mode}" "${dest}"
+fi
+EOF
+chmod +x "${macos_stub_bin}/install"
+
+(
+  HOME="${linux_default_home}" \
+  IMAGOD_TEST_UNAME_S=Linux \
+  run_install_default_dir \
+    "dry-run keeps Linux non-root default install dir under HOME" \
+    --target riscv64gc-unknown-linux-musl \
+    --dry-run
+) > "${linux_default_transcript}"
+
+if [ "${is_root}" = "1" ]; then
+  grep -F "install_dir: /usr/local/bin" "${linux_default_transcript}"
+else
+  grep -F "install_dir: ${linux_default_home}/.local/bin" "${linux_default_transcript}"
+fi
+
+(
+  PATH="${macos_stub_bin}:${PATH}" \
+  IMAGOD_TEST_UNAME_S=Darwin \
+  IMAGOD_TEST_STUB_LOG="${macos_stub_log}" \
+  IMAGOD_TEST_SHADOW_ROOT="${macos_shadow_root}" \
+  run_install_default_dir \
+    "macOS defaults to /usr/local/bin and falls back to sudo when needed" \
+    --target riscv64gc-unknown-linux-musl
+) > "${macos_default_transcript}"
+
+cmp -s \
+  "${macos_shadow_root}/usr/local/bin/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -F "install_dir: /usr/local/bin" "${macos_default_transcript}"
+grep -F "installed binary: /usr/local/bin/imagod" "${macos_default_transcript}"
+if [ "${is_root}" = "1" ]; then
+  if grep -F "sudo install" "${macos_stub_log}" >/dev/null 2>&1; then
+    echo "unexpected sudo usage while running installer regression as root" >&2
+    exit 1
+  fi
+else
+  grep -Fx "sudo install -d -- /usr/local/bin" "${macos_stub_log}"
+  grep -F "sudo install -m 0755 --" "${macos_stub_log}"
+fi
+grep -F "/usr/local/bin/imagod" "${macos_stub_log}"
 
 run_install \
   "install default variant from fixture catalog" \
@@ -150,6 +352,37 @@ run_install \
 cmp -s \
   "${feature_dir}/imagod" \
   "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek"
+
+run_install_tty \
+  "interactive Enter installs the preselected default variant" \
+  "${tty_default_dir}" \
+  "${tty_default_transcript}" \
+  $'\n' \
+  --target riscv64gc-unknown-linux-musl
+
+cmp -s \
+  "${tty_default_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -F "selected_variant: imagod-riscv64gc-unknown-linux-musl (target=riscv64gc-unknown-linux-musl, features=<none>)" "${tty_default_transcript}"
+if grep -F "Available release variants:" "${tty_default_transcript}" >/dev/null 2>&1; then
+  echo "unexpected variant list in Enter-to-install transcript" >&2
+  exit 1
+fi
+
+run_install_tty \
+  "interactive s opens the variant list and allows selecting a feature build" \
+  "${tty_variant_dir}" \
+  "${tty_variant_transcript}" \
+  $'s\n2\n' \
+  --target riscv64gc-unknown-linux-musl
+
+cmp -s \
+  "${tty_variant_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek"
+
+grep -F "Available release variants:" "${tty_variant_transcript}"
+grep -F "[default]" "${tty_variant_transcript}"
 
 IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION=1 IMAGOD_TEST_STUB_LOG="${service_log}" run_install \
   "install default variant and delegate service setup to imagod service install" \

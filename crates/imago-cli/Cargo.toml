@@ -25,7 +25,6 @@ imago-project-config = { workspace = true }
 imago-protocol = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

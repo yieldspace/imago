@@ -36,7 +36,7 @@ use wasmtime_wasi::{
     DirPerms, FilePerms, WasiCtxBuilder, p2::add_to_linker_async, p2::bindings::Command,
     sockets::SocketAddrUse,
 };
-use wasmtime_wasi_http::{add_only_http_to_linker_async, bindings::Proxy};
+use wasmtime_wasi_http::p2::{add_only_http_to_linker_async, bindings::Proxy};
 
 use crate::{
     HTTP_REQUEST_QUEUE_CAPACITY, NativePluginContext, STAGE_RUNTIME, WasiState, app_type_text,

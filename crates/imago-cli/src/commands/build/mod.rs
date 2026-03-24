@@ -48,6 +48,7 @@ pub(crate) use config_parse::*;
 pub(crate) use manifest_hash::*;
 
 const DEFAULT_TARGET_NAME: &str = "default";
+const DEFAULT_HTTP_LISTEN_ADDR: &str = "127.0.0.1";
 const DEFAULT_HTTP_MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_HTTP_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_RESTART_POLICY: &str = "never";
@@ -288,6 +289,7 @@ pub(crate) struct ProjectBindingSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestHttp {
     port: u16,
+    listen_addr: String,
     max_body_bytes: u64,
 }
 
@@ -1833,6 +1835,10 @@ version = "0.1.0"
         assert_eq!(manifest.app_type, "http");
         assert_eq!(manifest.http.as_ref().map(|v| v.port), Some(18080));
         assert_eq!(
+            manifest.http.as_ref().map(|v| v.listen_addr.as_str()),
+            Some(DEFAULT_HTTP_LISTEN_ADDR)
+        );
+        assert_eq!(
             manifest.http.as_ref().map(|v| v.max_body_bytes),
             Some(DEFAULT_HTTP_MAX_BODY_BYTES)
         );
@@ -1863,6 +1869,36 @@ version = "0.1.0"
         let output = build_project("default", &root).expect("build should succeed");
         let manifest = read_manifest(&root, &output.manifest_path);
         assert_eq!(manifest.http.as_ref().map(|v| v.max_body_bytes), Some(4096));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_succeeds_for_http_type_with_explicit_http_listen_addr() {
+        let root = new_temp_dir("http-type-listen-addr-valid");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-http"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [http]
+    port = 18080
+    listen_addr = "::"
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+        let output = build_project("default", &root).expect("build should succeed");
+        let manifest = read_manifest(&root, &output.manifest_path);
+        assert_eq!(
+            manifest.http.as_ref().map(|v| v.listen_addr.as_str()),
+            Some("::")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1974,6 +2010,46 @@ version = "0.1.0"
             let err =
                 build_project("default", &root).expect_err("invalid max_body_bytes must fail");
             assert!(err.to_string().contains("http.max_body_bytes"));
+
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_http_listen_addr() {
+        for (suffix, listen_addr) in [
+            ("empty", r#"listen_addr = """#),
+            ("hostname", r#"listen_addr = "localhost""#),
+            ("host-port", r#"listen_addr = "0.0.0.0:8080""#),
+            ("garbage", r#"listen_addr = "not-an-ip""#),
+        ] {
+            let root = new_temp_dir(&format!("http-listen-addr-{suffix}"));
+            write_imago_toml(
+                &root,
+                &format!(
+                    r#"
+    name = "svc-http"
+    main = "build/app.wasm"
+    type = "http"
+    
+    [http]
+    port = 18080
+    {listen_addr}
+    
+    [target.default]
+    remote = "127.0.0.1:4443"
+    "#
+                ),
+            );
+            write_file(&root.join("build/app.wasm"), b"wasm-http");
+
+            let err =
+                build_project("default", &root).expect_err("invalid http.listen_addr must fail");
+            let err_text = err.to_string();
+            assert!(
+                err_text.contains("http.listen_addr") || err_text.contains("valid IP address"),
+                "unexpected error for {suffix}: {err_text}"
+            );
 
             let _ = fs::remove_dir_all(root);
         }

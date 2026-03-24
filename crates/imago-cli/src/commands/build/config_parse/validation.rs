@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::build::DEFAULT_HTTP_LISTEN_ADDR;
 
 pub(in crate::commands::build) fn required_string(
     root: &toml::Table,
@@ -76,8 +77,29 @@ pub(in crate::commands::build) fn parse_http_section(
         None => DEFAULT_HTTP_MAX_BODY_BYTES,
     };
 
+    let listen_addr = match table.get("listen_addr") {
+        Some(value) => {
+            let listen_addr = value
+                .as_str()
+                .ok_or_else(|| anyhow!("http.listen_addr must be a valid IP address"))?
+                .trim()
+                .to_string();
+            if listen_addr.is_empty() {
+                return Err(anyhow!(
+                    "http.listen_addr must be a valid IP address (got empty value)"
+                ));
+            }
+            listen_addr.parse::<IpAddr>().map_err(|err| {
+                anyhow!("http.listen_addr must be a valid IP address (got '{listen_addr}'): {err}")
+            })?;
+            listen_addr
+        }
+        None => DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+    };
+
     Ok(Some(ManifestHttp {
         port,
+        listen_addr,
         max_body_bytes,
     }))
 }

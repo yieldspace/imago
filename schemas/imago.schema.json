@@ -361,6 +361,12 @@
     "HttpSection": {
       "additionalProperties": true,
       "properties": {
+        "listen_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_body_bytes": {
           "format": "uint64",
           "minimum": 0,

@@ -74,11 +74,12 @@ Environment:
 
 Notes:
   - Supported OS: Linux and macOS.
+  - Default install dir: macOS uses /usr/local/bin; Linux uses /usr/local/bin for root and ~/.local/bin for non-root unless --install-dir is set.
   - Release resolution: --tag > latest stable imagod-v* release from GitHub Releases API.
   - imagod feature variants are published as imagod-<target>+<feature1>+<feature2>.
   - Use --prerelease when the latest imagod build is still prerelease-only.
   - Service setup is disabled by default. Use --with-service to opt in.
-  - Interactive terminal runs show release variants with the auto-detected imagod-<target> entry preselected; use -y to skip the prompt.
+  - Interactive terminal runs preselect the default imagod-<target> variant; press Enter to install it, `s` to open the release variant list, or use -y to skip prompts.
   - SSH targets call `ssh <host> imagod proxy-stdio` on the remote host.
   - The default SSH control socket is /run/imago/imagod.sock and can be overridden in imagod.toml with control_socket_path.
   - --with-service runs `imagod service install --config /etc/imago/imagod.toml` after the binary install step, or falls back to legacy service setup when the installed imagod release predates that subcommand.
@@ -544,13 +545,23 @@ resolve_target_triple() {
 }
 
 default_install_dir() {
-  if [ "$(id -u)" -eq 0 ]; then
-    printf '/usr/local/bin\n'
-    return 0
-  fi
+  case "$1" in
+    darwin)
+      printf '/usr/local/bin\n'
+      ;;
+    linux)
+      if [ "$(id -u)" -eq 0 ]; then
+        printf '/usr/local/bin\n'
+        return 0
+      fi
 
-  home_dir="$(resolve_home_dir)"
-  printf '%s/.local/bin\n' "${home_dir}"
+      home_dir="$(resolve_home_dir)"
+      printf '%s/.local/bin\n' "${home_dir}"
+      ;;
+    *)
+      die "unsupported OS for default install dir: $1"
+      ;;
+  esac
 }
 
 run_as_root() {
@@ -895,6 +906,48 @@ render_variant_candidates() {
   ' "$1"
 }
 
+describe_variant_candidate() {
+  describe_catalog_file="$1"
+  describe_asset_name="$2"
+
+  awk -F '\t' -v asset_name="${describe_asset_name}" '
+    $2 == asset_name {
+      features = ($4 == "" ? "<none>" : $4)
+      printf "%s (target=%s, features=%s)\n", $2, $3, features
+      found = 1
+      exit
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' "${describe_catalog_file}"
+}
+
+write_selection_summary() {
+  summary_tag="$1"
+  summary_release_resolution="$2"
+  summary_os="$3"
+  summary_target="$4"
+  summary_target_resolution="$5"
+  summary_libc="$6"
+  summary_requested_features="$7"
+  summary_install_dir="$8"
+  summary_service="$9"
+
+  printf '%s\n' "Install imagod with the following settings?"
+  printf '  tag: %s\n' "${summary_tag}"
+  printf '  release_resolution: %s\n' "${summary_release_resolution}"
+  printf '  os: %s\n' "${summary_os}"
+  printf '  requested_target: %s\n' "${summary_target}"
+  printf '  requested_features: %s\n' "$(feature_csv_display "${summary_requested_features}")"
+  printf '  target_resolution: %s\n' "${summary_target_resolution}"
+  if [ "${summary_target_resolution}" = "auto" ] && [ "${summary_os}" = "linux" ]; then
+    printf '  libc: %s\n' "${summary_libc}"
+  fi
+  printf '  install_dir: %s\n' "${summary_install_dir}"
+  printf '  service: %s\n' "${summary_service}"
+}
+
 build_release_variant_catalog() {
   release_metadata_file="$1"
   desired_target="$2"
@@ -975,18 +1028,55 @@ select_release_asset_or_exit() {
   fi
 
   {
-    printf '%s\n' "Install imagod with the following settings?"
-    printf '  tag: %s\n' "${selection_tag}"
-    printf '  release_resolution: %s\n' "${selection_release_resolution}"
-    printf '  os: %s\n' "${selection_os}"
-    printf '  requested_target: %s\n' "${selection_target}"
-    printf '  requested_features: %s\n' "$(feature_csv_display "${selection_requested_features}")"
-    printf '  target_resolution: %s\n' "${selection_target_resolution}"
-    if [ "${selection_target_resolution}" = "auto" ] && [ "${selection_os}" = "linux" ]; then
-      printf '  libc: %s\n' "${selection_libc}"
+    write_selection_summary \
+      "${selection_tag}" \
+      "${selection_release_resolution}" \
+      "${selection_os}" \
+      "${selection_target}" \
+      "${selection_target_resolution}" \
+      "${selection_libc}" \
+      "${selection_requested_features}" \
+      "${selection_install_dir}" \
+      "${selection_service}"
+  } >/dev/tty
+
+  if [ -n "${selection_default_asset}" ]; then
+    selection_default_description="$(describe_variant_candidate "${selection_catalog_file}" "${selection_default_asset}" || true)"
+    if [ -z "${selection_default_description}" ]; then
+      selection_default_description="${selection_default_asset}"
     fi
-    printf '  install_dir: %s\n' "${selection_install_dir}"
-    printf '  service: %s\n' "${selection_service}"
+
+    {
+      printf '  selected_variant: %s\n' "${selection_default_description}"
+      printf 'Press Enter to install the selected variant, s to show variants, or q to cancel '
+    } >/dev/tty
+
+    while :; do
+      if ! IFS= read -r selection_reply </dev/tty; then
+        selection_reply=""
+      fi
+
+      case "${selection_reply}" in
+        q|Q|quit|QUIT)
+          log "installation cancelled by user"
+          exit 0
+          ;;
+        "")
+          printf '%s\n' "${selection_default_asset}"
+          return 0
+          ;;
+        s|S)
+          break
+          ;;
+        *)
+          warn "invalid selection: ${selection_reply}"
+          printf 'Press Enter to install the selected variant, s to show variants, or q to cancel ' >/dev/tty
+          ;;
+      esac
+    done
+  fi
+
+  {
     printf '%s\n' "Available release variants:"
     awk -F '\t' -v default_asset="${selection_default_asset}" '
       {
@@ -1461,7 +1551,7 @@ main() {
   if [ -n "${INSTALL_DIR}" ]; then
     install_dir="${INSTALL_DIR}"
   else
-    install_dir="$(default_install_dir)"
+    install_dir="$(default_install_dir "${os}")"
   fi
   validate_install_dir_path "${install_dir}"
 

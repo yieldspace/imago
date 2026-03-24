@@ -1,6 +1,6 @@
 //! Typed configuration model for `imago.toml` plus JSON Schema derivation.
 
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{borrow::Cow, collections::BTreeMap, net::IpAddr};
 
 use anyhow::{Result, anyhow};
 use schemars::JsonSchema;
@@ -169,6 +169,7 @@ pub struct AssetEntry {
 pub struct HttpSection {
     #[schemars(required)]
     pub port: Option<u16>,
+    pub listen_addr: Option<String>,
     pub max_body_bytes: Option<u64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, JsonValue>,
@@ -377,6 +378,20 @@ pub fn validate_for_build(document: &ImagoTomlDocument) -> Result<()> {
                 "socket.direction must be one of: inbound, outbound, both",
             )?;
         }
+    }
+
+    if let Some(http) = &config.http
+        && let Some(listen_addr) = &http.listen_addr
+    {
+        let trimmed = listen_addr.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!(
+                "http.listen_addr must be a valid IP address (got empty value)"
+            ));
+        }
+        trimmed.parse::<IpAddr>().map_err(|err| {
+            anyhow!("http.listen_addr must be a valid IP address (got '{trimmed}'): {err}")
+        })?;
     }
 
     if let Some(targets) = &config.target {

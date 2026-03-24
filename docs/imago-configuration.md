@@ -214,6 +214,22 @@ port = 8080
 
 - Validation error notes: missing or out-of-range values fail validation.
 
+### The `listen_addr` field
+
+- Type: `string`
+- Required/Optional: Optional.
+- Accepted values / Constraints: valid IP address literal only. Hostnames such as `localhost` and `host:port` forms are rejected.
+- Default: `127.0.0.1`.
+- Example:
+
+```toml
+[http]
+port = 8080
+listen_addr = "0.0.0.0"
+```
+
+- Validation error notes: empty or non-IP values fail validation.
+
 ### The `max_body_bytes` field
 
 - Type: `integer`
@@ -225,6 +241,7 @@ port = 8080
 ```toml
 [http]
 port = 8080
+listen_addr = "127.0.0.1"
 max_body_bytes = 4194304
 ```
 

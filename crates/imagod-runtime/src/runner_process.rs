@@ -467,6 +467,7 @@ mod tests {
             release_hash: "release-a".to_string(),
             app_type: RunnerAppType::Cli,
             http_port: None,
+            http_listen_addr: None,
             http_max_body_bytes: None,
             http_worker_count: 2,
             http_worker_queue_capacity: 4,

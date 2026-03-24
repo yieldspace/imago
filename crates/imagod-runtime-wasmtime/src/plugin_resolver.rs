@@ -13,7 +13,7 @@ use wasmtime::{
     component::{Component, Func, Linker, ResourceDynamic, Val, types},
 };
 use wasmtime_wasi::p2::add_to_linker_async;
-use wasmtime_wasi_http::add_only_http_to_linker_async;
+use wasmtime_wasi_http::p2::add_only_http_to_linker_async;
 
 use crate::{
     WasiState, WasmDependencyResourceKey,
