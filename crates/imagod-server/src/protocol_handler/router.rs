@@ -22,6 +22,7 @@ use imago_protocol::{
 use imagod_common::ImagodError;
 use imagod_config::upsert_tls_known_client_key;
 use imagod_control::{OperationManager, SpawnTransition};
+use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use semver::{Version, VersionReq};
 use serde::Serialize;
 use tokio::io::AsyncWrite;
@@ -671,19 +672,12 @@ fn load_server_public_key_hex(path: &Path) -> Result<String, ImagodError> {
         ))
     })?;
     let mut reader = BufReader::new(file);
-    let private_key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|err| {
-            bindings_cert_inspect_internal_error(format!(
-                "failed to parse key {}: {err}",
-                path.display()
-            ))
-        })?
-        .ok_or_else(|| {
-            bindings_cert_inspect_internal_error(format!(
-                "private key is missing: {}",
-                path.display()
-            ))
-        })?;
+    let private_key = PrivateKeyDer::from_pem_reader(&mut reader).map_err(|err| {
+        bindings_cert_inspect_internal_error(format!(
+            "failed to parse key {}: {err}",
+            path.display()
+        ))
+    })?;
     let signing_key = provider
         .key_provider
         .load_private_key(private_key)

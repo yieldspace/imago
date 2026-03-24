@@ -21,7 +21,7 @@ use rustls::{
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     },
     crypto::CryptoProvider,
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject},
     sign::CertifiedKey,
 };
 use semver::{Version, VersionReq};
@@ -496,14 +496,12 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, ImagodError> 
         )
     })?;
     let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|err| {
-            remote_error(
-                ErrorCode::BadRequest,
-                format!("private key parse failed: {err}"),
-            )
-        })?
-        .ok_or_else(|| remote_error(ErrorCode::BadRequest, "private key is missing"))
+    PrivateKeyDer::from_pem_reader(&mut reader).map_err(|err| {
+        remote_error(
+            ErrorCode::BadRequest,
+            format!("private key parse failed: {err}"),
+        )
+    })
 }
 
 fn build_client_raw_public_key_resolver(

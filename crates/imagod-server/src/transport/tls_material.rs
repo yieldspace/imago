@@ -3,7 +3,9 @@ use std::{io::BufReader, path::Path, sync::Arc};
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_config::ImagodConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer, UnixTime, pem::PemObject,
+};
 
 use super::STAGE_TRANSPORT;
 use crate::protocol_handler::{
@@ -196,21 +198,13 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, ImagodError> 
         )
     })?;
     let mut reader = BufReader::new(file);
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                STAGE_TRANSPORT,
-                format!("failed to parse key {}: {e}", path.display()),
-            )
-        })?
-        .ok_or_else(|| {
-            ImagodError::new(
-                ErrorCode::BadRequest,
-                STAGE_TRANSPORT,
-                format!("private key is missing: {}", path.display()),
-            )
-        })?;
+    let key = PrivateKeyDer::from_pem_reader(&mut reader).map_err(|e| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_TRANSPORT,
+            format!("failed to parse key {}: {e}", path.display()),
+        )
+    })?;
     Ok(key)
 }
 

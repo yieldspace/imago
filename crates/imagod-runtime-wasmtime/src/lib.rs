@@ -10,17 +10,25 @@ mod rpc_values;
 mod runtime_entry;
 mod wasi_nn;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, error::Error as _, sync::Arc};
 
+use http_body_util::BodyExt;
 use imago_protocol::ErrorCode;
 use imagod_common::ImagodError;
 use imagod_ipc::{ResourceMap, RunnerAppType, WasiHttpOutboundRule};
+use tokio::{net::TcpStream, time::timeout};
+use tokio_rustls::TlsConnector;
 use wasmtime::component::{ResourceAny, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
-    WasiHttpCtx, WasiHttpView,
-    bindings::http::types::ErrorCode as WasiHttpErrorCode,
-    types::{HostFutureIncomingResponse, OutgoingRequestConfig, default_send_request},
+    WasiHttpCtx,
+    io::TokioIo,
+    p2::{
+        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+        bindings::http::types::{DnsErrorPayload, ErrorCode as WasiHttpErrorCode},
+        body::HyperOutgoingBody,
+        types::{HostFutureIncomingResponse, IncomingResponse, OutgoingRequestConfig},
+    },
 };
 
 pub use native_plugins::{NativePlugin, NativePluginRegistry, NativePluginRegistryBuilder};
@@ -171,9 +179,20 @@ pub struct WasiState {
     pub(crate) wasi: WasiCtx,
     pub(crate) http: WasiHttpCtx,
     pub(crate) wasi_nn: wasmtime_wasi_nn::wit::WasiNnCtx,
-    pub(crate) wasi_http_outbound: Vec<WasiHttpOutboundRule>,
+    pub(crate) http_hooks: WasiHttpOutboundHooks,
     pub(crate) native_plugin_context: NativePluginContext,
     pub(crate) wasm_dependency_resources: WasmDependencyResourceState,
+}
+
+#[derive(Debug)]
+pub(crate) struct WasiHttpOutboundHooks {
+    rules: Vec<WasiHttpOutboundRule>,
+}
+
+impl WasiHttpOutboundHooks {
+    fn new(rules: Vec<WasiHttpOutboundRule>) -> Self {
+        Self { rules }
+    }
 }
 
 impl WasiState {
@@ -188,7 +207,7 @@ impl WasiState {
             wasi,
             http,
             wasi_nn: wasi_nn::new_context(),
-            wasi_http_outbound,
+            http_hooks: WasiHttpOutboundHooks::new(wasi_http_outbound),
             native_plugin_context,
             wasm_dependency_resources: WasmDependencyResourceState::default(),
         }
@@ -239,19 +258,21 @@ impl WasiView for WasiState {
 }
 
 impl WasiHttpView for WasiState {
-    fn ctx(&mut self) -> &mut WasiHttpCtx {
-        &mut self.http
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.http_hooks,
+        }
     }
+}
 
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-
+impl WasiHttpHooks for WasiHttpOutboundHooks {
     fn send_request(
         &mut self,
-        request: hyper::Request<wasmtime_wasi_http::body::HyperOutgoingBody>,
+        request: hyper::Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
-    ) -> wasmtime_wasi_http::HttpResult<HostFutureIncomingResponse> {
+    ) -> HttpResult<HostFutureIncomingResponse> {
         let Some(authority) = request.uri().authority() else {
             return Err(WasiHttpErrorCode::HttpRequestUriInvalid.into());
         };
@@ -259,12 +280,156 @@ impl WasiHttpView for WasiState {
         let request_port = authority
             .port_u16()
             .unwrap_or(if config.use_tls { 443 } else { 80 });
-        if is_http_outbound_allowed(&self.wasi_http_outbound, request_host, request_port) {
-            Ok(default_send_request(request, config))
+        if is_http_outbound_allowed(&self.rules, request_host, request_port) {
+            Ok(spawn_outgoing_request(request, config))
         } else {
             Err(WasiHttpErrorCode::HttpRequestDenied.into())
         }
     }
+}
+
+fn spawn_outgoing_request(
+    request: hyper::Request<HyperOutgoingBody>,
+    config: OutgoingRequestConfig,
+) -> HostFutureIncomingResponse {
+    let handle =
+        wasmtime_wasi::runtime::spawn(
+            async move { Ok(send_outgoing_request(request, config).await) },
+        );
+    HostFutureIncomingResponse::pending(handle)
+}
+
+async fn send_outgoing_request(
+    mut request: hyper::Request<HyperOutgoingBody>,
+    OutgoingRequestConfig {
+        use_tls,
+        connect_timeout,
+        first_byte_timeout,
+        between_bytes_timeout,
+    }: OutgoingRequestConfig,
+) -> Result<IncomingResponse, WasiHttpErrorCode> {
+    let authority = request
+        .uri()
+        .authority()
+        .ok_or(WasiHttpErrorCode::HttpRequestUriInvalid)?;
+    let host = authority.host().to_string();
+    let connect_authority = if authority.port().is_some() {
+        authority.as_str().to_string()
+    } else {
+        let port = if use_tls { 443 } else { 80 };
+        if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        }
+    };
+
+    let tcp_stream = timeout(connect_timeout, TcpStream::connect(&connect_authority))
+        .await
+        .map_err(|_| WasiHttpErrorCode::ConnectionTimeout)?
+        .map_err(|err| map_connect_error(&err))?;
+
+    let (mut sender, worker) = if use_tls {
+        let root_store =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(config));
+        let domain = rustls::pki_types::ServerName::try_from(host.as_str())
+            .map_err(|_| dns_error("invalid dns name", 0))?
+            .to_owned();
+        let stream = connector
+            .connect(domain, tcp_stream)
+            .await
+            .map_err(|_| WasiHttpErrorCode::TlsProtocolError)?;
+        let stream = TokioIo::new(stream);
+
+        let (sender, conn) = timeout(
+            connect_timeout,
+            hyper::client::conn::http1::handshake(stream),
+        )
+        .await
+        .map_err(|_| WasiHttpErrorCode::ConnectionTimeout)?
+        .map_err(map_hyper_request_error)?;
+
+        let worker = wasmtime_wasi::runtime::spawn(async move {
+            let _ = conn.await;
+        });
+
+        (sender, worker)
+    } else {
+        let stream = TokioIo::new(tcp_stream);
+        let (sender, conn) = timeout(
+            connect_timeout,
+            hyper::client::conn::http1::handshake(stream),
+        )
+        .await
+        .map_err(|_| WasiHttpErrorCode::ConnectionTimeout)?
+        .map_err(map_hyper_request_error)?;
+
+        let worker = wasmtime_wasi::runtime::spawn(async move {
+            let _ = conn.await;
+        });
+
+        (sender, worker)
+    };
+
+    *request.uri_mut() = hyper::Uri::builder()
+        .path_and_query(
+            request
+                .uri()
+                .path_and_query()
+                .map(|path| path.as_str())
+                .unwrap_or("/"),
+        )
+        .build()
+        .expect("comes from valid request");
+
+    let resp = timeout(first_byte_timeout, sender.send_request(request))
+        .await
+        .map_err(|_| WasiHttpErrorCode::ConnectionReadTimeout)?
+        .map_err(map_hyper_request_error)?
+        .map(|body| body.map_err(map_hyper_request_error).boxed_unsync());
+
+    Ok(IncomingResponse {
+        resp,
+        worker: Some(worker),
+        between_bytes_timeout,
+    })
+}
+
+fn map_connect_error(err: &std::io::Error) -> WasiHttpErrorCode {
+    match err.kind() {
+        std::io::ErrorKind::AddrNotAvailable => dns_error("address not available", 0),
+        _ => {
+            if err
+                .to_string()
+                .starts_with("failed to lookup address information")
+            {
+                dns_error("address not available", 0)
+            } else {
+                WasiHttpErrorCode::ConnectionRefused
+            }
+        }
+    }
+}
+
+fn dns_error(rcode: &str, info_code: u16) -> WasiHttpErrorCode {
+    WasiHttpErrorCode::DnsError(DnsErrorPayload {
+        rcode: Some(rcode.to_string()),
+        info_code: Some(info_code),
+    })
+}
+
+fn map_hyper_request_error(err: hyper::Error) -> WasiHttpErrorCode {
+    if let Some(cause) = err.source()
+        && let Some(code) = cause.downcast_ref::<WasiHttpErrorCode>()
+    {
+        return code.clone();
+    }
+
+    WasiHttpErrorCode::HttpProtocolError
 }
 
 fn is_http_outbound_allowed(
@@ -292,7 +457,10 @@ mod tests {
     use http_body_util::{BodyExt, Empty};
     use imagod_ipc::RunnerAppType;
     use std::time::Duration;
-    use wasmtime_wasi_http::bindings::http::types::ErrorCode as WasiHttpErrorCode;
+    use wasmtime_wasi::p2::Pollable;
+    use wasmtime_wasi_http::p2::{
+        WasiHttpHooks, bindings::http::types::ErrorCode as WasiHttpErrorCode,
+    };
 
     #[test]
     fn native_plugin_app_type_text_is_stable() {
@@ -408,11 +576,91 @@ mod tests {
         };
 
         let err = state
+            .http_hooks
             .send_request(request, config)
             .expect_err("request must be denied by outbound allowlist");
         assert!(matches!(
             err.downcast_ref(),
             Some(code) if matches!(code, WasiHttpErrorCode::HttpRequestDenied)
         ));
+    }
+
+    #[test]
+    fn send_request_allows_allowlisted_http_authority() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build")
+            .block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("listener should bind");
+                let addr = listener.local_addr().expect("listener addr");
+                let server = tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                    let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await.expect("request should be read");
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .await
+                        .expect("response should be written");
+                });
+
+                let mut state = WasiState::new(
+                    WasiCtx::builder().build(),
+                    WasiHttpCtx::new(),
+                    vec![WasiHttpOutboundRule::HostPort {
+                        host: "127.0.0.1".to_string(),
+                        port: addr.port(),
+                    }],
+                    NativePluginContext::new(
+                        "svc-test".to_string(),
+                        "release-test".to_string(),
+                        "runner-test".to_string(),
+                        RunnerAppType::Cli,
+                        std::path::PathBuf::from("/tmp/manager.sock"),
+                        "secret".to_string(),
+                        std::collections::BTreeMap::new(),
+                    ),
+                );
+                let request = hyper::Request::builder()
+                    .uri(format!("http://127.0.0.1:{}/", addr.port()))
+                    .body(
+                        Empty::<Bytes>::new()
+                            .map_err(|never| match never {})
+                            .boxed_unsync(),
+                    )
+                    .expect("request should be built");
+                let config = OutgoingRequestConfig {
+                    use_tls: false,
+                    connect_timeout: Duration::from_secs(1),
+                    first_byte_timeout: Duration::from_secs(1),
+                    between_bytes_timeout: Duration::from_secs(1),
+                };
+
+                let mut response = state
+                    .http_hooks
+                    .send_request(request, config)
+                    .expect("request should be allowed");
+                response.ready().await;
+                let response = response
+                    .unwrap_ready()
+                    .expect("request should not trap")
+                    .expect("request should succeed");
+                let status = response.resp.status();
+                let body = response
+                    .resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body should be collected")
+                    .to_bytes();
+                server.await.expect("server task should complete");
+
+                assert_eq!(status, hyper::StatusCode::OK);
+                assert_eq!(body.as_ref(), b"ok");
+            });
     }
 }
