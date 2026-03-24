@@ -210,6 +210,10 @@ legacy_service_log="${tmp_root}/legacy-service.log"
 legacy_stub_bin="${tmp_root}/legacy-service-bin"
 legacy_systemd_unit="${tmp_root}/legacy-imagod.service"
 legacy_download_base="${base_url}/downloads/imagod-v0.5.0"
+is_root=0
+if [ "$(id -u)" -eq 0 ]; then
+  is_root=1
+fi
 
 mkdir -p "${linux_default_home}" "${macos_stub_bin}"
 
@@ -259,7 +263,7 @@ done
 map_destination() {
   case "$1" in
     /usr/local/bin|/usr/local/bin/*)
-      if [ "${IMAGOD_TEST_SUDO_ACTIVE:-0}" != "1" ]; then
+      if [ "${IMAGOD_TEST_SUDO_ACTIVE:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
         exit 1
       fi
       if [ -n "${shadow_root}" ]; then
@@ -297,7 +301,11 @@ chmod +x "${macos_stub_bin}/install"
     --dry-run
 ) > "${linux_default_transcript}"
 
-grep -F "install_dir: ${linux_default_home}/.local/bin" "${linux_default_transcript}"
+if [ "${is_root}" = "1" ]; then
+  grep -F "install_dir: /usr/local/bin" "${linux_default_transcript}"
+else
+  grep -F "install_dir: ${linux_default_home}/.local/bin" "${linux_default_transcript}"
+fi
 
 (
   PATH="${macos_stub_bin}:${PATH}" \
@@ -315,8 +323,15 @@ cmp -s \
 
 grep -F "install_dir: /usr/local/bin" "${macos_default_transcript}"
 grep -F "installed binary: /usr/local/bin/imagod" "${macos_default_transcript}"
-grep -Fx "sudo install -d -- /usr/local/bin" "${macos_stub_log}"
-grep -F "sudo install -m 0755 --" "${macos_stub_log}"
+if [ "${is_root}" = "1" ]; then
+  if grep -F "sudo install" "${macos_stub_log}" >/dev/null 2>&1; then
+    echo "unexpected sudo usage while running installer regression as root" >&2
+    exit 1
+  fi
+else
+  grep -Fx "sudo install -d -- /usr/local/bin" "${macos_stub_log}"
+  grep -F "sudo install -m 0755 --" "${macos_stub_log}"
+fi
 grep -F "/usr/local/bin/imagod" "${macos_stub_log}"
 
 run_install \
