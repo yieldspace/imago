@@ -5,7 +5,7 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use std::io::{self, Cursor};
 #[cfg(target_os = "linux")]
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path},
@@ -42,7 +42,6 @@ use v4l::{
     frameinterval::FrameIntervalEnum as V4lFrameIntervalEnum,
     framesize::FrameSizeEnum as V4lFrameSizeEnum,
     io::{mmap::Stream as V4lMmapStream, traits::CaptureStream as V4lCaptureStream},
-    timestamp::Timestamp as V4lTimestamp,
     v4l_sys as v4l_bindings,
     video::{Capture as V4lCaptureDevice, capture::Parameters as V4lCaptureParameters},
 };
@@ -1610,12 +1609,10 @@ fn create_capture_stream(
     buffer_count: usize,
 ) -> Result<CaptureIoStream, V4l2Error> {
     let buffer_count = u32::try_from(buffer_count).map_err(|_| V4l2Error::InvalidArgument)?;
-    let stream = V4lMmapStream::with_buffers(device, V4lBufferType::VideoCapture, buffer_count)
-        .map_err(map_io_error)?;
-
-    // SAFETY: `v4l::io::mmap::Stream` owns the mmap arena and device handle internally.
-    // We only keep the stream inside `StreamState` and copy frame bytes out before returning.
-    Ok(unsafe { std::mem::transmute::<V4lMmapStream<'_>, CaptureIoStream>(stream) })
+    let stream: CaptureIoStream =
+        V4lMmapStream::with_buffers(device, V4lBufferType::VideoCapture, buffer_count)
+            .map_err(map_io_error)?;
+    Ok(stream)
 }
 
 #[cfg(target_os = "linux")]
@@ -1644,16 +1641,15 @@ fn close_stream_state(stream: StreamState) -> Result<(), V4l2Error> {
 }
 
 #[cfg(target_os = "linux")]
-fn timestamp_to_ns(timestamp: V4lTimestamp) -> Result<u64, V4l2Error> {
-    let seconds = u64::try_from(timestamp.sec).map_err(|_| V4l2Error::TransportFault)?;
-    let micros = u64::try_from(timestamp.usec).map_err(|_| V4l2Error::TransportFault)?;
-    if micros >= 1_000_000 {
-        return Err(V4l2Error::TransportFault);
-    }
+fn unix_timestamp_now_ns() -> Result<u64, V4l2Error> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| V4l2Error::TransportFault)?;
 
-    seconds
+    duration
+        .as_secs()
         .checked_mul(1_000_000_000)
-        .and_then(|value| value.checked_add(micros.saturating_mul(1_000)))
+        .and_then(|value| value.checked_add(u64::from(duration.subsec_nanos())))
         .ok_or(V4l2Error::TransportFault)
 }
 
@@ -1681,7 +1677,7 @@ fn read_next_frame(
         bytes: frame_bytes,
         width_px: stream.mode.width_px,
         height_px: stream.mode.height_px,
-        timestamp_ns: timestamp_to_ns(metadata.timestamp)?,
+        timestamp_ns: unix_timestamp_now_ns()?,
         sequence: u64::from(metadata.sequence),
         format: EncodedFormat::Mjpeg,
     })
