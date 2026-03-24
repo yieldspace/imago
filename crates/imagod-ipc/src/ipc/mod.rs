@@ -1483,6 +1483,7 @@ mod tests {
                 "imago:admin".to_string(),
                 "imago:node".to_string(),
                 "imago:usb".to_string(),
+                "imago:v4l2".to_string(),
             ],
             capabilities: CapabilityPolicy {
                 privileged: false,
@@ -1541,7 +1542,8 @@ mod tests {
             vec![
                 "imago:admin".to_string(),
                 "imago:node".to_string(),
-                "imago:usb".to_string()
+                "imago:usb".to_string(),
+                "imago:v4l2".to_string()
             ]
         );
         assert!(

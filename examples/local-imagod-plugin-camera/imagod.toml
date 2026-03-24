@@ -8,7 +8,7 @@ server_key = "certs/server.key"
 client_public_keys = ["c067e1cd0edd79ebd91e2bdb81c131ed601906af13c82c4e8f02ad6c4cfc5960"]
 
 [runtime]
-features = ["imago:usb"]
+features = ["imago:v4l2"]
 chunk_size = 1048576
 max_inflight_chunks = 16
 upload_session_ttl_secs = 900

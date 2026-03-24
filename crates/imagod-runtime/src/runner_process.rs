@@ -479,7 +479,11 @@ mod tests {
             resources: std::collections::BTreeMap::new(),
             bindings: vec![],
             plugin_dependencies: vec![],
-            enabled_native_plugins: vec!["imago:admin".to_string(), "imago:node".to_string()],
+            enabled_native_plugins: vec![
+                "imago:admin".to_string(),
+                "imago:node".to_string(),
+                "imago:v4l2".to_string(),
+            ],
             capabilities: imagod_ipc::CapabilityPolicy::default(),
             manager_control_endpoint: std::path::PathBuf::from("/tmp/manager.sock"),
             runner_endpoint: std::path::PathBuf::from("/tmp/runner.sock"),
@@ -523,6 +527,7 @@ mod tests {
         struct CustomPlugin;
         struct AdminBuiltinPlugin;
         struct UsbBuiltinPlugin;
+        struct V4l2BuiltinPlugin;
 
         impl NativePlugin for CustomPlugin {
             fn package_name(&self) -> &'static str {
@@ -578,6 +583,24 @@ mod tests {
             }
         }
 
+        impl NativePlugin for V4l2BuiltinPlugin {
+            fn package_name(&self) -> &'static str {
+                "imago:v4l2"
+            }
+
+            fn supports_import(&self, import_name: &str) -> bool {
+                import_name == "imago:v4l2/runtime@0.1.0"
+            }
+
+            fn symbols(&self) -> &'static [&'static str] {
+                &["imago:v4l2/runtime@0.1.0.ping"]
+            }
+
+            fn add_to_linker(&self, _linker: &mut NativePluginLinker) -> NativePluginResult<()> {
+                Ok(())
+            }
+        }
+
         let mut builder = NativePluginRegistryBuilder::new();
         builder
             .register_plugin(Arc::new(CustomPlugin))
@@ -588,6 +611,9 @@ mod tests {
         builder
             .register_plugin(Arc::new(UsbBuiltinPlugin))
             .expect("usb plugin should register");
+        builder
+            .register_plugin(Arc::new(V4l2BuiltinPlugin))
+            .expect("v4l2 plugin should register");
         let registry = builder.build();
 
         let mut bootstrap = sample_bootstrap();
@@ -599,6 +625,7 @@ mod tests {
         assert!(filtered.has_plugin("test:custom"));
         assert!(filtered.has_plugin("imago:admin"));
         assert!(!filtered.has_plugin("imago:usb"));
+        assert!(!filtered.has_plugin("imago:v4l2"));
     }
 
     #[test]

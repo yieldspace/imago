@@ -363,5 +363,11 @@ mod tests {
                 .any(|value| value.as_str() == Some("imago:usb")),
             "imagod RuntimeConfig.features should enumerate imago:usb"
         );
+        assert!(
+            feature_items_enum
+                .iter()
+                .any(|value| value.as_str() == Some("imago:v4l2")),
+            "imagod RuntimeConfig.features should enumerate imago:v4l2"
+        );
     }
 }

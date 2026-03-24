@@ -8,6 +8,7 @@ use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
 use imago_plugin_imago_experimental_i2c::ImagoExperimentalI2cPlugin;
 use imago_plugin_imago_node::ImagoNodePlugin;
 use imago_plugin_imago_usb::ImagoUsbPlugin;
+use imago_plugin_imago_v4l2::ImagoV4l2Plugin;
 use imago_protocol::PROTOCOL_VERSION;
 use imagod_common::BUILTIN_NATIVE_PLUGIN_DESCRIPTORS;
 use imagod_config::DEFAULT_CONTROL_SOCKET_PATH;
@@ -294,6 +295,9 @@ fn register_builtin_native_plugin(
             .map_err(anyhow::Error::new)?,
         "imago:usb" => builder
             .register_plugin(Arc::new(ImagoUsbPlugin))
+            .map_err(anyhow::Error::new)?,
+        "imago:v4l2" => builder
+            .register_plugin(Arc::new(ImagoV4l2Plugin))
             .map_err(anyhow::Error::new)?,
         other => {
             return Err(anyhow::anyhow!(
@@ -872,6 +876,7 @@ mod tests {
             assert!(!filtered.has_plugin("imago:experimental-gpio"));
             assert!(!filtered.has_plugin("imago:experimental-i2c"));
             assert!(!filtered.has_plugin("imago:usb"));
+            assert!(!filtered.has_plugin("imago:v4l2"));
         }
 
         #[test]

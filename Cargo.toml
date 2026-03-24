@@ -76,6 +76,7 @@ hyper-util = "0.1.18"
 libc = "0.2.183"
 linux-embedded-hal = "0.4.0"
 rusb = "0.9.4"
+v4l2r = "0.0.7"
 quinn = "0.11.9"
 quote = "1.0.45"
 rcgen = "0.14.7"
@@ -116,6 +117,7 @@ imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio
 imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.8.1" }
 imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.8.1" }
 imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.8.1" }
+imago-plugin-imago-v4l2 = { path = "plugins/imago-v4l2", version = "0.8.1" }
 imago-cli = { path = "crates/imago-cli", version = "0.5.0" }
 imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.8.1" }
 imago-project-config = { path = "crates/imago-project-config", version = "0.8.1" }

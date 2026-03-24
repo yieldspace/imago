@@ -1,4 +1,4 @@
-package imago:camera@0.1.0;
+package imago:camera@0.2.0;
 
 /// Shared camera capture types.
 @since(version = 0.1.0)
@@ -121,10 +121,14 @@ interface provider {
 /// Component world for the Wasm camera plugin.
 @since(version = 0.1.0)
 world camera-plugin {
-    import imago:usb/types@0.3.0;
-    import imago:usb/provider@0.3.0;
-    import imago:usb/device@0.3.0;
-    import imago:usb/usb-interface@0.3.0;
+    @since(version = 0.2.0)
+    import imago:v4l2/types@0.1.0;
+    @since(version = 0.2.0)
+    import imago:v4l2/provider@0.1.0;
+    @since(version = 0.2.0)
+    import imago:v4l2/device@0.1.0;
+    @since(version = 0.2.0)
+    import imago:v4l2/capture-stream@0.1.0;
     export types;
     export provider;
 }

@@ -1251,7 +1251,7 @@ server_key = "server.key"
 client_public_keys = ["1111111111111111111111111111111111111111111111111111111111111111"]
 
 [runtime]
-features = ["imago:usb", "imago:admin", "imago:usb"]
+features = ["imago:v4l2", "imago:admin", "imago:v4l2"]
 "#,
         );
 
@@ -1263,7 +1263,7 @@ features = ["imago:usb", "imago:admin", "imago:usb"]
             vec![
                 "imago:admin".to_string(),
                 "imago:node".to_string(),
-                "imago:usb".to_string()
+                "imago:v4l2".to_string()
             ]
         );
 

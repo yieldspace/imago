@@ -408,38 +408,38 @@ guest_path = "/app/readonly"
 - Validation error notes: non-absolute or duplicate guest path fails validation.
 - Usage note: this is the recommended way to expose bundled model files to guest code that calls `wasi:nn`; the runtime does not preload models from `assets`.
 
-### The `usb.paths` field
+### The `v4l2.paths` field
 
 - Type: `array(string)`
-- Required/Optional: Required when using `imago:usb` native plugin.
-- Accepted values / Constraints: absolute paths only; empty strings and NUL are rejected; duplicate entries after path normalization are rejected.
+- Required/Optional: Required when using `imago:v4l2` native plugin.
+- Accepted values / Constraints: absolute `/dev/video*` paths only; empty strings and NUL are rejected; duplicate entries after path normalization are rejected.
 - Default: none (missing field fails validation).
 - Example:
 
 ```toml
-[resources.usb]
-paths = ["/dev/bus/usb/001/001", "/dev/bus/usb/001/002"]
+[resources.v4l2]
+paths = ["/dev/video0", "/dev/video2"]
 ```
 
 - Validation error notes: missing field, wrong type, non-absolute paths, or normalized duplicates fail runtime startup validation.
-- Usage note: when a service uses `imago:camera`, this allowlist must include the actual UVC device path that the camera plugin should open.
+- Usage note: when a service uses `imago:camera`, this allowlist must include the actual V4L2 node that the camera plugin should open.
 
-### The `usb.max_transfer_bytes` field
+### The `v4l2.max_frame_bytes` field
 
 - Type: `integer`
 - Required/Optional: Optional.
 - Accepted values / Constraints: `1..=8388608`.
-- Default: `1048576`.
+- Default: `8388608`.
 - Example:
 
 ```toml
-[resources.usb]
-max_transfer_bytes = 1048576
+[resources.v4l2]
+max_frame_bytes = 8388608
 ```
 
 - Validation error notes: out-of-range values fail runtime startup validation.
 
-### The `usb.max_timeout_ms` field
+### The `v4l2.max_timeout_ms` field
 
 - Type: `integer`
 - Required/Optional: Optional.
@@ -448,68 +448,52 @@ max_transfer_bytes = 1048576
 - Example:
 
 ```toml
-[resources.usb]
+[resources.v4l2]
 max_timeout_ms = 30000
 ```
 
 - Validation error notes: out-of-range values fail runtime startup validation.
 
-### The `usb.max_paths` field
+### The `v4l2.max_paths` field
 
 - Type: `integer`
 - Required/Optional: Optional.
-- Accepted values / Constraints: `0..=256`; `usb.paths` entry count must not exceed this value.
+- Accepted values / Constraints: `0..=256`; `v4l2.paths` entry count must not exceed this value.
 - Default: `128`.
 - Example:
 
 ```toml
-[resources.usb]
+[resources.v4l2]
 max_paths = 128
 ```
 
 - Validation error notes: out-of-range values or `paths` overflow fail runtime startup validation.
 
-### The `usb.bulk_ring_chunk_bytes` field
+### The `v4l2.buffer_count` field
 
 - Type: `integer`
 - Required/Optional: Optional.
-- Accepted values / Constraints: `1..=usb.max_transfer_bytes`.
-- Default: `min(16384, usb.max_transfer_bytes)`.
+- Accepted values / Constraints: `1..=16`.
+- Default: `4`.
 - Example:
 
 ```toml
-[resources.usb]
-bulk_ring_chunk_bytes = 16384
+[resources.v4l2]
+buffer_count = 4
 ```
 
-- Validation error notes: zero, negative, non-integer, or values above `usb.max_transfer_bytes` fail runtime startup validation.
+- Validation error notes: zero, negative, non-integer, or values above the device buffer limit fail runtime startup validation.
 
-### The `usb.bulk_ring_slots` field
+### V4L2 runtime behavior (`imago:v4l2`)
 
-- Type: `integer`
-- Required/Optional: Optional.
-- Accepted values / Constraints: `1..=256`; `usb.bulk_ring_chunk_bytes * usb.bulk_ring_slots` must be `<= 67108864`.
-- Default: `16`.
-- Example:
-
-```toml
-[resources.usb]
-bulk_ring_slots = 16
-```
-
-- Validation error notes: zero, negative, non-integer, out-of-range values, or capacity products above `67108864` fail runtime startup validation.
-
-### USB runtime behavior (`imago:usb`)
-
-- `provider.list-openable-paths` returns the normalized allowlist defined by `resources.usb.paths`.
-- `provider.list-openable-devices` returns currently connected devices whose Linux path is allowlisted.
-- `provider.poll-device-event(timeout-ms)` returns only allowlisted connection events (`pending`, `connected`, `disconnected`); non-allowlisted events are dropped internally.
+- `provider.list-openable-paths` returns the normalized allowlist defined by `resources.v4l2.paths`.
+- `provider.list-openable-devices` returns currently connected allowlisted `/dev/video*` nodes that expose MJPEG capture modes; USB metadata fields can remain `0` when sysfs metadata is unavailable.
 - `provider.open-device(path)` rejects non-allowlisted paths before backend open attempts.
-- Per-device worker channels are bounded; saturated workers can return `usb-error.busy`.
-- All transfer APIs (`control`, `bulk`, `interrupt`, `isochronous`) enforce `usb.max_transfer_bytes` and `usb.max_timeout_ms`.
-- `claimed-interface.isochronous-in(endpoint, length, packets, timeout-ms)` returns each packet descriptor's actual payload bytes concatenated in packet order.
-- `claimed-interface.bulk-read(endpoint, timeout-ms)` reads one chunk from a per-endpoint bounded ring buffer (size from `usb.bulk_ring_chunk_bytes`).
-- Ring overflow uses drop-oldest backpressure and is observable via `claimed-interface.bulk-read-stats(endpoint)`.
+- Per-device worker channels are bounded; saturated workers can return `v4l2-error.busy`.
+- All capture APIs enforce `v4l2.max_frame_bytes` and `v4l2.max_timeout_ms`.
+- `device.list-modes()` only returns MJPEG capture modes and expands ranged stepwise/continuous descriptors into exact modes up to 4096 entries per device; malformed or larger expansions are treated as unsupported.
+- `stream.next-frame(timeout-ms)` returns the next captured frame as a copied-out payload and uses the queue state owned by the native plugin.
+- `stream` and `device` cleanup happens on host-side resource drop.
 
 ### The `<custom_key>` field
 
@@ -532,18 +516,17 @@ digital_pins = [
   { label = "A27", aliases = ["blue-led", "status-led"] },
 ]
 
-[resources.usb]
-paths = ["/dev/bus/usb/001/001"]
-max_transfer_bytes = 1048576
-bulk_ring_chunk_bytes = 16384
-bulk_ring_slots = 16
+[resources.v4l2]
+paths = ["/dev/video0"]
+max_frame_bytes = 8388608
+buffer_count = 4
 ```
 
 - `[[dependencies]] kind = "wasm"` entries that embed an `imago.resources.v1` custom section are treated as resource providers automatically during `imago deps sync` / build. Their `resources` payload is merged first, and service-side `resources` is applied afterward using provider merge policies.
 - `resources.gpio.digital_pins` works in two modes. Without a provider it is an inline catalog and each entry must supply the full runtime fields (`label`, `value_path`, `supports_input`, `supports_output`, `default_active_level`, `allow_pull_resistor`). With a provider present it becomes a keyed patch surface over existing labels, so patch entries may override fields such as `aliases`, but unknown labels fail validation.
 - `resources.gpio.profile.path` remains available as a local TOML profile source. Only `path` is supported. If it would populate the same canonical path as an embedded provider (currently `resources.gpio.digital_pins`), build fails instead of applying implicit precedence.
 - Provider merge policies default to `sealed`. `mergeable` allows service overrides under the declared path, and `required` also demands that the service override that path. `resources.gpio.digital_pins` is the only keyed array merge in v1; other provider-owned arrays are treated atomically.
-- Validation error notes: empty keys fail validation. `resources.usb` rejects invalid path/limit settings during runtime startup.
+- Validation error notes: empty keys fail validation. `resources.v4l2` rejects invalid path/limit settings during runtime startup.
 
 <a id="the-capabilities-section"></a>
 ## The [capabilities] section
@@ -664,45 +647,45 @@ This section defines plugin dependencies and their resolution sources.
 
 ### Published Wasm camera plugin example
 
-The published `imago:camera@0.1.0` plugin can be consumed directly from GHCR without an explicit `[dependencies.component]` block. The `imago:usb@0.3.0` dependency remains native:
+The published `imago:camera@0.1.0` plugin can be consumed directly from GHCR without an explicit `[dependencies.component]` block. The `imago:v4l2@0.1.0` dependency remains native:
 
 ```toml
 [[dependencies]]
-version = "0.3.0"
+version = "0.1.0"
 kind = "native"
-oci = "ghcr.io/yieldspace/imago/usb"
+oci = "ghcr.io/yieldspace/imago/v4l2"
 
 [[dependencies]]
 version = "0.1.0"
 kind = "wasm"
 oci = "ghcr.io/yieldspace/imago/camera"
-requires = ["imago:usb"]
+requires = ["imago:v4l2"]
 
 [dependencies.capabilities.deps]
-"imago:usb" = ["*"]
+"imago:v4l2" = ["*"]
 ```
 
 ### Local Wasm camera plugin example
 
-The `imago:camera@0.1.0` plugin is a Wasm dependency that imports `imago:usb@0.3.0` as a native dependency. The app manifest needs both entries, plus a component source path for the camera plugin artifact:
+The `imago:camera@0.1.0` plugin is a Wasm dependency that imports `imago:v4l2@0.1.0` as a native dependency. The app manifest needs both entries, plus a component source path for the camera plugin artifact:
 
 ```toml
 [[dependencies]]
-version = "0.3.0"
+version = "0.1.0"
 kind = "native"
-path = "../../plugins/imago-usb/wit"
+path = "../../plugins/imago-v4l2/wit"
 
 [[dependencies]]
 version = "0.1.0"
 kind = "wasm"
 path = "../../plugins/imago-camera/wit"
-requires = ["imago:usb"]
+requires = ["imago:v4l2"]
 
 [dependencies.component]
 path = "../../target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
 
 [dependencies.capabilities.deps]
-"imago:usb" = ["*"]
+"imago:v4l2" = ["*"]
 ```
 
 The service itself still needs `[capabilities.deps] "imago:camera" = ["*"]` to call the camera API. A typical local flow is:

@@ -19,8 +19,11 @@ const UVC_GET_CUR: u8 = 0x81;
 const VS_PROBE_CONTROL: u8 = 0x01;
 const VS_COMMIT_CONTROL: u8 = 0x02;
 
+const UVC_HEADER_FID: u8 = 0x01;
 const UVC_HEADER_EOF: u8 = 0x02;
 const UVC_HEADER_ERR: u8 = 0x40;
+const JPEG_SOI: [u8; 2] = [0xff, 0xd8];
+const JPEG_EOI: [u8; 2] = [0xff, 0xd9];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(String);
@@ -532,22 +535,32 @@ impl MjpegFrameAssembler {
             return Err(ParseError::new("UVC packet header length is invalid"));
         }
         let flags = packet[1];
-        let fid = flags & 0x01;
+        let fid = flags & UVC_HEADER_FID;
         if let Some(current_fid) = self.current_fid
             && current_fid != fid
-            && !self.current_frame.is_empty()
         {
             self.current_frame.clear();
         }
         self.current_fid = Some(fid);
 
         if flags & UVC_HEADER_ERR != 0 {
-            self.current_frame.clear();
+            self.reset();
             return Ok(None);
         }
 
         let payload = &packet[header_len..];
-        if !payload.is_empty() {
+        if self.current_frame.is_empty() {
+            if let Some(start) = find_marker(payload, &JPEG_SOI) {
+                let payload = &payload[start..];
+                if payload.len() > self.max_frame_bytes {
+                    self.reset();
+                    return Err(ParseError::new(
+                        "assembled JPEG frame exceeds negotiated max_video_frame_size",
+                    ));
+                }
+                self.current_frame.extend_from_slice(payload);
+            }
+        } else if !payload.is_empty() {
             let next_len = self
                 .current_frame
                 .len()
@@ -562,16 +575,17 @@ impl MjpegFrameAssembler {
             self.current_frame.extend_from_slice(payload);
         }
 
-        if flags & UVC_HEADER_EOF == 0 {
-            return Ok(None);
-        }
-        if self.current_frame.is_empty() {
-            return Err(ParseError::new("received EOF packet without JPEG payload"));
+        if let Some((start, end)) = jpeg_bounds(&self.current_frame) {
+            let frame = self.current_frame[start..end].to_vec();
+            self.reset();
+            return Ok(Some(frame));
         }
 
-        let frame = std::mem::take(&mut self.current_frame);
-        self.current_fid = Some(fid ^ 0x01);
-        Ok(Some(frame))
+        if flags & UVC_HEADER_EOF != 0 {
+            self.reset();
+        }
+
+        Ok(None)
     }
 
     pub fn reset(&mut self) {
@@ -582,6 +596,23 @@ impl MjpegFrameAssembler {
 
 pub fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9])
+}
+
+pub fn jpeg_bounds(bytes: &[u8]) -> Option<(usize, usize)> {
+    let start = find_marker(bytes, &JPEG_SOI)?;
+    let end = find_marker(&bytes[start..], &JPEG_EOI)?;
+    Some((start, start + end + JPEG_EOI.len()))
+}
+
+pub fn find_marker(haystack: &[u8], needle: &[u8; 2]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+pub fn extract_jpeg_payload(bytes: &[u8]) -> Option<&[u8]> {
+    let (start, end) = jpeg_bounds(bytes)?;
+    Some(&bytes[start..end])
 }
 
 #[cfg(test)]
@@ -704,7 +735,7 @@ mod tests {
             .push_packet(&[2, 0x03, 0xff, 0xd8, 0xff, 0xd9])
             .expect("final packet should parse")
             .expect("new frame should complete");
-        assert_eq!(frame, vec![0xaa, 0xbb, 0xff, 0xd8, 0xff, 0xd9]);
+        assert_eq!(frame, vec![0xff, 0xd8, 0xff, 0xd9]);
     }
 
     #[test]
@@ -719,13 +750,12 @@ mod tests {
     }
 
     #[test]
-    fn mjpeg_frame_assembler_rejects_eof_without_payload() {
-        let err = MjpegFrameAssembler::default()
-            .push_packet(&[2, 0x02])
-            .expect_err("EOF without payload must fail");
+    fn mjpeg_frame_assembler_discards_empty_eof_packet() {
         assert!(
-            err.to_string().contains("EOF packet without JPEG payload"),
-            "unexpected error: {err}"
+            MjpegFrameAssembler::default()
+                .push_packet(&[2, 0x02])
+                .expect("EOF without payload should be ignored")
+                .is_none()
         );
     }
 
@@ -743,6 +773,37 @@ mod tests {
             .expect("next packet should parse")
             .expect("next clean frame should complete");
         assert_eq!(frame, vec![0xff, 0xd8, 0xff, 0xd9]);
+    }
+
+    #[test]
+    fn extract_jpeg_payload_trims_non_jpeg_prefix_and_suffix() {
+        let bytes = [0x00, 0x11, 0xff, 0xd8, 0x22, 0x33, 0xff, 0xd9, 0x44, 0x55];
+        let payload = extract_jpeg_payload(&bytes).expect("jpeg markers should be found");
+        assert_eq!(payload, &[0xff, 0xd8, 0x22, 0x33, 0xff, 0xd9]);
+        assert!(is_jpeg(payload));
+    }
+
+    #[test]
+    fn extract_jpeg_payload_rejects_missing_markers() {
+        assert!(extract_jpeg_payload(&[0x00, 0x11, 0x22, 0x33]).is_none());
+        assert!(extract_jpeg_payload(&[0xff, 0xd8, 0x11, 0x22]).is_none());
+        assert!(extract_jpeg_payload(&[0x11, 0x22, 0xff, 0xd9]).is_none());
+    }
+
+    #[test]
+    fn mjpeg_frame_assembler_ignores_prefix_until_soi_and_returns_on_eoi() {
+        let mut assembler = MjpegFrameAssembler::default();
+        assert!(
+            assembler
+                .push_packet(&[2, 0x00, 0x11, 0x22, 0x33])
+                .expect("junk packet should parse")
+                .is_none()
+        );
+        let frame = assembler
+            .push_packet(&[2, 0x00, 0xaa, 0xff, 0xd8, 0x44, 0x55, 0xff, 0xd9, 0xbb])
+            .expect("jpeg markers should parse")
+            .expect("frame should complete without waiting for EOF");
+        assert_eq!(frame, vec![0xff, 0xd8, 0x44, 0x55, 0xff, 0xd9]);
     }
 
     #[test]
