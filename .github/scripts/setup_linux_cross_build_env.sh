@@ -19,6 +19,7 @@ sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
   build-essential \
   ca-certificates \
+  clang \
   cmake \
   g++-aarch64-linux-gnu \
   g++-arm-linux-gnueabihf \
@@ -29,6 +30,7 @@ sudo apt-get install -y --no-install-recommends \
   libc6-dev-arm64-cross \
   libc6-dev-armhf-cross \
   libc6-dev-riscv64-cross \
+  libclang-dev \
   libssl-dev \
   wget \
   xz-utils \

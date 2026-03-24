@@ -3,11 +3,9 @@ use std::cmp::Ordering as CmpOrdering;
 #[cfg(any(test, target_os = "linux"))]
 use std::fs;
 #[cfg(target_os = "linux")]
-use std::io::Cursor;
+use std::io::{self, Cursor};
 #[cfg(target_os = "linux")]
-use std::time::Duration;
-#[cfg(any(test, target_os = "linux"))]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path},
@@ -29,22 +27,23 @@ use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
 #[cfg(target_os = "linux")]
 use nix::errno::Errno;
 use serde_json::{Map as JsonMap, Value as JsonValue};
-#[cfg(target_os = "linux")]
-use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 #[cfg(target_os = "linux")]
-use v4l2r::{
-    Format, PixelFormat as V4l2PixelFormat, QueueType, bindings as v4l2_bindings,
-    device::{
-        AllocatedQueue, Device, DeviceConfig, Stream, TryDequeue,
-        poller::{DeviceEvent as PollDeviceEvent, PollError, PollEvent, Poller},
-        queue::{
-            BuffersAllocated, GetCaptureBufferByIndex, GetFreeCaptureBuffer, Queue, QueueInit,
-            direction::Capture,
-        },
+use v4l::{
+    buffer::{Flags as V4lBufferFlags, Type as V4lBufferType},
+    capability::{Capabilities as V4lCapabilities, Flags as V4lCapabilityFlags},
+    control::{
+        Control as V4lControl, Description as V4lControlDescription, Flags as V4lControlFlags,
+        Type as V4lControlType, Value as V4lControlValue,
     },
-    ioctl::{self, Capabilities, Capability, DqBufIoctlError, FrmIvalTypes, FrmSizeTypes},
-    memory::MmapHandle,
+    device::Device as V4lDevice,
+    format::{Format as V4lFormat, FourCC as V4lFourCc},
+    fraction::Fraction as V4lFraction,
+    frameinterval::FrameIntervalEnum as V4lFrameIntervalEnum,
+    framesize::FrameSizeEnum as V4lFrameSizeEnum,
+    io::{mmap::Stream as V4lMmapStream, traits::CaptureStream as V4lCaptureStream},
+    v4l_sys as v4l_bindings,
+    video::{Capture as V4lCaptureDevice, capture::Parameters as V4lCaptureParameters},
 };
 use wasmtime::component::Resource;
 
@@ -143,13 +142,16 @@ const DEFAULT_THREAD_STACK_BYTES: usize = 256 * 1024;
 #[cfg(any(test, target_os = "linux"))]
 const MAX_EXPANDED_CAPTURE_MODES: usize = 4_096;
 #[cfg(target_os = "linux")]
-const MJPEG_FOURCC: V4l2PixelFormat = V4l2PixelFormat::from_fourcc(b"MJPG");
-#[cfg(target_os = "linux")]
 const MJPG_FOURCC_VALUE: u32 = u32::from_le_bytes(*b"MJPG");
 #[cfg(target_os = "linux")]
 const V4L2_EXPOSURE_AUTO_CTRL_VALUE: i32 = 0;
 #[cfg(target_os = "linux")]
 const V4L2_EXPOSURE_MANUAL_CTRL_VALUE: i32 = 1;
+
+#[cfg(target_os = "linux")]
+fn mjpeg_fourcc() -> V4lFourCc {
+    V4lFourCc::new(b"MJPG")
+}
 
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,13 +210,12 @@ struct VideoCaptureHandle {
 }
 
 #[cfg(target_os = "linux")]
-type CaptureQueue = Queue<Capture, BuffersAllocated<Vec<MmapHandle>>>;
+type CaptureIoStream = V4lMmapStream<'static>;
 
 #[cfg(target_os = "linux")]
 struct StreamState {
     mode: CaptureMode,
-    queue: CaptureQueue,
-    poller: Poller,
+    stream: CaptureIoStream,
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -235,7 +236,7 @@ struct VideoCaptureState {
 
 #[cfg(target_os = "linux")]
 struct DeviceThreadState {
-    device: Arc<Device>,
+    device: Arc<V4lDevice>,
     info: OpenableDevice,
     modes: Vec<CaptureMode>,
     limits: V4l2LimitsConfig,
@@ -589,23 +590,59 @@ fn rounded_i32(value: f64) -> Result<i32, V4l2Error> {
 #[cfg(target_os = "linux")]
 fn ctrl_id_from_property(property: CaptureProperty) -> Option<u32> {
     match property {
-        CaptureProperty::Brightness => Some(v4l2_bindings::V4L2_CID_BRIGHTNESS),
-        CaptureProperty::Contrast => Some(v4l2_bindings::V4L2_CID_CONTRAST),
-        CaptureProperty::Saturation => Some(v4l2_bindings::V4L2_CID_SATURATION),
-        CaptureProperty::Gain => Some(v4l2_bindings::V4L2_CID_GAIN),
-        CaptureProperty::AutoExposure => Some(v4l2_bindings::V4L2_CID_EXPOSURE_AUTO),
-        CaptureProperty::Exposure => Some(v4l2_bindings::V4L2_CID_EXPOSURE_ABSOLUTE),
-        CaptureProperty::AutoFocus => Some(v4l2_bindings::V4L2_CID_FOCUS_AUTO),
-        CaptureProperty::Focus => Some(v4l2_bindings::V4L2_CID_FOCUS_ABSOLUTE),
+        CaptureProperty::Brightness => Some(v4l_bindings::V4L2_CID_BRIGHTNESS),
+        CaptureProperty::Contrast => Some(v4l_bindings::V4L2_CID_CONTRAST),
+        CaptureProperty::Saturation => Some(v4l_bindings::V4L2_CID_SATURATION),
+        CaptureProperty::Gain => Some(v4l_bindings::V4L2_CID_GAIN),
+        CaptureProperty::AutoExposure => Some(v4l_bindings::V4L2_CID_EXPOSURE_AUTO),
+        CaptureProperty::Exposure => Some(v4l_bindings::V4L2_CID_EXPOSURE_ABSOLUTE),
+        CaptureProperty::AutoFocus => Some(v4l_bindings::V4L2_CID_FOCUS_AUTO),
+        CaptureProperty::Focus => Some(v4l_bindings::V4L2_CID_FOCUS_ABSOLUTE),
         _ => None,
     }
 }
 
 #[cfg(target_os = "linux")]
-fn map_control_error(err: ioctl::GCtrlError) -> V4l2Error {
-    match err {
-        ioctl::GCtrlError::Invalid => V4l2Error::OperationNotSupported,
-        ioctl::GCtrlError::IoctlError(errno) => map_errno(errno),
+fn query_control_description(
+    device: &V4lDevice,
+    id: u32,
+) -> Result<V4lControlDescription, V4l2Error> {
+    device
+        .query_controls()
+        .map_err(map_io_error)?
+        .into_iter()
+        .find(|control| control.id == id)
+        .ok_or(V4l2Error::OperationNotSupported)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_control_get_allowed(control: &V4lControlDescription) -> Result<(), V4l2Error> {
+    if control
+        .flags
+        .intersects(V4lControlFlags::DISABLED | V4lControlFlags::WRITE_ONLY)
+    {
+        return Err(V4l2Error::OperationNotSupported);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_control_set_allowed(control: &V4lControlDescription) -> Result<(), V4l2Error> {
+    if control
+        .flags
+        .intersects(V4lControlFlags::DISABLED | V4lControlFlags::READ_ONLY)
+    {
+        return Err(V4l2Error::OperationNotSupported);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn numeric_control_value(value: V4lControlValue) -> Result<i64, V4l2Error> {
+    match value {
+        V4lControlValue::Integer(value) => Ok(value),
+        V4lControlValue::Boolean(value) => Ok(i64::from(value)),
+        _ => Err(V4l2Error::OperationNotSupported),
     }
 }
 
@@ -619,29 +656,36 @@ fn map_boolish_to_ctrl(value: f64) -> Result<i32, V4l2Error> {
 }
 
 #[cfg(target_os = "linux")]
-fn get_control_value(device: &Device, property: CaptureProperty) -> Result<f64, V4l2Error> {
+fn get_control_value(device: &V4lDevice, property: CaptureProperty) -> Result<f64, V4l2Error> {
     let id = ctrl_id_from_property(property).ok_or(V4l2Error::OperationNotSupported)?;
-    let value = ioctl::g_ctrl(device, id).map_err(map_control_error)?;
+    let control = query_control_description(device, id)?;
+    ensure_control_get_allowed(&control)?;
+    let value = device.control(id).map_err(map_io_error)?;
+    let value = numeric_control_value(value.value)?;
     match property {
-        CaptureProperty::AutoExposure => Ok(if value == V4L2_EXPOSURE_MANUAL_CTRL_VALUE {
-            0.0
-        } else if value == V4L2_EXPOSURE_AUTO_CTRL_VALUE {
-            1.0
-        } else {
-            return Err(V4l2Error::OperationNotSupported);
-        }),
+        CaptureProperty::AutoExposure => {
+            Ok(if value == i64::from(V4L2_EXPOSURE_MANUAL_CTRL_VALUE) {
+                0.0
+            } else if value == i64::from(V4L2_EXPOSURE_AUTO_CTRL_VALUE) {
+                1.0
+            } else {
+                return Err(V4l2Error::OperationNotSupported);
+            })
+        }
         CaptureProperty::AutoFocus => Ok(f64::from((value != 0) as u8)),
-        _ => Ok(f64::from(value)),
+        _ => Ok(value as f64),
     }
 }
 
 #[cfg(target_os = "linux")]
 fn set_control_value(
-    device: &Device,
+    device: &V4lDevice,
     property: CaptureProperty,
     value: f64,
 ) -> Result<bool, V4l2Error> {
     let id = ctrl_id_from_property(property).ok_or(V4l2Error::OperationNotSupported)?;
+    let control = query_control_description(device, id)?;
+    ensure_control_set_allowed(&control)?;
     let ctrl_value = match property {
         CaptureProperty::AutoExposure => match map_boolish_to_ctrl(value)? {
             0 => V4L2_EXPOSURE_MANUAL_CTRL_VALUE,
@@ -651,8 +695,31 @@ fn set_control_value(
         CaptureProperty::AutoFocus => map_boolish_to_ctrl(value)?,
         _ => rounded_i32(value)?,
     };
-    let applied = ioctl::s_ctrl(device, id, ctrl_value).map_err(map_control_error)?;
-    Ok(applied == ctrl_value)
+    let value = match control.typ {
+        V4lControlType::Boolean => V4lControlValue::Boolean(ctrl_value != 0),
+        V4lControlType::Integer
+        | V4lControlType::Integer64
+        | V4lControlType::Menu
+        | V4lControlType::IntegerMenu => V4lControlValue::Integer(i64::from(ctrl_value)),
+        _ => return Err(V4l2Error::OperationNotSupported),
+    };
+    let expected = match property {
+        CaptureProperty::AutoExposure => {
+            f64::from((ctrl_value == V4L2_EXPOSURE_AUTO_CTRL_VALUE) as u8)
+        }
+        CaptureProperty::AutoFocus => f64::from((ctrl_value != 0) as u8),
+        _ => f64::from(ctrl_value),
+    };
+    let can_read_back = !control.flags.contains(V4lControlFlags::WRITE_ONLY);
+
+    device
+        .set_control(V4lControl { id, value })
+        .map_err(map_io_error)?;
+    if !can_read_back {
+        return Ok(true);
+    }
+
+    Ok(get_control_value(device, property)? == expected)
 }
 
 #[cfg(target_os = "linux")]
@@ -1053,7 +1120,8 @@ fn validate_timeout(timeout_ms: u32, limits: &V4l2LimitsConfig) -> Result<Durati
 #[cfg(target_os = "linux")]
 fn map_errno(errno: Errno) -> V4l2Error {
     match errno {
-        Errno::EBUSY => V4l2Error::Busy,
+        Errno::EACCES | Errno::EPERM => V4l2Error::NotAllowed,
+        Errno::EAGAIN | Errno::EBUSY => V4l2Error::Busy,
         Errno::EINVAL => V4l2Error::InvalidArgument,
         Errno::ETIMEDOUT => V4l2Error::Timeout,
         Errno::ENODEV | Errno::ENOENT | Errno::ENXIO | Errno::EPIPE => V4l2Error::Disconnected,
@@ -1063,105 +1131,29 @@ fn map_errno(errno: Errno) -> V4l2Error {
 }
 
 #[cfg(target_os = "linux")]
-fn map_device_open_error(err: v4l2r::device::DeviceOpenError) -> V4l2Error {
-    match err {
-        v4l2r::device::DeviceOpenError::OpenError(errno) => map_errno(errno),
-        v4l2r::device::DeviceOpenError::QueryCapError(error) => match error {
-            ioctl::QueryCapError::IoctlError(errno) => map_errno(errno),
-        },
+fn map_io_error(err: io::Error) -> V4l2Error {
+    if let Some(errno) = err.raw_os_error() {
+        return map_errno(Errno::from_raw(errno));
+    }
+
+    match err.kind() {
+        io::ErrorKind::TimedOut => V4l2Error::Timeout,
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => V4l2Error::InvalidArgument,
+        io::ErrorKind::WouldBlock => V4l2Error::Busy,
+        io::ErrorKind::NotFound
+        | io::ErrorKind::BrokenPipe
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::NotConnected => V4l2Error::Disconnected,
+        io::ErrorKind::PermissionDenied => V4l2Error::NotAllowed,
+        io::ErrorKind::Unsupported => V4l2Error::OperationNotSupported,
+        _ => V4l2Error::TransportFault,
     }
 }
 
 #[cfg(target_os = "linux")]
-fn map_create_queue_error(err: v4l2r::device::queue::CreateQueueError) -> V4l2Error {
-    match err {
-        v4l2r::device::queue::CreateQueueError::AlreadyBorrowed => V4l2Error::Busy,
-        v4l2r::device::queue::CreateQueueError::ReqbufsError(error) => match error {
-            ioctl::ReqbufsError::InvalidBufferType(_, _) => V4l2Error::OperationNotSupported,
-            ioctl::ReqbufsError::IoctlError(errno) => map_errno(errno),
-        },
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_request_buffers_error(err: v4l2r::device::queue::RequestBuffersError) -> V4l2Error {
-    match err {
-        v4l2r::device::queue::RequestBuffersError::ReqbufsError(error) => match error {
-            ioctl::ReqbufsError::InvalidBufferType(_, _) => V4l2Error::OperationNotSupported,
-            ioctl::ReqbufsError::IoctlError(errno) => map_errno(errno),
-        },
-        v4l2r::device::queue::RequestBuffersError::QueryBufferError(error) => match error {
-            ioctl::IoctlConvertError::IoctlError(ioctl::QueryBufIoctlError::InvalidInput) => {
-                V4l2Error::InvalidArgument
-            }
-            ioctl::IoctlConvertError::IoctlError(ioctl::QueryBufIoctlError::Other(errno)) => {
-                map_errno(errno)
-            }
-            ioctl::IoctlConvertError::ConversionError(_) => V4l2Error::TransportFault,
-        },
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_gfmt_error(err: ioctl::GFmtError) -> V4l2Error {
-    match err {
-        ioctl::GFmtError::InvalidBufferType => V4l2Error::OperationNotSupported,
-        ioctl::GFmtError::FromV4L2FormatConversionError => V4l2Error::TransportFault,
-        ioctl::GFmtError::IoctlError(errno) => map_errno(errno),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_sfmt_error(err: ioctl::SFmtError) -> V4l2Error {
-    match err {
-        ioctl::SFmtError::InvalidBufferType => V4l2Error::OperationNotSupported,
-        ioctl::SFmtError::DeviceBusy => V4l2Error::Busy,
-        ioctl::SFmtError::FromV4L2FormatConversionError
-        | ioctl::SFmtError::ToV4L2FormatConversionError => V4l2Error::TransportFault,
-        ioctl::SFmtError::IoctlError(errno) => map_errno(errno),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_stream_on_error(err: ioctl::StreamOnError) -> V4l2Error {
-    match err {
-        ioctl::StreamOnError::InvalidQueue(_)
-        | ioctl::StreamOnError::InvalidPadConfig
-        | ioctl::StreamOnError::InvalidPipelineConfig => V4l2Error::OperationNotSupported,
-        ioctl::StreamOnError::IoctlError(errno) => map_errno(errno),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_reqbufs_error(err: ioctl::ReqbufsError) -> V4l2Error {
-    match err {
-        ioctl::ReqbufsError::InvalidBufferType(_, _) => V4l2Error::OperationNotSupported,
-        ioctl::ReqbufsError::IoctlError(errno) => map_errno(errno),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_qbuf_error(err: ioctl::QBufError<std::convert::Infallible>) -> V4l2Error {
-    match err {
-        ioctl::IoctlConvertError::IoctlError(ioctl::QBufIoctlError::Other(errno)) => {
-            map_errno(errno)
-        }
-        ioctl::IoctlConvertError::IoctlError(_) => V4l2Error::InvalidArgument,
-        ioctl::IoctlConvertError::ConversionError(_) => V4l2Error::TransportFault,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn map_poll_error(err: PollError) -> V4l2Error {
-    match err {
-        PollError::TimeoutTryFromError => V4l2Error::InvalidArgument,
-        PollError::EPollWait(errno) | PollError::WakerReset(errno) => map_errno(errno),
-        PollError::V4L2Device => V4l2Error::Disconnected,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn openable_device_label(path: &str, capability: &Capability) -> String {
+fn openable_device_label(path: &str, capability: &V4lCapabilities) -> String {
     let card = capability.card.trim();
     if card.is_empty() {
         path.to_string()
@@ -1233,7 +1225,7 @@ fn resolve_usb_metadata(video_path: &str) -> Option<UsbMetadata> {
 }
 
 #[cfg(target_os = "linux")]
-fn build_openable_device(path: &str, capability: &Capability) -> OpenableDevice {
+fn build_openable_device(path: &str, capability: &V4lCapabilities) -> OpenableDevice {
     let usb = resolve_usb_metadata(path);
     OpenableDevice {
         path: path.to_string(),
@@ -1401,26 +1393,30 @@ fn insert_capture_mode(
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_capture_capabilities(caps: Capabilities) -> Result<(), V4l2Error> {
-    if !caps.contains(Capabilities::STREAMING) {
+fn ensure_capture_capabilities(caps: &V4lCapabilities) -> Result<(), V4l2Error> {
+    if !caps.capabilities.contains(V4lCapabilityFlags::STREAMING) {
         return Err(V4l2Error::OperationNotSupported);
     }
-    if !caps.contains(Capabilities::VIDEO_CAPTURE) {
+    if !caps
+        .capabilities
+        .contains(V4lCapabilityFlags::VIDEO_CAPTURE)
+    {
         return Err(V4l2Error::OperationNotSupported);
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn enumerate_mjpeg_modes(device: &Device) -> Result<Vec<CaptureMode>, V4l2Error> {
-    ensure_capture_capabilities(device.caps().device_caps())?;
+fn enumerate_mjpeg_modes(device: &V4lDevice) -> Result<Vec<CaptureMode>, V4l2Error> {
+    let caps = device.query_caps().map_err(map_io_error)?;
+    ensure_capture_capabilities(&caps)?;
 
     let mut unique = BTreeSet::new();
-    for fmt in ioctl::FormatIterator::new(device, QueueType::VideoCapture) {
-        if fmt.pixelformat != MJPEG_FOURCC {
+    for fmt in device.enum_formats().map_err(map_io_error)? {
+        if fmt.fourcc != mjpeg_fourcc() {
             continue;
         }
-        enumerate_modes_for_format(device, fmt.pixelformat, &mut unique)?;
+        enumerate_modes_for_format(device, fmt.fourcc, &mut unique)?;
     }
 
     Ok(unique
@@ -1437,25 +1433,13 @@ fn enumerate_mjpeg_modes(device: &Device) -> Result<Vec<CaptureMode>, V4l2Error>
 
 #[cfg(target_os = "linux")]
 fn enumerate_modes_for_format(
-    device: &Device,
-    pixel_format: V4l2PixelFormat,
+    device: &V4lDevice,
+    pixel_format: V4lFourCc,
     unique: &mut BTreeSet<(u32, u32, u32, u32)>,
 ) -> Result<(), V4l2Error> {
-    let mut size_index = 0;
-    loop {
-        let frame_size = match ioctl::enum_frame_sizes::<v4l2_bindings::v4l2_frmsizeenum>(
-            device,
-            size_index,
-            pixel_format,
-        ) {
-            Ok(frame_size) => frame_size,
-            Err(ioctl::FrameSizeError::IoctlError(Errno::EINVAL)) => break,
-            Err(ioctl::FrameSizeError::IoctlError(errno)) => return Err(map_errno(errno)),
-        };
-        size_index += 1;
-
-        match frame_size.size() {
-            Some(FrmSizeTypes::Discrete(size)) => {
+    for frame_size in device.enum_framesizes(pixel_format).map_err(map_io_error)? {
+        match frame_size.size {
+            V4lFrameSizeEnum::Discrete(size) => {
                 enumerate_intervals_for_size(
                     device,
                     pixel_format,
@@ -1464,7 +1448,7 @@ fn enumerate_modes_for_format(
                     unique,
                 )?;
             }
-            Some(FrmSizeTypes::StepWise(size)) => {
+            V4lFrameSizeEnum::Stepwise(size) => {
                 let widths = expand_stepwise_u32_values(
                     size.min_width,
                     size.max_width,
@@ -1490,7 +1474,6 @@ fn enumerate_modes_for_format(
                     }
                 }
             }
-            None => {}
         }
     }
 
@@ -1499,36 +1482,25 @@ fn enumerate_modes_for_format(
 
 #[cfg(target_os = "linux")]
 fn enumerate_intervals_for_size(
-    device: &Device,
-    pixel_format: V4l2PixelFormat,
+    device: &V4lDevice,
+    pixel_format: V4lFourCc,
     width: u32,
     height: u32,
     unique: &mut BTreeSet<(u32, u32, u32, u32)>,
 ) -> Result<(), V4l2Error> {
-    let mut interval_index = 0;
-    loop {
-        let interval = match ioctl::enum_frame_intervals::<v4l2_bindings::v4l2_frmivalenum>(
-            device,
-            interval_index,
-            pixel_format,
-            width,
-            height,
-        ) {
-            Ok(interval) => interval,
-            Err(ioctl::FrameIntervalsError::IoctlError(Errno::EINVAL)) => break,
-            Err(ioctl::FrameIntervalsError::IoctlError(errno)) => return Err(map_errno(errno)),
-        };
-        interval_index += 1;
-
-        match interval.intervals() {
-            Some(FrmIvalTypes::Discrete(discrete)) => {
+    for interval in device
+        .enum_frameintervals(pixel_format, width, height)
+        .map_err(map_io_error)?
+    {
+        match interval.interval {
+            V4lFrameIntervalEnum::Discrete(discrete) => {
                 if let Some((fps_num, fps_den)) =
                     fps_ratio_from_time_per_frame(discrete.numerator, discrete.denominator)
                 {
                     insert_capture_mode(unique, width, height, fps_num, fps_den)?;
                 }
             }
-            Some(FrmIvalTypes::StepWise(stepwise)) => {
+            V4lFrameIntervalEnum::Stepwise(stepwise) => {
                 let intervals = expand_stepwise_frame_intervals(
                     FrameInterval {
                         numerator: stepwise.min.numerator,
@@ -1552,7 +1524,6 @@ fn enumerate_intervals_for_size(
                     }
                 }
             }
-            None => {}
         }
     }
 
@@ -1570,14 +1541,11 @@ fn fps_ratio_from_time_per_frame(numerator: u32, denominator: u32) -> Option<(u3
 #[cfg(target_os = "linux")]
 fn inspect_device(
     path: &str,
-) -> Result<(Arc<Device>, OpenableDevice, Vec<CaptureMode>), V4l2Error> {
-    let device = Arc::new(
-        Device::open(Path::new(path), DeviceConfig::new().non_blocking_dqbuf())
-            .map_err(map_device_open_error)?,
-    );
-    let capability = device.caps();
-    ensure_capture_capabilities(capability.device_caps())?;
-    let info = build_openable_device(path, capability);
+) -> Result<(Arc<V4lDevice>, OpenableDevice, Vec<CaptureMode>), V4l2Error> {
+    let device = Arc::new(V4lDevice::with_path(Path::new(path)).map_err(map_io_error)?);
+    let capability = device.query_caps().map_err(map_io_error)?;
+    ensure_capture_capabilities(&capability)?;
+    let info = build_openable_device(path, &capability);
     let modes = enumerate_mjpeg_modes(device.as_ref())?;
     Ok((device, info, modes))
 }
@@ -1602,21 +1570,20 @@ fn enumerate_openable_devices(_allowlist: &BTreeSet<String>) -> Vec<OpenableDevi
 
 #[cfg(target_os = "linux")]
 fn verify_exact_mode(
-    format: &Format,
+    format: &V4lFormat,
     mode: &CaptureMode,
     limits: &V4l2LimitsConfig,
 ) -> Result<(), V4l2Error> {
     if format.width != mode.width_px
         || format.height != mode.height_px
-        || format.pixelformat != MJPEG_FOURCC
+        || format.fourcc != mjpeg_fourcc()
     {
         return Err(V4l2Error::OperationNotSupported);
     }
-    let plane = format.plane_fmt.first().ok_or(V4l2Error::TransportFault)?;
-    if plane.sizeimage == 0 {
+    if format.size == 0 {
         return Err(V4l2Error::TransportFault);
     }
-    if usize::try_from(plane.sizeimage)
+    if usize::try_from(format.size)
         .ok()
         .is_some_and(|sizeimage| sizeimage > limits.max_frame_bytes)
     {
@@ -1626,97 +1593,64 @@ fn verify_exact_mode(
 }
 
 #[cfg(target_os = "linux")]
-fn set_exact_frame_interval(
-    device: &Device,
-    queue_type: QueueType,
-    mode: &CaptureMode,
-) -> Result<(), V4l2Error> {
-    let mut parm: v4l2_bindings::v4l2_streamparm =
-        ioctl::g_parm(device, queue_type).map_err(|err| match err {
-            ioctl::GParmError::IoctlError(errno) => map_errno(errno),
-        })?;
-    parm.parm.capture.timeperframe.numerator = mode.fps_den;
-    parm.parm.capture.timeperframe.denominator = mode.fps_num;
-    let parm: v4l2_bindings::v4l2_streamparm =
-        ioctl::s_parm(device, parm).map_err(|err| match err {
-            ioctl::GParmError::IoctlError(errno) => map_errno(errno),
-        })?;
-    let (numerator, denominator) = unsafe {
-        (
-            parm.parm.capture.timeperframe.numerator,
-            parm.parm.capture.timeperframe.denominator,
-        )
-    };
-    if numerator != mode.fps_den || denominator != mode.fps_num {
+fn set_exact_frame_interval(device: &V4lDevice, mode: &CaptureMode) -> Result<(), V4l2Error> {
+    let mut params: V4lCaptureParameters = device.params().map_err(map_io_error)?;
+    params.interval = V4lFraction::new(mode.fps_den, mode.fps_num);
+    let applied = device.set_params(&params).map_err(map_io_error)?;
+    if applied.interval.numerator != mode.fps_den || applied.interval.denominator != mode.fps_num {
         return Err(V4l2Error::OperationNotSupported);
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
+fn create_capture_stream(
+    device: &V4lDevice,
+    buffer_count: usize,
+) -> Result<CaptureIoStream, V4l2Error> {
+    let buffer_count = u32::try_from(buffer_count).map_err(|_| V4l2Error::InvalidArgument)?;
+    let stream: CaptureIoStream =
+        V4lMmapStream::with_buffers(device, V4lBufferType::VideoCapture, buffer_count)
+            .map_err(map_io_error)?;
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
 fn open_stream_state(
-    device: &Arc<Device>,
+    device: &Arc<V4lDevice>,
     mode: &CaptureMode,
     limits: &V4l2LimitsConfig,
 ) -> Result<StreamState, V4l2Error> {
-    let mut queue = Queue::<Capture, QueueInit>::get_capture_queue(device.clone())
-        .map_err(map_create_queue_error)?;
-    let applied: Format = queue
-        .change_format()
-        .map_err(map_gfmt_error)?
-        .set_size(mode.width_px as usize, mode.height_px as usize)
-        .set_pixelformat(MJPEG_FOURCC)
-        .apply()
-        .map_err(map_sfmt_error)?;
+    let desired = V4lFormat::new(mode.width_px, mode.height_px, mjpeg_fourcc());
+    let applied = device.set_format(&desired).map_err(map_io_error)?;
     verify_exact_mode(&applied, mode, limits)?;
-    set_exact_frame_interval(device.as_ref(), queue.get_type(), mode)?;
-
-    let queue = queue
-        .request_buffers::<Vec<MmapHandle>>(u32::try_from(limits.buffer_count).unwrap_or(0))
-        .map_err(map_request_buffers_error)?;
-    for _ in 0..queue.num_buffers() {
-        queue
-            .try_get_free_buffer()
-            .map_err(|_| V4l2Error::Busy)?
-            .queue()
-            .map_err(map_qbuf_error)?;
-    }
-    queue.stream_on().map_err(map_stream_on_error)?;
-
-    let mut poller =
-        Poller::new(device.clone()).map_err(|err| V4l2Error::Other(err.to_string()))?;
-    poller
-        .enable_event(PollDeviceEvent::CaptureReady)
-        .map_err(map_errno)?;
+    set_exact_frame_interval(device.as_ref(), mode)?;
+    let stream = create_capture_stream(device.as_ref(), limits.buffer_count)?;
 
     Ok(StreamState {
         mode: *mode,
-        queue,
-        poller,
+        stream,
     })
 }
 
 #[cfg(target_os = "linux")]
 fn close_stream_state(stream: StreamState) -> Result<(), V4l2Error> {
-    let _ = stream.queue.free_buffers().map_err(map_reqbufs_error)?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(stream)))
+        .map_err(|_| V4l2Error::TransportFault)?;
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn requeue_capture_buffer(queue: &CaptureQueue, index: usize) -> Result<(), V4l2Error> {
-    queue
-        .try_get_buffer(index)
-        .map_err(|_| V4l2Error::Busy)?
-        .queue()
-        .map_err(map_qbuf_error)
-}
-
-#[cfg(target_os = "linux")]
-fn unix_timestamp_ns() -> Result<u64, V4l2Error> {
+fn unix_timestamp_now_ns() -> Result<u64, V4l2Error> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| V4l2Error::Other(err.to_string()))?;
-    Ok(duration.as_nanos().min(u128::from(u64::MAX)) as u64)
+        .map_err(|_| V4l2Error::TransportFault)?;
+
+    duration
+        .as_secs()
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(u64::from(duration.subsec_nanos())))
+        .ok_or(V4l2Error::TransportFault)
 }
 
 #[cfg(target_os = "linux")]
@@ -1726,78 +1660,27 @@ fn read_next_frame(
     timeout_ms: u32,
 ) -> Result<EncodedFrame, V4l2Error> {
     let timeout = validate_timeout(timeout_ms, limits)?;
-    let deadline = Instant::now() + timeout;
+    stream.stream.set_timeout(timeout);
 
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(V4l2Error::Timeout);
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let mut events = stream
-            .poller
-            .poll(Some(remaining))
-            .map_err(map_poll_error)?;
-
-        let mut saw_capture_event = false;
-        for event in &mut events {
-            if let PollEvent::Device(PollDeviceEvent::CaptureReady) = event {
-                saw_capture_event = true;
-                match stream.queue.try_dequeue() {
-                    Ok(dqbuf) => {
-                        let dqbuf = dqbuf;
-                        let plane = dqbuf.data.get_first_plane();
-                        let data_offset =
-                            plane.data_offset.map_or(0usize, |offset| *offset as usize);
-                        let bytes_used = *plane.bytesused as usize;
-                        let index = dqbuf.data.index() as usize;
-                        let sequence = u64::from(dqbuf.data.sequence());
-                        let mapping = dqbuf
-                            .get_plane_mapping(0)
-                            .ok_or(V4l2Error::TransportFault)?
-                            .to_vec();
-                        let frame_bytes =
-                            frame_payload_from_mapping(&mapping, bytes_used, data_offset)?;
-                        if dqbuf.data.has_error() {
-                            drop(dqbuf);
-                            requeue_capture_buffer(&stream.queue, index)?;
-                            return Err(V4l2Error::TransportFault);
-                        }
-                        if frame_bytes.len() > limits.max_frame_bytes {
-                            drop(dqbuf);
-                            requeue_capture_buffer(&stream.queue, index)?;
-                            return Err(V4l2Error::TransportFault);
-                        }
-                        drop(dqbuf);
-                        requeue_capture_buffer(&stream.queue, index)?;
-
-                        return Ok(EncodedFrame {
-                            bytes: frame_bytes,
-                            width_px: stream.mode.width_px,
-                            height_px: stream.mode.height_px,
-                            timestamp_ns: unix_timestamp_ns()?,
-                            sequence,
-                            format: EncodedFormat::Mjpeg,
-                        });
-                    }
-                    Err(ioctl::IoctlConvertError::IoctlError(DqBufIoctlError::NotReady)) => {}
-                    Err(ioctl::IoctlConvertError::IoctlError(DqBufIoctlError::Eos)) => {
-                        return Err(V4l2Error::Disconnected);
-                    }
-                    Err(ioctl::IoctlConvertError::IoctlError(DqBufIoctlError::Other(errno))) => {
-                        return Err(map_errno(errno));
-                    }
-                    Err(ioctl::IoctlConvertError::ConversionError(_)) => {
-                        return Err(V4l2Error::TransportFault);
-                    }
-                }
-            }
-        }
-
-        if !saw_capture_event {
-            return Err(V4l2Error::Timeout);
-        }
+    let (mapping, metadata) = V4lCaptureStream::next(&mut stream.stream).map_err(map_io_error)?;
+    if metadata.flags.contains(V4lBufferFlags::ERROR) {
+        return Err(V4l2Error::TransportFault);
     }
+
+    let bytes_used = usize::try_from(metadata.bytesused).map_err(|_| V4l2Error::TransportFault)?;
+    let frame_bytes = frame_payload_from_mapping(mapping, bytes_used, 0)?;
+    if frame_bytes.len() > limits.max_frame_bytes {
+        return Err(V4l2Error::TransportFault);
+    }
+
+    Ok(EncodedFrame {
+        bytes: frame_bytes,
+        width_px: stream.mode.width_px,
+        height_px: stream.mode.height_px,
+        timestamp_ns: unix_timestamp_now_ns()?,
+        sequence: u64::from(metadata.sequence),
+        format: EncodedFormat::Mjpeg,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1811,7 +1694,7 @@ fn close_video_capture_state(mut state: VideoCaptureState) -> Result<(), V4l2Err
 #[cfg(target_os = "linux")]
 fn ensure_video_capture_stream<'a>(
     state: &'a mut VideoCaptureState,
-    device: &Arc<Device>,
+    device: &Arc<V4lDevice>,
     limits: &V4l2LimitsConfig,
 ) -> Result<&'a mut StreamState, V4l2Error> {
     if state.stream.is_none() {
@@ -1827,7 +1710,7 @@ fn ensure_video_capture_stream<'a>(
 #[cfg(target_os = "linux")]
 fn video_capture_property_value(
     state: &VideoCaptureState,
-    device: &Device,
+    device: &V4lDevice,
     property: CaptureProperty,
 ) -> Result<f64, V4l2Error> {
     match property {
@@ -1865,7 +1748,7 @@ fn validate_updated_selection(
 #[cfg(target_os = "linux")]
 fn set_video_capture_property(
     state: &mut VideoCaptureState,
-    device: &Device,
+    device: &V4lDevice,
     modes: &[CaptureMode],
     property: CaptureProperty,
     value: f64,
@@ -1934,7 +1817,7 @@ fn set_video_capture_property(
 #[cfg(target_os = "linux")]
 fn grab_video_capture_frame(
     state: &mut VideoCaptureState,
-    device: &Arc<Device>,
+    device: &Arc<V4lDevice>,
     limits: &V4l2LimitsConfig,
     timeout_ms: u32,
 ) -> Result<bool, V4l2Error> {
@@ -1961,7 +1844,7 @@ fn retrieve_video_capture_frame(state: &VideoCaptureState) -> Result<Frame, V4l2
 #[cfg(target_os = "linux")]
 fn read_video_capture_frame(
     state: &mut VideoCaptureState,
-    device: &Arc<Device>,
+    device: &Arc<V4lDevice>,
     limits: &V4l2LimitsConfig,
     timeout_ms: u32,
 ) -> Result<Frame, V4l2Error> {
@@ -2839,6 +2722,7 @@ mod tests {
     #[test]
     fn resolve_usb_metadata_walks_up_sysfs_ancestors() {
         use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         let root = std::env::temp_dir().join(format!(
             "imago-v4l2-test-{}-{}",
