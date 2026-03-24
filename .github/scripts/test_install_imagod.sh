@@ -122,6 +122,21 @@ run_install() {
       "$@"
 }
 
+run_install_default_dir() {
+  local description="$1"
+  shift
+
+  echo "== ${description}"
+  local release_base_url="${IMAGOD_TEST_RELEASE_BASE_URL:-${download_base}}"
+  IMAGOD_RELEASES_API_URL="${base_url}/api/releases.json" \
+    IMAGOD_RELEASE_TAG_API_BASE="${base_url}/api/tags" \
+    IMAGOD_RELEASE_BASE_URL="${release_base_url}" \
+    IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION="${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" \
+    IMAGOD_TEST_STUB_LOG="${IMAGOD_TEST_STUB_LOG:-}" \
+    bash "${repo_root}/scripts/install_imagod.sh" \
+      "$@"
+}
+
 run_install_tty() {
   local description="$1"
   local install_dir="$2"
@@ -178,6 +193,12 @@ PY
 
 plain_dir="${tmp_root}/plain-install"
 feature_dir="${tmp_root}/feature-install"
+linux_default_home="${tmp_root}/linux-default-home"
+linux_default_transcript="${tmp_root}/linux-default.transcript"
+macos_default_transcript="${tmp_root}/macos-default.transcript"
+macos_shadow_root="${tmp_root}/macos-shadow"
+macos_stub_bin="${tmp_root}/macos-default-bin"
+macos_stub_log="${tmp_root}/macos-default.log"
 tty_default_dir="${tmp_root}/tty-default-install"
 tty_default_transcript="${tmp_root}/tty-default.transcript"
 tty_variant_dir="${tmp_root}/tty-variant-install"
@@ -189,6 +210,114 @@ legacy_service_log="${tmp_root}/legacy-service.log"
 legacy_stub_bin="${tmp_root}/legacy-service-bin"
 legacy_systemd_unit="${tmp_root}/legacy-imagod.service"
 legacy_download_base="${base_url}/downloads/imagod-v0.5.0"
+
+mkdir -p "${linux_default_home}" "${macos_stub_bin}"
+
+cat > "${macos_stub_bin}/sudo" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+  printf "sudo %s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+fi
+
+IMAGOD_TEST_SUDO_ACTIVE=1 exec "$@"
+EOF
+chmod +x "${macos_stub_bin}/sudo"
+
+cat > "${macos_stub_bin}/install" <<'EOF'
+#!/bin/sh
+set -eu
+
+if [ -n "${IMAGOD_TEST_STUB_LOG:-}" ]; then
+  printf "install %s\n" "$*" >> "${IMAGOD_TEST_STUB_LOG}"
+fi
+
+shadow_root="${IMAGOD_TEST_SHADOW_ROOT:-}"
+mode=""
+create_dir=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m)
+      mode="$2"
+      shift 2
+      ;;
+    -d)
+      create_dir=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+map_destination() {
+  case "$1" in
+    /usr/local/bin|/usr/local/bin/*)
+      if [ "${IMAGOD_TEST_SUDO_ACTIVE:-0}" != "1" ]; then
+        exit 1
+      fi
+      if [ -n "${shadow_root}" ]; then
+        printf '%s%s\n' "${shadow_root}" "$1"
+        return 0
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$1"
+}
+
+if [ "${create_dir}" = "1" ]; then
+  dest="$(map_destination "$1")"
+  mkdir -p -- "${dest}"
+  exit 0
+fi
+
+src="$1"
+dest="$(map_destination "$2")"
+mkdir -p -- "$(dirname "${dest}")"
+cp "${src}" "${dest}"
+if [ -n "${mode}" ]; then
+  chmod "${mode}" "${dest}"
+fi
+EOF
+chmod +x "${macos_stub_bin}/install"
+
+(
+  HOME="${linux_default_home}" \
+  IMAGOD_TEST_UNAME_S=Linux \
+  run_install_default_dir \
+    "dry-run keeps Linux non-root default install dir under HOME" \
+    --target riscv64gc-unknown-linux-musl \
+    --dry-run
+) > "${linux_default_transcript}"
+
+grep -F "install_dir: ${linux_default_home}/.local/bin" "${linux_default_transcript}"
+
+(
+  PATH="${macos_stub_bin}:${PATH}" \
+  IMAGOD_TEST_UNAME_S=Darwin \
+  IMAGOD_TEST_STUB_LOG="${macos_stub_log}" \
+  IMAGOD_TEST_SHADOW_ROOT="${macos_shadow_root}" \
+  run_install_default_dir \
+    "macOS defaults to /usr/local/bin and falls back to sudo when needed" \
+    --target riscv64gc-unknown-linux-musl
+) > "${macos_default_transcript}"
+
+cmp -s \
+  "${macos_shadow_root}/usr/local/bin/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -F "install_dir: /usr/local/bin" "${macos_default_transcript}"
+grep -F "installed binary: /usr/local/bin/imagod" "${macos_default_transcript}"
+grep -Fx "sudo install -d -- /usr/local/bin" "${macos_stub_log}"
+grep -F "sudo install -m 0755 --" "${macos_stub_log}"
+grep -F "/usr/local/bin/imagod" "${macos_stub_log}"
 
 run_install \
   "install default variant from fixture catalog" \
