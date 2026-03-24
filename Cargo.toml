@@ -93,7 +93,7 @@ time = "0.3.36"
 tempfile = "3.27.0"
 tokio = "1.50.0"
 tokio-rustls = "0.26.4"
-toml = "1.0.6"
+toml = "1.0.7"
 ureq = { version = "3.2.0", default-features = false }
 proc-macro2 = "1.0.103"
 url = "2.5.4"
