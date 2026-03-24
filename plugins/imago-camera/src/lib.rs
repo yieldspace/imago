@@ -35,7 +35,7 @@ mod component {
     });
 
     use self::exports::imago::camera as camera_exports;
-    use self::imago::v4l20_2_0 as v4l2;
+    use self::imago::v4l2;
 
     type CameraInfo = camera_exports::types::CameraInfo;
     type CameraError = camera_exports::types::CameraError;

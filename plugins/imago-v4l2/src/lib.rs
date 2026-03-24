@@ -146,6 +146,10 @@ const MAX_EXPANDED_CAPTURE_MODES: usize = 4_096;
 const MJPEG_FOURCC: V4l2PixelFormat = V4l2PixelFormat::from_fourcc(b"MJPG");
 #[cfg(target_os = "linux")]
 const MJPG_FOURCC_VALUE: u32 = u32::from_le_bytes(*b"MJPG");
+#[cfg(target_os = "linux")]
+const V4L2_EXPOSURE_AUTO_CTRL_VALUE: i32 = 0;
+#[cfg(target_os = "linux")]
+const V4L2_EXPOSURE_MANUAL_CTRL_VALUE: i32 = 1;
 
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,7 +226,6 @@ struct VideoCaptureSelection {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
 struct VideoCaptureState {
     selected_mode: CaptureMode,
     selection: VideoCaptureSelection,
@@ -510,6 +513,15 @@ fn mode_matches_selection(mode: &CaptureMode, selection: &VideoCaptureSelection)
     true
 }
 
+#[cfg(target_os = "linux")]
+fn capture_modes_equal(left: &CaptureMode, right: &CaptureMode) -> bool {
+    left.format == right.format
+        && left.width_px == right.width_px
+        && left.height_px == right.height_px
+        && left.fps_num == right.fps_num
+        && left.fps_den == right.fps_den
+}
+
 #[cfg(any(test, target_os = "linux"))]
 fn select_best_mode(
     modes: &[CaptureMode],
@@ -611,15 +623,13 @@ fn get_control_value(device: &Device, property: CaptureProperty) -> Result<f64, 
     let id = ctrl_id_from_property(property).ok_or(V4l2Error::OperationNotSupported)?;
     let value = ioctl::g_ctrl(device, id).map_err(map_control_error)?;
     match property {
-        CaptureProperty::AutoExposure => {
-            Ok(if value == v4l2_bindings::V4L2_EXPOSURE_MANUAL as i32 {
-                0.0
-            } else if value == v4l2_bindings::V4L2_EXPOSURE_AUTO as i32 {
-                1.0
-            } else {
-                return Err(V4l2Error::OperationNotSupported);
-            })
-        }
+        CaptureProperty::AutoExposure => Ok(if value == V4L2_EXPOSURE_MANUAL_CTRL_VALUE {
+            0.0
+        } else if value == V4L2_EXPOSURE_AUTO_CTRL_VALUE {
+            1.0
+        } else {
+            return Err(V4l2Error::OperationNotSupported);
+        }),
         CaptureProperty::AutoFocus => Ok(f64::from((value != 0) as u8)),
         _ => Ok(f64::from(value)),
     }
@@ -634,8 +644,8 @@ fn set_control_value(
     let id = ctrl_id_from_property(property).ok_or(V4l2Error::OperationNotSupported)?;
     let ctrl_value = match property {
         CaptureProperty::AutoExposure => match map_boolish_to_ctrl(value)? {
-            0 => v4l2_bindings::V4L2_EXPOSURE_MANUAL as i32,
-            1 => v4l2_bindings::V4L2_EXPOSURE_AUTO as i32,
+            0 => V4L2_EXPOSURE_MANUAL_CTRL_VALUE,
+            1 => V4L2_EXPOSURE_AUTO_CTRL_VALUE,
             _ => unreachable!(),
         },
         CaptureProperty::AutoFocus => map_boolish_to_ctrl(value)?,
@@ -781,7 +791,6 @@ fn decode_mjpeg_frame(
         JpegPixelFormat::L8 => l8_to_rgba(&decoded)?,
         JpegPixelFormat::L16 => l16_to_rgba(&decoded)?,
         JpegPixelFormat::CMYK32 => cmyk32_to_rgba(&decoded)?,
-        _ => return Err(V4l2Error::OperationNotSupported),
     };
     frame_from_decoded_bytes(
         rgba,
@@ -1116,7 +1125,9 @@ fn map_sfmt_error(err: ioctl::SFmtError) -> V4l2Error {
 #[cfg(target_os = "linux")]
 fn map_stream_on_error(err: ioctl::StreamOnError) -> V4l2Error {
     match err {
-        ioctl::StreamOnError::InvalidBufferType => V4l2Error::OperationNotSupported,
+        ioctl::StreamOnError::InvalidQueue(_)
+        | ioctl::StreamOnError::InvalidPadConfig
+        | ioctl::StreamOnError::InvalidPipelineConfig => V4l2Error::OperationNotSupported,
         ioctl::StreamOnError::IoctlError(errno) => map_errno(errno),
     }
 }
@@ -1427,7 +1438,7 @@ fn enumerate_mjpeg_modes(device: &Device) -> Result<Vec<CaptureMode>, V4l2Error>
 #[cfg(target_os = "linux")]
 fn enumerate_modes_for_format(
     device: &Device,
-    pixel_format: PixelFormat,
+    pixel_format: V4l2PixelFormat,
     unique: &mut BTreeSet<(u32, u32, u32, u32)>,
 ) -> Result<(), V4l2Error> {
     let mut size_index = 0;
@@ -1489,7 +1500,7 @@ fn enumerate_modes_for_format(
 #[cfg(target_os = "linux")]
 fn enumerate_intervals_for_size(
     device: &Device,
-    pixel_format: PixelFormat,
+    pixel_format: V4l2PixelFormat,
     width: u32,
     height: u32,
     unique: &mut BTreeSet<(u32, u32, u32, u32)>,
@@ -1624,10 +1635,8 @@ fn set_exact_frame_interval(
         ioctl::g_parm(device, queue_type).map_err(|err| match err {
             ioctl::GParmError::IoctlError(errno) => map_errno(errno),
         })?;
-    unsafe {
-        parm.parm.capture.timeperframe.numerator = mode.fps_den;
-        parm.parm.capture.timeperframe.denominator = mode.fps_num;
-    }
+    parm.parm.capture.timeperframe.numerator = mode.fps_den;
+    parm.parm.capture.timeperframe.denominator = mode.fps_num;
     let parm: v4l2_bindings::v4l2_streamparm =
         ioctl::s_parm(device, parm).map_err(|err| match err {
             ioctl::GParmError::IoctlError(errno) => map_errno(errno),
@@ -1736,7 +1745,7 @@ fn read_next_frame(
                 saw_capture_event = true;
                 match stream.queue.try_dequeue() {
                     Ok(dqbuf) => {
-                        let mut dqbuf = dqbuf;
+                        let dqbuf = dqbuf;
                         let plane = dqbuf.data.get_first_plane();
                         let data_offset =
                             plane.data_offset.map_or(0usize, |offset| *offset as usize);
@@ -1997,7 +2006,11 @@ fn run_device_thread(
                 let result =
                     if state.active_stream.is_some() || state.active_video_capture.is_some() {
                         Err(V4l2Error::Busy)
-                    } else if !state.modes.iter().any(|candidate| candidate == &mode) {
+                    } else if !state
+                        .modes
+                        .iter()
+                        .any(|candidate| capture_modes_equal(candidate, &mode))
+                    {
                         Err(V4l2Error::InvalidArgument)
                     } else {
                         open_stream_state(&state.device, &mode, &state.limits).map(|stream| {
