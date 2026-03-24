@@ -593,14 +593,14 @@ fn rounded_i32(value: f64) -> Result<i32, V4l2Error> {
 #[cfg(target_os = "linux")]
 fn ctrl_id_from_property(property: CaptureProperty) -> Option<u32> {
     match property {
-        CaptureProperty::Brightness => Some(v4l2_bindings::V4L2_CID_BRIGHTNESS),
-        CaptureProperty::Contrast => Some(v4l2_bindings::V4L2_CID_CONTRAST),
-        CaptureProperty::Saturation => Some(v4l2_bindings::V4L2_CID_SATURATION),
-        CaptureProperty::Gain => Some(v4l2_bindings::V4L2_CID_GAIN),
-        CaptureProperty::AutoExposure => Some(v4l2_bindings::V4L2_CID_EXPOSURE_AUTO),
-        CaptureProperty::Exposure => Some(v4l2_bindings::V4L2_CID_EXPOSURE_ABSOLUTE),
-        CaptureProperty::AutoFocus => Some(v4l2_bindings::V4L2_CID_FOCUS_AUTO),
-        CaptureProperty::Focus => Some(v4l2_bindings::V4L2_CID_FOCUS_ABSOLUTE),
+        CaptureProperty::Brightness => Some(v4l_bindings::V4L2_CID_BRIGHTNESS),
+        CaptureProperty::Contrast => Some(v4l_bindings::V4L2_CID_CONTRAST),
+        CaptureProperty::Saturation => Some(v4l_bindings::V4L2_CID_SATURATION),
+        CaptureProperty::Gain => Some(v4l_bindings::V4L2_CID_GAIN),
+        CaptureProperty::AutoExposure => Some(v4l_bindings::V4L2_CID_EXPOSURE_AUTO),
+        CaptureProperty::Exposure => Some(v4l_bindings::V4L2_CID_EXPOSURE_ABSOLUTE),
+        CaptureProperty::AutoFocus => Some(v4l_bindings::V4L2_CID_FOCUS_AUTO),
+        CaptureProperty::Focus => Some(v4l_bindings::V4L2_CID_FOCUS_ABSOLUTE),
         _ => None,
     }
 }
