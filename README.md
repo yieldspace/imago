@@ -110,6 +110,13 @@ cargo run -p imago-cli -- service deploy --target default --detach
 cargo run -p imago-cli -- service logs local-imagod-app --tail 200
 ```
 
+If you omit `[target.default]` from `imago.toml`, pass the remote directly instead:
+
+```bash
+cargo run -p imago-cli -- service deploy --target ssh://localhost?socket=/tmp/imagod-local.sock --detach
+cargo run -p imago-cli -- service logs local-imagod-app --target ssh://localhost?socket=/tmp/imagod-local.sock --tail 200
+```
+
 For more sample projects, browse [examples/README.md](examples/README.md).
 
 ## Examples And Docs

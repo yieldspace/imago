@@ -679,7 +679,10 @@
       "additionalProperties": {
         "$ref": "#/$defs/TargetEntry"
       },
-      "type": "object"
+      "type": [
+        "object",
+        "null"
+      ]
     },
     "type": {
       "enum": [
@@ -694,8 +697,7 @@
   "required": [
     "name",
     "main",
-    "type",
-    "target"
+    "type"
   ],
   "title": "ImagoTomlDocument",
   "type": "object"

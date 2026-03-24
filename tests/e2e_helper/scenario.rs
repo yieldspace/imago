@@ -55,6 +55,10 @@ impl ServiceHandle {
     pub fn write_dotenv(&self, scenario: &Scenario, body: &str) -> TestResult<()> {
         scenario.write_service_dotenv(&self.service_name, body)
     }
+
+    pub fn remove_targets(&self, scenario: &Scenario) -> TestResult<()> {
+        scenario.remove_service_targets(&self.service_name)
+    }
 }
 
 pub struct Scenario {
@@ -183,6 +187,8 @@ impl Scenario {
             "service",
             "logs",
             service_name,
+            "--target",
+            target,
             "--tail",
             tail_text.as_str(),
         ];
@@ -273,6 +279,17 @@ impl Scenario {
         Ok(())
     }
 
+    fn remove_service_targets(&self, service_name: &str) -> TestResult<()> {
+        let service = self.service(service_name)?;
+        let imago_toml_path = service.project.project_dir.join("imago.toml");
+        let raw = fs::read_to_string(&imago_toml_path)
+            .with_context(|| format!("failed to read {}", imago_toml_path.display()))?;
+        let rendered = remove_target_sections(&raw);
+        fs::write(&imago_toml_path, rendered)
+            .with_context(|| format!("failed to write {}", imago_toml_path.display()))?;
+        Ok(())
+    }
+
     fn service(&self, name: &str) -> TestResult<&Service> {
         self.services
             .get(name)
@@ -287,10 +304,62 @@ impl Scenario {
 }
 
 fn ensure_target_exists(service: &Service, target: &str) -> TestResult<()> {
-    if service.targets.iter().any(|item| item.name == target) || target == "default" {
+    if service.targets.iter().any(|item| item.name == target)
+        || target == "default"
+        || is_direct_target_selector(target)
+    {
         return Ok(());
     }
     bail!("unknown target '{target}'");
+}
+
+fn is_direct_target_selector(target: &str) -> bool {
+    if target.starts_with("ssh://") {
+        return true;
+    }
+
+    let Some((user, host)) = target.split_once('@') else {
+        return false;
+    };
+    !user.is_empty()
+        && !host.is_empty()
+        && !host.contains('@')
+        && !host.contains(':')
+        && !host.contains('/')
+        && !host.contains('?')
+        && !host.contains('#')
+}
+
+fn remove_target_sections(raw: &str) -> String {
+    let mut rendered = Vec::new();
+    let mut skipping_target_section = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if skipping_target_section {
+            if trimmed.starts_with("[target.") {
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                skipping_target_section = false;
+            } else {
+                continue;
+            }
+        }
+
+        if trimmed.starts_with("[target.") {
+            skipping_target_section = true;
+            continue;
+        }
+
+        rendered.push(line);
+    }
+
+    let mut output = rendered.join("\n");
+    if raw.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 fn short_prefix(test_name: &str) -> String {

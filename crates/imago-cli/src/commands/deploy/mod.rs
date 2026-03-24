@@ -661,13 +661,12 @@ async fn run_async_with_target_override(
     let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
     let service_name =
         build::load_service_name(project_root).unwrap_or_else(|_| "<unknown>".to_string());
-    let context_target = match target_override {
-        Some(target) => Ok(target.clone()),
-        None => build::load_target_config(&target_name, project_root),
+    let resolved_target = match target_override {
+        Some(target) => target.clone(),
+        None => build::resolve_target_selector(&target_name, project_root)
+            .context("failed to load target configuration")?,
     };
-    if let Ok(context_target) =
-        context_target.and_then(|target| target.require_deploy_credentials())
-    {
+    if let Ok(context_target) = resolved_target.require_deploy_credentials() {
         ui::command_info(
             "service.deploy",
             &command_common::format_local_context_line(
@@ -693,7 +692,7 @@ async fn run_async_with_target_override(
     let build_output = match build::build_project_with_target_override_for_deploy(
         &target_name,
         project_root,
-        target_override,
+        Some(&resolved_target),
         &mut on_build_line,
     ) {
         Ok(output) => output,
@@ -860,6 +859,7 @@ async fn follow_logs_after_deploy(
 ) {
     let logs_result = logs::run_with_project_root_and_target_override(
         LogsArgs {
+            target: None,
             name: Some(service_name.to_string()),
             follow: true,
             tail: AUTO_FOLLOW_TAIL_LINES,
@@ -3665,7 +3665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_non_zero_when_build_step_fails() {
+    async fn returns_non_zero_when_load_config_fails_before_build() {
         let root =
             std::env::temp_dir().join(format!("imago-cli-deploy-run-fail-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp dir should be created");
@@ -3681,7 +3681,7 @@ mod tests {
 
         assert_eq!(result.exit_code, 2);
         let stderr = result.stderr.expect("stderr should be present");
-        assert!(stderr.contains("build stage failed"));
+        assert!(stderr.contains("failed to load target configuration"));
         assert!(stderr.contains("caused by:"));
         assert!(stderr.contains("hint:"));
 

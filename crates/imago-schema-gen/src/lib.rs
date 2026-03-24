@@ -206,6 +206,12 @@ mod tests {
             "name must be required in schema"
         );
         assert!(
+            !root_required
+                .iter()
+                .any(|value| value.as_str() == Some("target")),
+            "target must be optional in schema"
+        );
+        assert!(
             name_any_of
                 .iter()
                 .any(|entry| entry.get("type").and_then(JsonValue::as_str) == Some("string")),

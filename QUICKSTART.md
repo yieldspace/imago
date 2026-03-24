@@ -71,6 +71,14 @@ wasi = true
 remote = "ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock"
 ```
 
+`[target.default]` is optional. If you omit it, pass the same remote directly on the CLI:
+
+```bash
+imago artifact build --target ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock
+imago service deploy --target ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock --detach
+imago service logs example-service --target ssh://localhost?socket=/tmp/imago-quickstart-imagod.sock --tail 200
+```
+
 `name.cargo = true` reads `./Cargo.toml` `[package].name` from the same project root as `imago.toml`.
 If you prefer a literal value, keep using `name = "example-service"` instead.
 This lookup does not search parent directories; a missing sibling file or missing `[package].name` fails closed.
@@ -138,3 +146,4 @@ example-service stdout | Hello, World!
 
 - `imago service ls --target default`
 - `imago service stop example-service --target default`
+- If you removed `[target.default]`, replace `default` with the full `ssh://...` target on each command.
