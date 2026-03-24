@@ -6,8 +6,6 @@ use std::fs;
 use std::io::{self, Cursor};
 #[cfg(target_os = "linux")]
 use std::time::Duration;
-#[cfg(any(test, target_os = "linux"))]
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path},
@@ -2728,6 +2726,7 @@ mod tests {
     #[test]
     fn resolve_usb_metadata_walks_up_sysfs_ancestors() {
         use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         let root = std::env::temp_dir().join(format!(
             "imago-v4l2-test-{}-{}",
