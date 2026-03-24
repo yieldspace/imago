@@ -548,6 +548,7 @@ mod tests {
             release_hash: "release-test".to_string(),
             app_type: RunnerAppType::Cli,
             http_port: None,
+            http_listen_addr: None,
             http_max_body_bytes: None,
             socket: None,
             component_path: root.join("component.wasm"),

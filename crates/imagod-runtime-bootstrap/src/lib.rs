@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use imago_protocol::ErrorCode;
+use imago_protocol::Validate;
 use imagod_common::ImagodError;
 use imagod_ipc::RunnerBootstrap;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -64,13 +65,21 @@ where
 
 pub fn decode_runner_bootstrap(bootstrap_bytes: &[u8]) -> Result<RunnerBootstrap, ImagodError> {
     validate_runner_bootstrap_size(bootstrap_bytes.len())?;
-    imago_protocol::from_cbor::<RunnerBootstrap>(bootstrap_bytes).map_err(|e| {
+    let bootstrap = imago_protocol::from_cbor::<RunnerBootstrap>(bootstrap_bytes).map_err(|e| {
         ImagodError::new(
             ErrorCode::BadRequest,
             STAGE_RUNNER_BOOTSTRAP,
             format!("failed to decode runner bootstrap: {e}"),
         )
-    })
+    })?;
+    bootstrap.validate().map_err(|error| {
+        ImagodError::new(
+            ErrorCode::BadRequest,
+            STAGE_RUNNER_BOOTSTRAP,
+            format!("invalid runner bootstrap: {error}"),
+        )
+    })?;
+    Ok(bootstrap)
 }
 
 pub fn validate_runner_bootstrap_size(bootstrap_len: usize) -> Result<(), ImagodError> {
@@ -161,6 +170,48 @@ mod tests {
             .expect_err("oversized bootstrap should fail before decode");
         assert_eq!(err.code, ErrorCode::BadRequest);
         assert!(err.message.contains("too large"));
+    }
+
+    #[test]
+    fn decode_runner_bootstrap_rejects_invalid_payload_after_decode() {
+        let bootstrap = RunnerBootstrap {
+            runner_id: "runner-a".to_string(),
+            service_name: "svc-a".to_string(),
+            release_hash: "release-a".to_string(),
+            app_type: imagod_ipc::RunnerAppType::Http,
+            http_port: Some(18080),
+            http_listen_addr: None,
+            http_max_body_bytes: Some(1024),
+            http_worker_count: 2,
+            http_worker_queue_capacity: 4,
+            socket: None,
+            component_path: PathBuf::from("/tmp/component.wasm"),
+            args: vec![],
+            envs: std::collections::BTreeMap::new(),
+            wasi_mounts: vec![],
+            wasi_http_outbound: vec![],
+            resources: std::collections::BTreeMap::new(),
+            bindings: vec![],
+            plugin_dependencies: vec![],
+            enabled_native_plugins: vec!["imago:admin".to_string(), "imago:node".to_string()],
+            capabilities: imagod_ipc::CapabilityPolicy::default(),
+            manager_control_endpoint: PathBuf::from("/tmp/manager.sock"),
+            runner_endpoint: PathBuf::from("/tmp/runner.sock"),
+            manager_auth_secret: imagod_ipc::random_secret_hex(),
+            invocation_secret: imagod_ipc::random_secret_hex(),
+            epoch_tick_interval_ms: 50,
+            wasm_memory_reservation_bytes: 64 * 1024 * 1024,
+            wasm_memory_reservation_for_growth_bytes: 16 * 1024 * 1024,
+            wasm_memory_guard_size_bytes: 64 * 1024,
+            wasm_guard_before_linear_memory: false,
+            wasm_parallel_compilation: false,
+        };
+
+        let encoded = imago_protocol::to_cbor(&bootstrap).expect("bootstrap encode should work");
+        let err = decode_runner_bootstrap(&encoded)
+            .expect_err("invalid bootstrap should be rejected after decode");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(err.message.contains("http_listen_addr"));
     }
 
     #[test]

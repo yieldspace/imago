@@ -44,7 +44,8 @@ pub(super) async fn build_launch_from_release(
     } = resolve_resources_config(release_dir, manifest, manifest_validator).await?;
 
     let bindings = manifest_validator.validate_bindings(&manifest.bindings)?;
-    let (http_port, http_max_body_bytes) = manifest_validator.validate_http(manifest)?;
+    let (http_port, http_listen_addr, http_max_body_bytes) =
+        manifest_validator.validate_http(manifest)?;
     let socket = manifest_validator.validate_socket(manifest)?;
     let plugin_dependencies = plugin_cache
         .prepare_plugin_dependencies(release_dir, &manifest.dependencies, manifest_validator)
@@ -55,6 +56,7 @@ pub(super) async fn build_launch_from_release(
         release_hash: release_hash.to_string(),
         app_type: manifest.app_type,
         http_port,
+        http_listen_addr,
         http_max_body_bytes,
         socket,
         component_path,

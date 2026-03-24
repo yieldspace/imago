@@ -34,7 +34,7 @@ use imagod_ipc::{
     issue_invocation_token, now_unix_secs, random_secret_hex,
 };
 #[cfg(test)]
-use imagod_ipc::{ControlRequest, ControlResponse};
+use imagod_ipc::{ControlRequest, ControlResponse, DEFAULT_HTTP_LISTEN_ADDR};
 use tokio::{
     io::{AsyncRead, AsyncWriteExt},
     net::UnixListener,
@@ -86,6 +86,8 @@ pub struct ServiceLaunch {
     pub app_type: RunnerAppType,
     /// TCP port for HTTP ingress when `app_type=http`.
     pub http_port: Option<u16>,
+    /// IP literal for HTTP ingress bind when `app_type=http`.
+    pub http_listen_addr: Option<String>,
     /// Max accepted HTTP request body size in bytes when `app_type=http`.
     pub http_max_body_bytes: Option<u64>,
     /// Socket runtime settings when `app_type=socket`.
@@ -449,6 +451,7 @@ impl ServiceSupervisor {
                 release_hash: launch.release_hash.clone(),
                 app_type: launch.app_type,
                 http_port: launch.http_port,
+                http_listen_addr: launch.http_listen_addr.clone(),
                 http_max_body_bytes: launch.http_max_body_bytes,
                 http_worker_count: self.http_worker_count,
                 http_worker_queue_capacity: effective_http_worker_queue_capacity,
@@ -1791,6 +1794,7 @@ mod tests {
             release_hash: "release-test".to_string(),
             app_type: RunnerAppType::Http,
             http_port: Some(18080),
+            http_listen_addr: Some(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
             http_max_body_bytes: Some(max_body_bytes),
             socket: None,
             component_path: PathBuf::from("/tmp/unused.wasm"),
