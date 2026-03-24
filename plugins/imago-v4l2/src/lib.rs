@@ -1586,10 +1586,10 @@ fn inspect_device(
 fn enumerate_openable_devices(allowlist: &BTreeSet<String>) -> Vec<OpenableDevice> {
     let mut devices = Vec::new();
     for path in allowlist {
-        if let Ok((_, info, modes)) = inspect_device(path) {
-            if !modes.is_empty() {
-                devices.push(info);
-            }
+        if let Ok((_, info, modes)) = inspect_device(path)
+            && !modes.is_empty()
+        {
+            devices.push(info);
         }
     }
     devices
@@ -1690,7 +1690,7 @@ fn open_stream_state(
         .map_err(map_errno)?;
 
     Ok(StreamState {
-        mode: mode.clone(),
+        mode: *mode,
         queue,
         poller,
     })
@@ -2023,7 +2023,7 @@ fn run_device_thread(
                 let result = state
                     .active_stream
                     .as_ref()
-                    .map(|stream| stream.mode.clone())
+                    .map(|stream| stream.mode)
                     .ok_or_else(|| V4l2Error::Other("stream is not open".to_string()));
                 let _ = reply.send(result);
             }
