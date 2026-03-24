@@ -8,7 +8,7 @@ pub struct BuiltinNativePluginDescriptor {
 }
 
 /// Canonical descriptor table for all built-in native plugins linked into `imagod`.
-pub const BUILTIN_NATIVE_PLUGIN_DESCRIPTORS: [BuiltinNativePluginDescriptor; 5] = [
+pub const BUILTIN_NATIVE_PLUGIN_DESCRIPTORS: [BuiltinNativePluginDescriptor; 6] = [
     BuiltinNativePluginDescriptor {
         package_name: "imago:admin",
         default_enabled: true,
@@ -27,6 +27,10 @@ pub const BUILTIN_NATIVE_PLUGIN_DESCRIPTORS: [BuiltinNativePluginDescriptor; 5] 
     },
     BuiltinNativePluginDescriptor {
         package_name: "imago:usb",
+        default_enabled: false,
+    },
+    BuiltinNativePluginDescriptor {
+        package_name: "imago:v4l2",
         default_enabled: false,
     },
 ];

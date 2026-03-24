@@ -9,7 +9,7 @@
 | `examples/local-imagod-wasi-nn-openvino-person-detection` | `wasi-nn` と asset 同梱 OpenVINO 人物検出 model の実行例 | `examples/local-imagod-wasi-nn-openvino-person-detection/README.md` |
 | `examples/local-imagod-socket` | `type=socket` の実行例 | `examples/local-imagod-socket/README.md` |
 | `examples/local-imagod-plugin-hello` | Wasm plugin 依存の実行例 | `examples/local-imagod-plugin-hello/README.md` |
-| `examples/local-imagod-plugin-camera` | `imago:camera` Wasm plugin と `imago:usb` 連携の実行例 | `examples/local-imagod-plugin-camera/README.md` |
+| `examples/local-imagod-plugin-camera` | `imago:camera` Wasm plugin と `imago:v4l2` 連携の実行例 | `examples/local-imagod-plugin-camera/README.md` |
 | `examples/local-imagod-plugin-native-admin` | native plugin 依存の実行例 | `examples/local-imagod-plugin-native-admin/README.md` |
 | `examples/local-imagod-plugin-native-experimental-gpio` | experimental-gpio native plugin 依存の実行例 | `examples/local-imagod-plugin-native-experimental-gpio/README.md` |
 | `examples/local-imagod-plugin-native-experimental-i2c` | experimental-i2c native plugin 依存の実行例 | `examples/local-imagod-plugin-native-experimental-i2c/README.md` |

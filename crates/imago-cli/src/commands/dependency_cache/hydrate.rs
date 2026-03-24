@@ -405,9 +405,9 @@ mod tests {
     };
 
     use super::{
-        component_source_fingerprint_if_exists, is_cache_hit, resolve_cached_component_path,
-        validate_hydrated_wit_output_path_collisions, verify_project_dependency_cache,
-        wit_source_fingerprint_if_exists,
+        component_source_fingerprint_if_exists, hydrate_project_wit_deps, is_cache_hit,
+        resolve_cached_component_path, validate_hydrated_wit_output_path_collisions,
+        verify_project_dependency_cache, wit_source_fingerprint_if_exists,
     };
 
     fn new_temp_dir(test_name: &str) -> PathBuf {
@@ -557,6 +557,257 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_project_wit_deps_allows_identical_transitive_package_when_path_matches() {
+        let root = new_temp_dir("hydrate-identical-transitive-path");
+
+        let direct_dependency = ProjectDependency {
+            name: "path-source-0".to_string(),
+            version: "0.1.0".to_string(),
+            kind: ManifestDependencyKind::Native,
+            wit: ProjectDependencySource {
+                source_kind: plugin_sources::SourceKind::Path,
+                source: "registry/v4l2".to_string(),
+                registry: None,
+                sha256: None,
+            },
+            requires: vec![],
+            component: None,
+            capabilities: ManifestCapabilityPolicy::default(),
+        };
+        let camera_dependency = ProjectDependency {
+            name: "path-source-1".to_string(),
+            version: "0.1.0".to_string(),
+            kind: ManifestDependencyKind::Native,
+            wit: ProjectDependencySource {
+                source_kind: plugin_sources::SourceKind::Path,
+                source: "registry/camera".to_string(),
+                registry: None,
+                sha256: None,
+            },
+            requires: vec!["imago:v4l2".to_string()],
+            component: None,
+            capabilities: ManifestCapabilityPolicy::default(),
+        };
+
+        let mut direct_entry = DependencyCacheEntry {
+            name: direct_dependency.name.clone(),
+            resolved_package_name: Some("imago:v4l2".to_string()),
+            version: direct_dependency.version.clone(),
+            kind: "native".to_string(),
+            wit_source: direct_dependency.wit.source.clone(),
+            wit_registry: None,
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
+            wit_digest: String::new(),
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
+            transitive_packages: vec![],
+        };
+        let mut camera_entry = DependencyCacheEntry {
+            name: camera_dependency.name.clone(),
+            resolved_package_name: Some("imago:camera".to_string()),
+            version: camera_dependency.version.clone(),
+            kind: "native".to_string(),
+            wit_source: camera_dependency.wit.source.clone(),
+            wit_registry: None,
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-1-0.1.0".to_string(),
+            wit_digest: String::new(),
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
+            transitive_packages: vec![DependencyCacheTransitivePackage {
+                name: "imago:v4l2".to_string(),
+                registry: None,
+                requirement: "=0.1.0".to_string(),
+                version: Some("0.1.0".to_string()),
+                digest: String::new(),
+                source: None,
+                path: "wit/deps/imago-v4l2-0.1.0".to_string(),
+            }],
+        };
+
+        write(
+            &root.join(".imago/deps/path-source-0/wit/deps/path-source-0-0.1.0/package.wit"),
+            b"package imago:v4l2@0.1.0;\n// direct\n",
+        );
+        write(
+            &root.join(".imago/deps/path-source-1/wit/deps/path-source-1-0.1.0/package.wit"),
+            b"package imago:camera@0.1.0;\n// camera\n",
+        );
+        write(
+            &root.join(".imago/deps/path-source-1/wit/deps/imago-v4l2-0.1.0/package.wit"),
+            b"package imago:v4l2@0.1.0;\n// direct\n",
+        );
+
+        direct_entry.wit_digest = super::compute_path_digest_hex(
+            &root.join(".imago/deps/path-source-0/wit/deps/path-source-0-0.1.0"),
+        )
+        .expect("direct wit digest should compute");
+        camera_entry.wit_digest = super::compute_path_digest_hex(
+            &root.join(".imago/deps/path-source-1/wit/deps/path-source-1-0.1.0"),
+        )
+        .expect("camera wit digest should compute");
+        camera_entry.transitive_packages[0].digest = format!(
+            "sha256:{}",
+            super::compute_sha256_hex(
+                &root.join(".imago/deps/path-source-1/wit/deps/imago-v4l2-0.1.0/package.wit")
+            )
+            .expect("transitive wit digest should compute")
+        );
+
+        save_entry(&root, &direct_entry).expect("direct entry should be saved");
+        save_entry(&root, &camera_entry).expect("camera entry should be saved");
+
+        hydrate_project_wit_deps(&root, &[direct_dependency, camera_dependency], None)
+            .expect("identical transitive package path should be a no-op");
+
+        assert_eq!(
+            fs::read_to_string(root.join("wit/deps/imago-v4l2-0.1.0/package.wit"))
+                .expect("direct package should be hydrated"),
+            "package imago:v4l2@0.1.0;\n// direct\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("wit/deps/imago-camera-0.1.0/package.wit"))
+                .expect("camera package should be hydrated"),
+            "package imago:camera@0.1.0;\n// camera\n"
+        );
+    }
+
+    #[test]
+    fn hydrate_project_wit_deps_rejects_conflicting_transitive_package_when_path_matches() {
+        let root = new_temp_dir("hydrate-conflicting-transitive-path");
+
+        let direct_dependency = ProjectDependency {
+            name: "path-source-0".to_string(),
+            version: "0.1.0".to_string(),
+            kind: ManifestDependencyKind::Native,
+            wit: ProjectDependencySource {
+                source_kind: plugin_sources::SourceKind::Path,
+                source: "registry/v4l2".to_string(),
+                registry: None,
+                sha256: None,
+            },
+            requires: vec![],
+            component: None,
+            capabilities: ManifestCapabilityPolicy::default(),
+        };
+        let camera_dependency = ProjectDependency {
+            name: "path-source-1".to_string(),
+            version: "0.1.0".to_string(),
+            kind: ManifestDependencyKind::Native,
+            wit: ProjectDependencySource {
+                source_kind: plugin_sources::SourceKind::Path,
+                source: "registry/camera".to_string(),
+                registry: None,
+                sha256: None,
+            },
+            requires: vec!["imago:v4l2".to_string()],
+            component: None,
+            capabilities: ManifestCapabilityPolicy::default(),
+        };
+
+        let mut direct_entry = DependencyCacheEntry {
+            name: direct_dependency.name.clone(),
+            resolved_package_name: Some("imago:v4l2".to_string()),
+            version: direct_dependency.version.clone(),
+            kind: "native".to_string(),
+            wit_source: direct_dependency.wit.source.clone(),
+            wit_registry: None,
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-0-0.1.0".to_string(),
+            wit_digest: String::new(),
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
+            transitive_packages: vec![],
+        };
+        let mut camera_entry = DependencyCacheEntry {
+            name: camera_dependency.name.clone(),
+            resolved_package_name: Some("imago:camera".to_string()),
+            version: camera_dependency.version.clone(),
+            kind: "native".to_string(),
+            wit_source: camera_dependency.wit.source.clone(),
+            wit_registry: None,
+            wit_sha256: None,
+            wit_path: "wit/deps/path-source-1-0.1.0".to_string(),
+            wit_digest: String::new(),
+            wit_source_fingerprint: None,
+            component_source: None,
+            component_registry: None,
+            component_sha256: None,
+            component_source_fingerprint: None,
+            component_world_foreign_packages: vec![],
+            component_world_foreign_packages_recorded: true,
+            transitive_packages: vec![DependencyCacheTransitivePackage {
+                name: "imago:v4l2".to_string(),
+                registry: None,
+                requirement: "=0.1.0".to_string(),
+                version: Some("0.1.0".to_string()),
+                digest: String::new(),
+                source: None,
+                path: "wit/deps/imago-v4l2-0.1.0".to_string(),
+            }],
+        };
+
+        write(
+            &root.join(".imago/deps/path-source-0/wit/deps/path-source-0-0.1.0/package.wit"),
+            b"package imago:v4l2@0.1.0;\n// direct\n",
+        );
+        write(
+            &root.join(".imago/deps/path-source-1/wit/deps/path-source-1-0.1.0/package.wit"),
+            b"package imago:camera@0.1.0;\n// camera\n",
+        );
+        write(
+            &root.join(".imago/deps/path-source-1/wit/deps/imago-v4l2-0.1.0/package.wit"),
+            b"package imago:v4l2@0.1.0;\n// stale transitive\n",
+        );
+
+        direct_entry.wit_digest = super::compute_path_digest_hex(
+            &root.join(".imago/deps/path-source-0/wit/deps/path-source-0-0.1.0"),
+        )
+        .expect("direct wit digest should compute");
+        camera_entry.wit_digest = super::compute_path_digest_hex(
+            &root.join(".imago/deps/path-source-1/wit/deps/path-source-1-0.1.0"),
+        )
+        .expect("camera wit digest should compute");
+        camera_entry.transitive_packages[0].digest = format!(
+            "sha256:{}",
+            super::compute_sha256_hex(
+                &root.join(".imago/deps/path-source-1/wit/deps/imago-v4l2-0.1.0/package.wit")
+            )
+            .expect("transitive wit digest should compute")
+        );
+
+        save_entry(&root, &direct_entry).expect("direct entry should be saved");
+        save_entry(&root, &camera_entry).expect("camera entry should be saved");
+
+        let err = hydrate_project_wit_deps(&root, &[direct_dependency, camera_dependency], None)
+            .expect_err("conflicting duplicate transitive package path must fail");
+        assert!(
+            err.to_string()
+                .contains("failed to hydrate transitive wit package 'imago:v4l2'")
+        );
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("conflicting cached WIT package"))
+        );
+    }
+
+    #[test]
     fn resolve_cached_component_path_validates_sha_and_returns_component_file() {
         let root = new_temp_dir("resolve-component");
         let component_bytes = b"\0asm\x01\0\0\0";
@@ -629,7 +880,7 @@ mod tests {
     package root:component@0.1.0;
 
     world camera-plugin {
-      import imago:usb/provider@0.3.0;
+      import imago:v4l2/provider@0.1.0;
       export imago:camera/types@0.1.0;
       export imago:camera/provider@0.1.0;
     }
@@ -646,9 +897,9 @@ mod tests {
     "#,
         );
         write(
-            &fixture.join("deps/imago-usb/package.wit"),
+            &fixture.join("deps/imago-v4l2/package.wit"),
             br#"
-    package imago:usb@0.3.0;
+    package imago:v4l2@0.1.0;
 
     interface provider {}
     "#,

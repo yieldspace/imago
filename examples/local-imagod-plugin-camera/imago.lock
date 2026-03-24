@@ -1,15 +1,23 @@
 version = 1
 
 [requested]
-fingerprint = "fbd43ff3625f126959985aafe2acfc28e257e18e827736c8ede1084bb36a7e49"
+fingerprint = "eb0e2071686deb9b08330d2ca34ae5d65f23da751cac5a9d3cdeb82b0a6232ab"
 
 [[requested.dependencies]]
-id = "dep:549706f97524ae8eecf4d6cbb108c842d048b972742bb772dc698d09262a44ea"
+id = "dep:c2ab3bf186bb39cb252b7aa6090c22be5148835af1eabd382de52cfe37241db3"
+kind = "native"
+version = "0.2.0"
+source_kind = "path"
+source = "../../plugins/imago-v4l2/wit"
+declared_requires = []
+
+[[requested.dependencies]]
+id = "dep:eecd7a472c7cb862226a8e243c2a46437118614ea434ad79da8a6720cffc5828"
 kind = "wasm"
-version = "0.1.0"
+version = "0.3.0"
 source_kind = "path"
 source = "../../plugins/imago-camera/wit"
-declared_requires = ["imago:usb"]
+declared_requires = ["imago:v4l2"]
 component_source_kind = "path"
 component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
 
@@ -17,47 +25,39 @@ component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
 privileged = false
 
 [requested.dependencies.capabilities.deps]
-"imago:usb" = ["*"]
+"imago:v4l2" = ["*"]
 
 [requested.dependencies.capabilities.wasi]
 "*" = ["*"]
 
-[[requested.dependencies]]
-id = "dep:613c2069fdb93e30721186b004249d8d490ad0c2913d1251e51cb56174d6e3ec"
-kind = "native"
-version = "0.3.0"
-source_kind = "path"
-source = "../../plugins/imago-usb/wit"
-declared_requires = []
-
 [[resolved.dependencies]]
-request_id = "dep:549706f97524ae8eecf4d6cbb108c842d048b972742bb772dc698d09262a44ea"
-resolved_name = "imago:camera"
-resolved_version = "0.1.0"
-wit_path = "wit/deps/imago-camera-0.1.0"
-wit_tree_digest = "9251dda5fd5fc15936fe17c345d06abd68051588024bc7fea20c2573370540f7"
-component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
-component_sha256 = "1b6b9b8b9a0d5e492faa67ec4eb40d63e1a270fc75c6760a1ed0ec273851d38f"
-requires_request_ids = ["dep:613c2069fdb93e30721186b004249d8d490ad0c2913d1251e51cb56174d6e3ec"]
-
-[[resolved.dependencies]]
-request_id = "dep:613c2069fdb93e30721186b004249d8d490ad0c2913d1251e51cb56174d6e3ec"
-resolved_name = "imago:usb"
-resolved_version = "0.3.0"
-wit_path = "wit/deps/imago-usb-0.3.0"
-wit_tree_digest = "14f6ab09515e26d42e02237163cc5f257e192e0fb31657ab20f7649d1646728e"
+request_id = "dep:c2ab3bf186bb39cb252b7aa6090c22be5148835af1eabd382de52cfe37241db3"
+resolved_name = "imago:v4l2"
+resolved_version = "0.2.0"
+wit_path = "wit/deps/imago-v4l2-0.2.0"
+wit_tree_digest = "3087cbe3ff102d6c39b1488b8d751d6e6d46fdfe602e47f166fcf276b1ea85f8"
 requires_request_ids = []
 
+[[resolved.dependencies]]
+request_id = "dep:eecd7a472c7cb862226a8e243c2a46437118614ea434ad79da8a6720cffc5828"
+resolved_name = "imago:camera"
+resolved_version = "0.3.0"
+wit_path = "wit/deps/imago-camera-0.3.0"
+wit_tree_digest = "53278e7d07285461ec9aa0b9e3220853abe2652e1853109bbf84160a738abcaa"
+component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
+component_sha256 = "c602ef9ae93060b247ca44a6bfaa634e855ccc7f7cc7cd45c76d523cf6940645"
+requires_request_ids = ["dep:c2ab3bf186bb39cb252b7aa6090c22be5148835af1eabd382de52cfe37241db3"]
+
 [[resolved.packages]]
-package_ref = "imago:usb@0.3.0#"
-name = "imago:usb"
-version = "0.3.0"
-requirement = "=0.3.0"
-path = "wit/deps/imago-usb-0.3.0"
-digest = "sha256:d0421171c18a4683350f33298898485c201eaa1375bc533cd07c4e66e0b82427"
+package_ref = "imago:v4l2@0.2.0#"
+name = "imago:v4l2"
+version = "0.2.0"
+requirement = "=0.2.0"
+path = "wit/deps/imago-v4l2-0.2.0"
+digest = "sha256:87f0ded5c0c1c1ccf3c6d5a5780491a98dec42429b580983012f5bbbe33d72e6"
 
 [[resolved.package_edges]]
 from_kind = "dependency"
-from_ref = "dep:549706f97524ae8eecf4d6cbb108c842d048b972742bb772dc698d09262a44ea"
-to_package_ref = "imago:usb@0.3.0#"
+from_ref = "dep:eecd7a472c7cb862226a8e243c2a46437118614ea434ad79da8a6720cffc5828"
+to_package_ref = "imago:v4l2@0.2.0#"
 reason = "wit-import"

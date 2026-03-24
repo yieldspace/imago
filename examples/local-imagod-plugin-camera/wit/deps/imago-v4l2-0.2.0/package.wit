@@ -1,0 +1,266 @@
+package imago:v4l2@0.2.0;
+
+/// Shared V4L2 capture types used by provider, device, and stream APIs.
+@since(version = 0.1.0)
+interface types {
+  /// Error codes returned by V4L2 operations.
+  @since(version = 0.1.0)
+  variant v4l2-error {
+    /// The requested path is denied by policy.
+    not-allowed,
+    /// The operation timed out before a frame became available.
+    timeout,
+    /// The device disconnected while the operation was in progress.
+    disconnected,
+    /// The device already has an active stream.
+    busy,
+    /// The caller supplied an invalid argument.
+    invalid-argument,
+    /// The transport or kernel backend reported a capture fault.
+    transport-fault,
+    /// The current runtime backend does not support this operation.
+    operation-not-supported,
+    /// Any other implementation-defined error with detail text.
+    other(string),
+  }
+
+  /// Encoded payload format returned by the stream.
+  @since(version = 0.1.0)
+  enum encoded-format {
+    /// Motion JPEG payload bytes.
+    mjpeg,
+  }
+
+  /// Decoded pixel layout returned by the OpenCV-style capture API.
+  @since(version = 0.2.0)
+  enum pixel-format {
+    /// Tightly packed 8-bit RGBA pixels.
+    rgba8,
+  }
+
+  /// Camera property identifier for OpenCV-style get/set access.
+  @since(version = 0.2.0)
+  enum capture-property {
+    /// Requested frame width in pixels.
+    frame-width,
+    /// Requested frame height in pixels.
+    frame-height,
+    /// Requested frames per second as an integer.
+    fps,
+    /// Requested transport FOURCC packed into an integer domain.
+    fourcc,
+    /// V4L2 brightness control.
+    brightness,
+    /// V4L2 contrast control.
+    contrast,
+    /// V4L2 saturation control.
+    saturation,
+    /// V4L2 gain control.
+    gain,
+    /// V4L2 auto-exposure toggle where `0.0` is manual and `1.0` is auto.
+    auto-exposure,
+    /// V4L2 absolute exposure value.
+    exposure,
+    /// V4L2 auto-focus toggle where `0.0` is manual and `1.0` is auto.
+    auto-focus,
+    /// V4L2 absolute focus value.
+    focus,
+  }
+
+  /// Runtime-enforced V4L2 limits.
+  @since(version = 0.1.0)
+  record limits {
+    /// Maximum payload bytes returned in one frame.
+    max-frame-bytes: u32,
+    /// Maximum frame wait timeout in milliseconds.
+    max-timeout-ms: u32,
+    /// Maximum number of allowlisted V4L2 paths.
+    max-paths: u32,
+    /// Number of MMAP buffers allocated per opened stream.
+    buffer-count: u32,
+  }
+
+  /// One allowlisted V4L2 device that can be opened.
+  @since(version = 0.1.0)
+  record openable-device {
+    /// Absolute `/dev/video*` path.
+    path: string,
+    /// Human-readable label.
+    label: string,
+    /// USB vendor ID when backed by USB, or `0` otherwise.
+    vendor-id: u16,
+    /// USB product ID when backed by USB, or `0` otherwise.
+    product-id: u16,
+    /// USB bus number when backed by USB, or `0` otherwise.
+    bus: u8,
+    /// USB device address when backed by USB, or `0` otherwise.
+    address: u8,
+  }
+
+  /// One selectable capture mode.
+  @since(version = 0.1.0)
+  record capture-mode {
+    /// Encoded payload format.
+    format: encoded-format,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Frames-per-second numerator.
+    fps-num: u32,
+    /// Frames-per-second denominator.
+    fps-den: u32,
+  }
+
+  /// One captured encoded frame.
+  @since(version = 0.1.0)
+  record encoded-frame {
+    /// Encoded frame payload bytes.
+    bytes: list<u8>,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Capture timestamp in Unix nanoseconds.
+    timestamp-ns: u64,
+    /// Monotonic per-stream frame sequence number.
+    sequence: u64,
+    /// Encoded payload format.
+    format: encoded-format,
+  }
+
+  /// One captured decoded frame.
+  @since(version = 0.2.0)
+  record frame {
+    /// Tightly packed decoded frame bytes.
+    bytes: list<u8>,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Bytes between consecutive rows.
+    stride-bytes: u32,
+    /// Capture timestamp in Unix nanoseconds.
+    timestamp-ns: u64,
+    /// Monotonic per-capture frame sequence number.
+    sequence: u64,
+    /// Decoded pixel format.
+    format: pixel-format,
+  }
+}
+
+/// Stream resource for one opened V4L2 capture session.
+@since(version = 0.1.0)
+interface capture-stream {
+  @since(version = 0.1.0)
+  use types.{capture-mode, encoded-frame, v4l2-error};
+
+  /// Opened V4L2 stream resource.
+  @since(version = 0.1.0)
+  resource capture-stream {
+    /// Return the currently configured capture mode.
+    @since(version = 0.1.0)
+    current-mode: func() -> capture-mode;
+    /// Capture the next complete encoded frame.
+    @since(version = 0.1.0)
+    next-frame: func(timeout-ms: u32) -> result<encoded-frame, v4l2-error>;
+  }
+}
+
+/// OpenCV-style capture resource backed by one V4L2 device.
+@since(version = 0.2.0)
+interface video-capture {
+  @since(version = 0.2.0)
+  use types.{capture-property, frame, v4l2-error};
+
+  /// Opened V4L2 capture resource with lazy stream configuration.
+  @since(version = 0.2.0)
+  resource video-capture {
+    /// Return whether the underlying device is still opened.
+    @since(version = 0.2.0)
+    is-opened: func() -> bool;
+    /// Return the current property value.
+    @since(version = 0.2.0)
+    get: func(property: capture-property) -> result<f64, v4l2-error>;
+    /// Update one property and return whether the value was accepted.
+    @since(version = 0.2.0)
+    set: func(property: capture-property, value: f64) -> result<bool, v4l2-error>;
+    /// Grab, decode, and return the next frame.
+    @since(version = 0.2.0)
+    read: func(timeout-ms: u32) -> result<frame, v4l2-error>;
+    /// Grab and decode the next frame into the internal cache.
+    @since(version = 0.2.0)
+    grab: func(timeout-ms: u32) -> result<bool, v4l2-error>;
+    /// Return the last successfully grabbed frame from the internal cache.
+    @since(version = 0.2.0)
+    retrieve: func() -> result<frame, v4l2-error>;
+    /// Release the active stream and close the underlying device.
+    @since(version = 0.2.0)
+    release: func();
+  }
+}
+
+/// Device resource for one opened V4L2 node.
+@since(version = 0.1.0)
+interface device {
+  @since(version = 0.1.0)
+  use capture-stream.{capture-stream};
+  @since(version = 0.1.0)
+  use types.{capture-mode, openable-device, v4l2-error};
+  @since(version = 0.2.0)
+  use video-capture.{video-capture};
+
+  /// Opened V4L2 device resource.
+  @since(version = 0.1.0)
+  resource device {
+    /// Return the metadata of this V4L2 node.
+    @since(version = 0.1.0)
+    info: func() -> openable-device;
+    /// Return all supported MJPEG capture modes.
+    /// Stepwise and continuous descriptors are expanded into exact modes.
+    @since(version = 0.1.0)
+    list-modes: func() -> list<capture-mode>;
+    /// Open one active capture stream for the requested exact mode.
+    @since(version = 0.1.0)
+    open-stream: func(mode: capture-mode) -> result<capture-stream, v4l2-error>;
+    /// Open one OpenCV-style capture resource for this device.
+    @since(version = 0.2.0)
+    open-video-capture: func() -> result<video-capture, v4l2-error>;
+  }
+}
+
+/// Provider entry points for V4L2 resources.
+@since(version = 0.1.0)
+interface provider {
+  @since(version = 0.1.0)
+  use device.{device};
+  @since(version = 0.1.0)
+  use types.{limits, openable-device, v4l2-error};
+
+  /// Return the policy-allowed V4L2 paths that can be passed to `open-device`.
+  @since(version = 0.1.0)
+  list-openable-paths: func() -> list<string>;
+
+  /// Return currently openable V4L2 devices that expose MJPEG capture modes.
+  /// USB metadata fields may be `0` when sysfs metadata is unavailable.
+  @since(version = 0.1.0)
+  list-openable-devices: func() -> result<list<openable-device>, v4l2-error>;
+
+  /// Return effective runtime limits applied by this plugin.
+  @since(version = 0.1.0)
+  get-limits: func() -> limits;
+
+  /// Open one V4L2 device by absolute path.
+  @since(version = 0.1.0)
+  open-device: func(path: string) -> result<device, v4l2-error>;
+}
+
+/// Host world for the V4L2 native plugin imports.
+@since(version = 0.1.0)
+world host {
+  import types;
+  import capture-stream;
+  import video-capture;
+  import device;
+  import provider;
+}

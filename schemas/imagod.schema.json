@@ -55,7 +55,8 @@
                   "imago:node",
                   "imago:experimental-gpio",
                   "imago:experimental-i2c",
-                  "imago:usb"
+                  "imago:usb",
+                  "imago:v4l2"
                 ],
                 "type": "string"
               },

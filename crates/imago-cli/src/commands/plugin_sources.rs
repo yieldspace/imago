@@ -3630,7 +3630,7 @@ mod tests {
     package root:component@0.1.0;
 
     world camera-plugin {
-      import imago:usb/provider@0.3.0;
+      import imago:v4l2/provider@0.1.0;
       export imago:camera/types@0.1.0;
       export imago:camera/provider@0.1.0;
     }
@@ -3647,9 +3647,9 @@ mod tests {
     "#,
         );
         write(
-            &source.join("deps/imago-usb/package.wit"),
+            &source.join("deps/imago-v4l2/package.wit"),
             br#"
-    package imago:usb@0.3.0;
+    package imago:v4l2@0.1.0;
 
     interface provider {}
     "#,
@@ -3689,7 +3689,7 @@ mod tests {
     package root:component@0.1.0;
 
     world camera-plugin {
-      import imago:usb/provider@0.3.0;
+      import imago:v4l2/provider@0.1.0;
       export imago:camera/types@0.1.0;
       export imago:camera/provider@0.1.0;
     }
@@ -3706,9 +3706,9 @@ mod tests {
     "#,
         );
         write(
-            &fixture.join("deps/imago-usb/package.wit"),
+            &fixture.join("deps/imago-v4l2/package.wit"),
             br#"
-    package imago:usb@0.3.0;
+    package imago:v4l2@0.1.0;
 
     interface provider {}
     "#,

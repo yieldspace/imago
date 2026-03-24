@@ -1,4 +1,4 @@
-package imago:camera@0.1.0;
+package imago:camera@0.3.0;
 
 /// Shared camera capture types.
 @since(version = 0.1.0)
@@ -26,16 +26,47 @@ interface types {
         other(string),
     }
 
-    /// Encoded frame payload format.
-    @since(version = 0.1.0)
-    enum encoded-format {
-        /// Motion JPEG payload bytes.
-        mjpeg,
+    /// Decoded pixel layout returned by this camera API.
+    @since(version = 0.3.0)
+    enum pixel-format {
+        /// Tightly packed 8-bit RGBA pixels.
+        rgba8,
+    }
+
+    /// Camera property identifier for OpenCV-style get/set access.
+    @since(version = 0.3.0)
+    enum capture-property {
+        /// Requested frame width in pixels.
+        frame-width,
+        /// Requested frame height in pixels.
+        frame-height,
+        /// Requested frames per second as an integer.
+        fps,
+        /// Requested transport FOURCC packed into an integer domain.
+        fourcc,
+        /// V4L2 brightness control.
+        brightness,
+        /// V4L2 contrast control.
+        contrast,
+        /// V4L2 saturation control.
+        saturation,
+        /// V4L2 gain control.
+        gain,
+        /// V4L2 auto-exposure toggle where `0.0` is manual and `1.0` is auto.
+        auto-exposure,
+        /// V4L2 absolute exposure value.
+        exposure,
+        /// V4L2 auto-focus toggle where `0.0` is manual and `1.0` is auto.
+        auto-focus,
+        /// V4L2 absolute focus value.
+        focus,
     }
 
     /// One discoverable camera stream.
     @since(version = 0.1.0)
     record camera-info {
+        /// Stable camera index within the current allowlist ordering.
+        index: u32,
         /// Opaque stable camera identifier.
         id: string,
         /// Human-readable label.
@@ -50,81 +81,84 @@ interface types {
         address: u8,
     }
 
-    /// One selectable capture mode.
-    @since(version = 0.1.0)
-    record capture-mode {
-        /// Encoded payload format.
-        format: encoded-format,
-        /// Frame width in pixels.
-        width-px: u32,
-        /// Frame height in pixels.
-        height-px: u32,
-        /// Frames-per-second numerator.
-        fps-num: u32,
-        /// Frames-per-second denominator.
-        fps-den: u32,
-    }
-
-    /// One captured encoded frame.
-    @since(version = 0.1.0)
-    record encoded-frame {
-        /// Encoded frame payload bytes.
+    /// One captured decoded frame.
+    @since(version = 0.3.0)
+    record frame {
+        /// Tightly packed decoded frame bytes.
         bytes: list<u8>,
         /// Frame width in pixels.
         width-px: u32,
         /// Frame height in pixels.
         height-px: u32,
+        /// Bytes between consecutive rows.
+        stride-bytes: u32,
         /// Capture timestamp in Unix nanoseconds.
         timestamp-ns: u64,
-        /// Monotonic per-session frame sequence number.
+        /// Monotonic per-capture frame sequence number.
         sequence: u64,
-        /// Encoded payload format.
-        format: encoded-format,
+        /// Decoded pixel format.
+        format: pixel-format,
     }
 }
 
 /// Provider entry points for generic camera capture.
 @since(version = 0.1.0)
 interface provider {
-    @since(version = 0.1.0)
-    use types.{camera-error, camera-info, capture-mode, encoded-frame};
+    @since(version = 0.3.0)
+    use types.{camera-error, camera-info, capture-property, frame};
 
-    /// Open capture session for one camera and mode.
-    @since(version = 0.1.0)
-    resource session {
-        /// Return the negotiated capture mode.
-        @since(version = 0.1.0)
-        current-mode: func() -> capture-mode;
+    /// OpenCV-style camera capture resource.
+    @since(version = 0.3.0)
+    resource video-capture {
+        /// Return whether the underlying device is still opened.
+        @since(version = 0.3.0)
+        is-opened: func() -> bool;
 
-        /// Capture the next complete encoded frame.
-        @since(version = 0.1.0)
-        next-frame: func(timeout-ms: u32) -> result<encoded-frame, camera-error>;
+        /// Return the current property value.
+        @since(version = 0.3.0)
+        get: func(property: capture-property) -> result<f64, camera-error>;
 
-        /// Close the session and release underlying resources.
-        @since(version = 0.1.0)
-        close: func();
+        /// Update one property and return whether the value was accepted.
+        @since(version = 0.3.0)
+        set: func(property: capture-property, value: f64) -> result<bool, camera-error>;
+
+        /// Grab, decode, and return the next frame.
+        @since(version = 0.3.0)
+        read: func(timeout-ms: u32) -> result<frame, camera-error>;
+
+        /// Grab and decode the next frame into the internal cache.
+        @since(version = 0.3.0)
+        grab: func(timeout-ms: u32) -> result<bool, camera-error>;
+
+        /// Return the last successfully grabbed frame from the internal cache.
+        @since(version = 0.3.0)
+        retrieve: func() -> result<frame, camera-error>;
+
+        /// Release the active stream and close the underlying device.
+        @since(version = 0.3.0)
+        release: func();
     }
 
     /// List discoverable cameras.
     @since(version = 0.1.0)
     list-cameras: func() -> result<list<camera-info>, camera-error>;
 
-    /// List supported capture modes for one camera.
-    @since(version = 0.1.0)
-    list-modes: func(camera-id: string) -> result<list<capture-mode>, camera-error>;
-
-    /// Open a capture session for one camera.
-    @since(version = 0.1.0)
-    open-session: func(camera-id: string, mode: capture-mode) -> result<session, camera-error>;
+    /// Open a capture session for one camera by index.
+    @since(version = 0.3.0)
+    open: func(index: u32) -> result<video-capture, camera-error>;
 }
 
 /// Component world for the Wasm camera plugin.
 @since(version = 0.1.0)
 world camera-plugin {
-    import imago:usb/types@0.3.0;
-    import imago:usb/provider@0.3.0;
-    import imago:usb/device@0.3.0;
-    import imago:usb/usb-interface@0.3.0;
+    @since(version = 0.3.0)
+    import imago:v4l2/types@0.2.0;
+    @since(version = 0.3.0)
+    import imago:v4l2/provider@0.2.0;
+    @since(version = 0.3.0)
+    import imago:v4l2/device@0.2.0;
+    @since(version = 0.3.0)
+    import imago:v4l2/video-capture@0.2.0;
     export types;
     export provider;
 }

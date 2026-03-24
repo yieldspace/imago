@@ -1,0 +1,161 @@
+package imago:camera@0.3.0;
+
+/// Shared camera capture types.
+@since(version = 0.1.0)
+interface types {
+  /// Error codes returned by camera operations.
+  @since(version = 0.1.0)
+  variant camera-error {
+    /// The requested camera identifier does not exist.
+    not-found,
+    /// Policy denies access to the underlying device.
+    not-allowed,
+    /// The operation timed out before a frame was available.
+    timeout,
+    /// The camera disconnected while the operation was in progress.
+    disconnected,
+    /// The camera or session is busy.
+    busy,
+    /// The caller supplied an invalid argument.
+    invalid-argument,
+    /// The requested operation is unsupported by this backend.
+    not-supported,
+    /// The transport or device reported a capture fault.
+    transport-fault,
+    /// Any other implementation-defined error with detail text.
+    other(string),
+  }
+
+  /// Decoded pixel layout returned by this camera API.
+  @since(version = 0.3.0)
+  enum pixel-format {
+    /// Tightly packed 8-bit RGBA pixels.
+    rgba8,
+  }
+
+  /// Camera property identifier for OpenCV-style get/set access.
+  @since(version = 0.3.0)
+  enum capture-property {
+    /// Requested frame width in pixels.
+    frame-width,
+    /// Requested frame height in pixels.
+    frame-height,
+    /// Requested frames per second as an integer.
+    fps,
+    /// Requested transport FOURCC packed into an integer domain.
+    fourcc,
+    /// V4L2 brightness control.
+    brightness,
+    /// V4L2 contrast control.
+    contrast,
+    /// V4L2 saturation control.
+    saturation,
+    /// V4L2 gain control.
+    gain,
+    /// V4L2 auto-exposure toggle where `0.0` is manual and `1.0` is auto.
+    auto-exposure,
+    /// V4L2 absolute exposure value.
+    exposure,
+    /// V4L2 auto-focus toggle where `0.0` is manual and `1.0` is auto.
+    auto-focus,
+    /// V4L2 absolute focus value.
+    focus,
+  }
+
+  /// One discoverable camera stream.
+  @since(version = 0.1.0)
+  record camera-info {
+    /// Stable camera index within the current allowlist ordering.
+    index: u32,
+    /// Opaque stable camera identifier.
+    id: string,
+    /// Human-readable label.
+    label: string,
+    /// USB vendor ID.
+    vendor-id: u16,
+    /// USB product ID.
+    product-id: u16,
+    /// USB bus number.
+    bus: u8,
+    /// USB device address.
+    address: u8,
+  }
+
+  /// One captured decoded frame.
+  @since(version = 0.3.0)
+  record frame {
+    /// Tightly packed decoded frame bytes.
+    bytes: list<u8>,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Bytes between consecutive rows.
+    stride-bytes: u32,
+    /// Capture timestamp in Unix nanoseconds.
+    timestamp-ns: u64,
+    /// Monotonic per-capture frame sequence number.
+    sequence: u64,
+    /// Decoded pixel format.
+    format: pixel-format,
+  }
+}
+
+/// Provider entry points for generic camera capture.
+@since(version = 0.1.0)
+interface provider {
+  @since(version = 0.3.0)
+  use types.{camera-error, camera-info, capture-property, frame};
+
+  /// OpenCV-style camera capture resource.
+  @since(version = 0.3.0)
+  resource video-capture {
+    /// Return whether the underlying device is still opened.
+    @since(version = 0.3.0)
+    is-opened: func() -> bool;
+    /// Return the current property value.
+    @since(version = 0.3.0)
+    get: func(property: capture-property) -> result<f64, camera-error>;
+    /// Update one property and return whether the value was accepted.
+    @since(version = 0.3.0)
+    set: func(property: capture-property, value: f64) -> result<bool, camera-error>;
+    /// Grab, decode, and return the next frame.
+    @since(version = 0.3.0)
+    read: func(timeout-ms: u32) -> result<frame, camera-error>;
+    /// Grab and decode the next frame into the internal cache.
+    @since(version = 0.3.0)
+    grab: func(timeout-ms: u32) -> result<bool, camera-error>;
+    /// Return the last successfully grabbed frame from the internal cache.
+    @since(version = 0.3.0)
+    retrieve: func() -> result<frame, camera-error>;
+    /// Release the active stream and close the underlying device.
+    @since(version = 0.3.0)
+    release: func();
+  }
+
+  /// List discoverable cameras.
+  @since(version = 0.1.0)
+  list-cameras: func() -> result<list<camera-info>, camera-error>;
+
+  /// Open a capture session for one camera by index.
+  @since(version = 0.3.0)
+  open: func(index: u32) -> result<video-capture, camera-error>;
+}
+
+/// Component world for the Wasm camera plugin.
+@since(version = 0.1.0)
+world camera-plugin {
+  @since(version = 0.3.0)
+  import imago:v4l2/types@0.2.0;
+  @since(version = 0.3.0)
+  import imago:v4l2/capture-stream@0.2.0;
+  @since(version = 0.3.0)
+  import imago:v4l2/video-capture@0.2.0;
+  @since(version = 0.3.0)
+  import imago:v4l2/device@0.2.0;
+  @since(version = 0.3.0)
+  import imago:v4l2/provider@0.2.0;
+
+  export types;
+  export provider;
+}
