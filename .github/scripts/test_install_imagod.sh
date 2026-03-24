@@ -122,8 +122,66 @@ run_install() {
       "$@"
 }
 
+run_install_tty() {
+  local description="$1"
+  local install_dir="$2"
+  local transcript_path="$3"
+  local tty_input="$4"
+  shift 4
+
+  echo "== ${description}"
+  local release_base_url="${IMAGOD_TEST_RELEASE_BASE_URL:-${download_base}}"
+  IMAGOD_RELEASES_API_URL="${base_url}/api/releases.json" \
+    IMAGOD_RELEASE_TAG_API_BASE="${base_url}/api/tags" \
+    IMAGOD_RELEASE_BASE_URL="${release_base_url}" \
+    IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION="${IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION:-0}" \
+    IMAGOD_TEST_STUB_LOG="${IMAGOD_TEST_STUB_LOG:-}" \
+    INSTALL_IMAGOD_DIR="${install_dir}" \
+    INSTALL_IMAGOD_INPUT="${tty_input}" \
+    INSTALL_IMAGOD_SCRIPT="${repo_root}/scripts/install_imagod.sh" \
+    INSTALL_IMAGOD_TRANSCRIPT="${transcript_path}" \
+    python3 - "$@" <<'PY'
+import os
+import pty
+import sys
+
+script = os.environ["INSTALL_IMAGOD_SCRIPT"]
+install_dir = os.environ["INSTALL_IMAGOD_DIR"]
+transcript_path = os.environ["INSTALL_IMAGOD_TRANSCRIPT"]
+tty_input = os.environ.get("INSTALL_IMAGOD_INPUT", "").encode()
+cmd = ["bash", script, "--install-dir", install_dir, *sys.argv[1:]]
+
+pid, master_fd = pty.fork()
+if pid == 0:
+    os.execvpe(cmd[0], cmd, os.environ)
+
+if tty_input:
+    os.write(master_fd, tty_input)
+
+chunks = []
+while True:
+    try:
+        chunk = os.read(master_fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    chunks.append(chunk)
+
+os.close(master_fd)
+_, status = os.waitpid(pid, 0)
+with open(transcript_path, "wb") as transcript_file:
+    transcript_file.write(b"".join(chunks))
+sys.exit(os.waitstatus_to_exitcode(status))
+PY
+}
+
 plain_dir="${tmp_root}/plain-install"
 feature_dir="${tmp_root}/feature-install"
+tty_default_dir="${tmp_root}/tty-default-install"
+tty_default_transcript="${tmp_root}/tty-default.transcript"
+tty_variant_dir="${tmp_root}/tty-variant-install"
+tty_variant_transcript="${tmp_root}/tty-variant.transcript"
 service_dir="${tmp_root}/service-install"
 service_log="${tmp_root}/service-install.log"
 legacy_service_dir="${tmp_root}/legacy-service-install"
@@ -150,6 +208,37 @@ run_install \
 cmp -s \
   "${feature_dir}/imagod" \
   "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek"
+
+run_install_tty \
+  "interactive Enter installs the preselected default variant" \
+  "${tty_default_dir}" \
+  "${tty_default_transcript}" \
+  $'\n' \
+  --target riscv64gc-unknown-linux-musl
+
+cmp -s \
+  "${tty_default_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl"
+
+grep -F "selected_variant: imagod-riscv64gc-unknown-linux-musl (target=riscv64gc-unknown-linux-musl, features=<none>)" "${tty_default_transcript}"
+if grep -F "Available release variants:" "${tty_default_transcript}" >/dev/null 2>&1; then
+  echo "unexpected variant list in Enter-to-install transcript" >&2
+  exit 1
+fi
+
+run_install_tty \
+  "interactive s opens the variant list and allows selecting a feature build" \
+  "${tty_variant_dir}" \
+  "${tty_variant_transcript}" \
+  $'s\n2\n' \
+  --target riscv64gc-unknown-linux-musl
+
+cmp -s \
+  "${tty_variant_dir}/imagod" \
+  "${server_root}/downloads/imagod-v0.6.0/imagod-riscv64gc-unknown-linux-musl+wasi-nn-cvitek"
+
+grep -F "Available release variants:" "${tty_variant_transcript}"
+grep -F "[default]" "${tty_variant_transcript}"
 
 IMAGOD_TEST_SKIP_PRIVILEGE_ESCALATION=1 IMAGOD_TEST_STUB_LOG="${service_log}" run_install \
   "install default variant and delegate service setup to imagod service install" \
