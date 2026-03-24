@@ -106,8 +106,8 @@ pub struct InitArgs {
 /// Build artifacts for a service project.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct BuildArgs {
-    /// Target name defined in imago.toml [target.<name>].
-    #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
+    /// Target name from imago.toml [target.<name>] or direct SSH target.
+    #[arg(long, value_name = "TARGET", default_value = "default")]
     pub target: String,
 }
 
@@ -118,8 +118,8 @@ pub struct UpdateArgs {}
 /// Build and deploy the service to a remote imagod.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct DeployArgs {
-    /// Target name defined in imago.toml [target.<name>].
-    #[arg(long, value_name = "TARGET_NAME")]
+    /// Target name from imago.toml [target.<name>] or direct SSH target.
+    #[arg(long, value_name = "TARGET")]
     pub target: Option<String>,
 
     /// Return immediately after deploy succeeds without following logs.
@@ -134,8 +134,8 @@ pub struct RunArgs {
     #[arg(value_name = "SERVICE_NAME")]
     pub name: Option<String>,
 
-    /// Target name defined in imago.toml [target.<name>].
-    #[arg(long, value_name = "TARGET_NAME")]
+    /// Target name from imago.toml [target.<name>] or direct SSH target.
+    #[arg(long, value_name = "TARGET")]
     pub target: Option<String>,
 
     /// Return immediately after run succeeds without following logs.
@@ -154,16 +154,16 @@ pub struct StopArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Target name defined in imago.toml [target.<name>].
-    #[arg(long, value_name = "TARGET_NAME")]
+    /// Target name from imago.toml [target.<name>] or direct SSH target.
+    #[arg(long, value_name = "TARGET")]
     pub target: Option<String>,
 }
 
 /// List deployed service states.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct PsArgs {
-    /// Target name defined in imago.toml [target.<name>].
-    #[arg(long, value_name = "TARGET_NAME", default_value = "default")]
+    /// Target name from imago.toml [target.<name>] or direct SSH target.
+    #[arg(long, value_name = "TARGET", default_value = "default")]
     pub target: String,
 }
 
@@ -264,6 +264,10 @@ pub struct ComposePsArgs {
 /// Stream or tail service logs.
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct LogsArgs {
+    /// Target name from imago.toml [target.<name>] or direct SSH target.
+    #[arg(long, value_name = "TARGET")]
+    pub target: Option<String>,
+
     /// Optional service name filter. If omitted, streams all running services.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
@@ -432,7 +436,7 @@ mod tests {
 
     #[test]
     fn parses_artifact_build_with_target() {
-        let cli = Cli::try_parse_from(["imago", "artifact", "build", "--target", "edge"])
+        let cli = Cli::try_parse_from(["imago", "artifact", "build", "--target", "ssh://edge-box"])
             .expect("parse should succeed");
 
         assert_eq!(
@@ -440,7 +444,7 @@ mod tests {
             Cli {
                 command: Commands::Artifact(ArtifactSubcommandArgs {
                     command: ArtifactCommands::Build(BuildArgs {
-                        target: "edge".to_string(),
+                        target: "ssh://edge-box".to_string(),
                     }),
                 }),
             }
@@ -506,7 +510,15 @@ mod tests {
         );
 
         let logs = Cli::try_parse_from([
-            "imago", "service", "logs", "svc-a", "--follow", "--tail", "50",
+            "imago",
+            "service",
+            "logs",
+            "svc-a",
+            "--target",
+            "ssh://edge-box",
+            "--follow",
+            "--tail",
+            "50",
         ])
         .expect("parse should succeed");
         assert_eq!(
@@ -514,9 +526,27 @@ mod tests {
             Cli {
                 command: Commands::Service(ServiceSubcommandArgs {
                     command: ServiceCommands::Logs(LogsArgs {
+                        target: Some("ssh://edge-box".to_string()),
                         name: Some("svc-a".to_string()),
                         follow: true,
                         tail: 50,
+                        with_timestamp: false,
+                    }),
+                }),
+            }
+        );
+
+        let logs_default_target = Cli::try_parse_from(["imago", "service", "logs", "svc-a"])
+            .expect("parse should succeed");
+        assert_eq!(
+            logs_default_target,
+            Cli {
+                command: Commands::Service(ServiceSubcommandArgs {
+                    command: ServiceCommands::Logs(LogsArgs {
+                        target: None,
+                        name: Some("svc-a".to_string()),
+                        follow: false,
+                        tail: 200,
                         with_timestamp: false,
                     }),
                 }),
@@ -662,6 +692,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let help = err.to_string();
 
+        assert!(help.contains("--target <TARGET>"));
         assert!(help.contains("-f, --follow"));
         assert!(help.contains("--tail <N>"));
         assert!(help.contains("--with-timestamp"));

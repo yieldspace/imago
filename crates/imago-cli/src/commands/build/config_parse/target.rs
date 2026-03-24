@@ -6,13 +6,25 @@ pub(in crate::commands::build) fn parse_target(
     target_name: &str,
     project_root: &Path,
 ) -> anyhow::Result<TargetConfig> {
-    let targets = root
-        .get("target")
-        .and_then(TomlValue::as_table)
-        .ok_or_else(|| anyhow!("imago.toml missing required key: target"))?;
-    let raw_target = targets
-        .get(target_name)
-        .ok_or_else(|| anyhow!("target '{}' is not defined in imago.toml", target_name))?;
+    parse_target_if_defined(root, target_name, project_root)?.ok_or_else(|| {
+        match root.get("target").and_then(TomlValue::as_table) {
+            Some(_) => anyhow!("target '{}' is not defined in imago.toml", target_name),
+            None => anyhow!("imago.toml missing required key: target"),
+        }
+    })
+}
+
+pub(in crate::commands::build) fn parse_target_if_defined(
+    root: &toml::Table,
+    target_name: &str,
+    project_root: &Path,
+) -> anyhow::Result<Option<TargetConfig>> {
+    let Some(targets) = root.get("target").and_then(TomlValue::as_table) else {
+        return Ok(None);
+    };
+    let Some(raw_target) = targets.get(target_name) else {
+        return Ok(None);
+    };
     let target_table = raw_target
         .as_table()
         .ok_or_else(|| anyhow!("target '{}' must be a table", target_name))?;
@@ -26,7 +38,7 @@ pub(in crate::commands::build) fn parse_target(
     let _ = project_root;
     let _ = parse_target_remote(&remote)?;
 
-    Ok(TargetConfig { remote })
+    Ok(Some(TargetConfig { remote }))
 }
 
 #[cfg(test)]

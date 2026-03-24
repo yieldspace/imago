@@ -81,7 +81,7 @@ async fn run_async_with_target_override(
     ui::command_stage("service.ls", "load-config", "loading target configuration");
     let target = match target_override {
         Some(target) => target.clone(),
-        None => build::load_target_config(&args.target, project_root)
+        None => build::resolve_target_selector(&args.target, project_root)
             .context("failed to load target configuration")?,
     }
     .require_deploy_credentials()

@@ -150,6 +150,50 @@ IMAGO_E2E_ENV_TOML_ONLY = "from-wasi-only"
     Ok(())
 }
 
+#[test]
+#[ignore]
+fn e2e_cli_direct_target_selector_works_without_target_section() -> TestResult {
+    let mut scenario = Scenario::new("e2e-clitd")?;
+    let _default = scenario.cluster().add_node("default")?;
+    scenario.cluster().start_all()?;
+    let direct_target = scenario.cluster().target("default")?.remote;
+
+    let service = scenario.add_service(
+        "e2e-cli-direct-target-svc",
+        AppKind::Cli,
+        "default",
+        WasmArtifact::CliBase,
+    )?;
+    service.remove_targets(&scenario)?;
+
+    let deploy = service.deploy(&scenario, &direct_target)?;
+    assert_command_completed("deploy direct target", &deploy)?;
+
+    let ls_args = ["service", "ls", "--target", direct_target.as_str()];
+    let ls = scenario.run_service_cli(service.name(), &ls_args)?;
+    ls.ensure_success(&ls_args)?;
+    assert!(
+        ls.combined.contains(service.name()),
+        "service ls output must include deployed service name: {}",
+        ls.combined
+    );
+
+    let logs = service.logs(&scenario, &direct_target, 50)?;
+    assert!(
+        logs.success,
+        "service logs should succeed with direct target selector: {}",
+        logs.combined
+    );
+
+    if let Err(err) = service.stop(&scenario, &direct_target) {
+        if !err.to_string().contains("is not running") {
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
 fn wait_logs_with_markers(
     service: &e2e_helper::ServiceHandle,
     scenario: &Scenario,

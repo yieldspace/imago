@@ -187,6 +187,7 @@ async fn run_async_with_target_override(
     target_override: Option<&build::TargetConfig>,
 ) -> anyhow::Result<LogsSummary> {
     let LogsArgs {
+        target,
         name,
         follow,
         tail,
@@ -195,7 +196,7 @@ async fn run_async_with_target_override(
     let target_name = if target_override.is_some() {
         "override".to_string()
     } else {
-        build::default_target_name().to_string()
+        target.unwrap_or_else(|| build::default_target_name().to_string())
     };
     let service_name = logs_service_for_context(name.as_deref());
     ui::command_stage(
@@ -205,7 +206,7 @@ async fn run_async_with_target_override(
     );
     let target = match target_override {
         Some(target) => target.clone(),
-        None => build::load_target_config(&target_name, project_root)
+        None => build::resolve_target_selector(&target_name, project_root)
             .context("failed to load target configuration")?,
     }
     .require_deploy_credentials()

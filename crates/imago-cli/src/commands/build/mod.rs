@@ -88,6 +88,31 @@ impl TargetConfig {
     }
 }
 
+fn direct_target_config(remote: &str) -> anyhow::Result<TargetConfig> {
+    let remote = remote.trim();
+    let _ = parse_target_remote(remote)?;
+    Ok(TargetConfig {
+        remote: remote.to_string(),
+    })
+}
+
+fn normalize_short_ssh_target_selector(target_selector: &str) -> anyhow::Result<Option<String>> {
+    let Some((user, host)) = target_selector.split_once('@') else {
+        return Ok(None);
+    };
+
+    let shorthand_error =
+        "direct ssh target shorthand must be user@host; use ssh://... for advanced SSH targets";
+    if user.trim().is_empty() || host.trim().is_empty() || host.contains('@') {
+        return Err(anyhow!(shorthand_error));
+    }
+    if host.contains(':') || host.contains('/') || host.contains('?') || host.contains('#') {
+        return Err(anyhow!(shorthand_error));
+    }
+
+    Ok(Some(format!("ssh://{}@{}", user.trim(), host.trim())))
+}
+
 pub fn parse_target_remote(raw: &str) -> anyhow::Result<SshTargetRemote> {
     if !raw.starts_with("ssh://") {
         return Err(anyhow!("target remote must use ssh:// scheme: {raw}"));
@@ -477,10 +502,14 @@ fn run_inner_with_target_override(
         Some(target) => {
             build_project_with_target_override(&args.target, project_root, Some(target))
         }
-        None => build_project(&args.target, project_root),
+        None => {
+            let target = resolve_target_selector(&args.target, project_root)?;
+            build_project_with_target_override(&args.target, project_root, Some(&target))
+        }
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load_target_config(target_name: &str, project_root: &Path) -> anyhow::Result<TargetConfig> {
     let root = load_resolved_toml(
         project_root,
@@ -490,6 +519,41 @@ pub fn load_target_config(target_name: &str, project_root: &Path) -> anyhow::Res
         },
     )?;
     parse_target(&root, target_name, project_root)
+}
+
+pub fn resolve_target_selector(
+    target_selector: &str,
+    project_root: &Path,
+) -> anyhow::Result<TargetConfig> {
+    let target_selector = target_selector.trim();
+    if target_selector.is_empty() {
+        return Err(anyhow!("target selector must not be empty"));
+    }
+
+    let root = load_resolved_toml(
+        project_root,
+        LoadResolvedTomlOptions {
+            validate_build_contract: false,
+            resolve_service_name: false,
+        },
+    )?;
+
+    if target_selector.starts_with("ssh://") {
+        return direct_target_config(target_selector);
+    }
+
+    if let Some(target) = parse_target_if_defined(&root, target_selector, project_root)? {
+        return Ok(target);
+    }
+
+    if let Some(remote) = normalize_short_ssh_target_selector(target_selector)? {
+        return direct_target_config(&remote);
+    }
+
+    Err(anyhow!(
+        "target '{}' is not defined in imago.toml",
+        target_selector
+    ))
 }
 
 pub fn load_service_name(project_root: &Path) -> anyhow::Result<String> {
@@ -505,6 +569,7 @@ pub fn load_service_name(project_root: &Path) -> anyhow::Result<String> {
     Ok(name)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_project(target_name: &str, project_root: &Path) -> anyhow::Result<BuildOutput> {
     build_project_with_target_override(target_name, project_root, None)
 }
@@ -6176,6 +6241,135 @@ interface other {}
         assert_eq!(
             target.remote,
             "ssh://localhost?socket=/run/imago/imagod.sock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_target_selector_accepts_direct_ssh_target_without_target_section() {
+        let root = new_temp_dir("resolve-target-selector-direct-ssh");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+    "#,
+        );
+
+        let target = resolve_target_selector("ssh://edge-box?socket=/run/imago/imagod.sock", &root)
+            .expect("ssh selector should resolve directly");
+
+        assert_eq!(
+            target.remote,
+            "ssh://edge-box?socket=/run/imago/imagod.sock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_target_selector_falls_back_to_user_host_shorthand_when_target_is_undefined() {
+        let root = new_temp_dir("resolve-target-selector-user-host");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+    "#,
+        );
+
+        let target = resolve_target_selector("root@example.com", &root)
+            .expect("user@host shorthand should resolve directly");
+
+        assert_eq!(target.remote, "ssh://root@example.com");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_target_selector_prefers_config_target_before_user_host_shorthand() {
+        let root = new_temp_dir("resolve-target-selector-prefers-config");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+
+    [target."root@example.com"]
+    remote = "ssh://localhost?socket=/run/imago/imagod.sock"
+    "#,
+        );
+
+        let target = resolve_target_selector("root@example.com", &root)
+            .expect("configured target should win before shorthand");
+
+        assert_eq!(
+            target.remote,
+            "ssh://localhost?socket=/run/imago/imagod.sock"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_target_selector_rejects_unknown_plain_target_name() {
+        let root = new_temp_dir("resolve-target-selector-unknown");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+    "#,
+        );
+
+        let err =
+            resolve_target_selector("unknown", &root).expect_err("unknown selector should fail");
+
+        assert!(
+            err.to_string()
+                .contains("target 'unknown' is not defined in imago.toml")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn artifact_build_accepts_direct_target_selector_without_target_section() {
+        let root = new_temp_dir("artifact-build-direct-target-without-config-target");
+        write_imago_toml(
+            &root,
+            r#"
+    name = "svc-default"
+    main = "build/app.wasm"
+    type = "cli"
+    "#,
+        );
+        write_file(&root.join("build/app.wasm"), b"wasm-a");
+
+        let result = run_with_project_root(
+            BuildArgs {
+                target: "ssh://localhost?socket=/run/imago/imagod.sock".to_string(),
+            },
+            &root,
+        );
+        assert_eq!(
+            result.exit_code, 0,
+            "artifact build should succeed: {result:?}"
+        );
+
+        let manifest: Manifest = serde_json::from_slice(
+            &fs::read(root.join(resolve_manifest_output_path()))
+                .expect("manifest should be written for direct target build"),
+        )
+        .expect("manifest json should decode");
+        assert_eq!(
+            manifest.target.get("remote").map(String::as_str),
+            Some("ssh://localhost?socket=/run/imago/imagod.sock")
         );
 
         let _ = fs::remove_dir_all(root);

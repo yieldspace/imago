@@ -35,7 +35,6 @@ pub struct ImagoTomlConfig {
     #[schemars(with = "Option<RestartPolicy>")]
     pub restart: Option<String>,
     pub build: Option<BuildSection>,
-    #[schemars(required)]
     pub target: Option<BTreeMap<String, TargetEntry>>,
     pub assets: Option<Vec<AssetEntry>>,
     pub http: Option<HttpSection>,
@@ -722,6 +721,18 @@ mod tests {
 
     #[test]
     fn accepts_minimal_valid_config() {
+        let result = decode_and_validate(
+            r#"
+name = "example-service"
+main = "build/example-service.wasm"
+type = "cli"
+"#,
+        );
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[test]
+    fn accepts_valid_config_with_target_section() {
         let result = decode_and_validate(
             r#"
 name = "example-service"

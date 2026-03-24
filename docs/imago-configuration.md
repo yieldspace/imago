@@ -140,12 +140,23 @@ wit_world = "plugin-imports"
 <a id="the-targetname-section"></a>
 ## The [target.<name>] section
 
-This section configures remote deployment targets.
+This section configures named remote deployment targets.
+The section itself is optional when you always pass a target directly with CLI `--target`.
+Direct CLI selectors support:
+
+- `ssh://[user@]host[:port][?socket=/absolute/path/to/imagod.sock]`
+- `user@host` shorthand, which the CLI normalizes to `ssh://user@host`
+
+When both a named target and direct selector are plausible, the CLI resolves them in this order:
+
+1. `ssh://...` is always treated as a direct selector.
+2. Otherwise, `[target.<name>]` is checked first.
+3. If no named target exists and the value is `user@host`, it is treated as a direct selector.
 
 ### The `remote` field
 
 - Type: `string`
-- Required/Optional: Required for the selected target.
+- Required/Optional: Required for each declared target entry.
 - Accepted values / Constraints:
   - SSH target only: `ssh://[user@]host[:port][?socket=/absolute/path/to/imagod.sock]`
   - `user@` is optional. When omitted, the system `ssh` command uses its default user resolution.
@@ -165,6 +176,14 @@ remote = "ssh://root@edge-box?socket=/run/imago/imagod.sock"
 ```
 
 - Validation error notes: missing selected target, non-SSH endpoints such as `host:port`, invalid SSH URIs, or unsupported SSH query parameters cause validation/deploy failure.
+
+If you omit `[target.<name>]`, pass the target on the command line instead:
+
+```bash
+imago artifact build --target ssh://localhost?socket=/run/imago/imagod.sock
+imago service deploy --target root@edge-box --detach
+imago service logs example-service --target ssh://localhost?socket=/run/imago/imagod.sock --tail 200
+```
 
 When an SSH target uses `?socket=...`, that path must match the target daemon's `control_socket_path`.
 Loopback targets without `user@` or `:port` (`ssh://localhost?...`, `ssh://127.0.0.1?...`, `ssh://[::1]?...`) connect directly to that local control socket.

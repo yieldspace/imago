@@ -67,7 +67,7 @@ async fn run_async(args: StopArgs, project_root: &Path) -> anyhow::Result<StopSu
         .target
         .clone()
         .unwrap_or_else(|| build::default_target_name().to_string());
-    let target = build::load_target_config(&target_name, project_root)
+    let target = build::resolve_target_selector(&target_name, project_root)
         .context("failed to load target configuration")?
         .require_deploy_credentials()
         .context("target settings are invalid for service stop")?;

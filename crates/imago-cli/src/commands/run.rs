@@ -75,7 +75,7 @@ async fn run_async(args: RunArgs, project_root: &Path) -> anyhow::Result<RunSumm
         "loading target configuration",
     );
     let target_name = target.unwrap_or_else(|| build::default_target_name().to_string());
-    let target_config = build::load_target_config(&target_name, project_root)
+    let target_config = build::resolve_target_selector(&target_name, project_root)
         .context("failed to load target configuration")?;
     let target = target_config
         .require_deploy_credentials()
@@ -140,6 +140,7 @@ async fn follow_logs_after_run(
 ) {
     let logs_result = logs::run_with_project_root_and_target_override(
         LogsArgs {
+            target: None,
             name: Some(service_name.to_string()),
             follow: true,
             tail: AUTO_FOLLOW_TAIL_LINES,

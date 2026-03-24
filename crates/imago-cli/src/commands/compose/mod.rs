@@ -522,6 +522,7 @@ async fn run_compose_logs(
 
     let logs_result = logs::run_with_project_root_and_target_override(
         LogsArgs {
+            target: None,
             name: args.name.clone(),
             follow: args.follow,
             tail: args.tail,
