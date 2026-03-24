@@ -732,9 +732,31 @@ fn cmyk32_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
         .ok_or(V4l2Error::TransportFault)?;
     let mut rgba = Vec::with_capacity(output_len);
     for chunk in bytes.chunks_exact(4) {
-        rgba.extend_from_slice(&[255 - chunk[0], 255 - chunk[1], 255 - chunk[2], 0xff]);
+        let k = u16::from(255 - chunk[3]);
+        let r = ((u16::from(255 - chunk[0]) * k) / 255) as u8;
+        let g = ((u16::from(255 - chunk[1]) * k) / 255) as u8;
+        let b = ((u16::from(255 - chunk[2]) * k) / 255) as u8;
+        rgba.extend_from_slice(&[r, g, b, 0xff]);
     }
     Ok(rgba)
+}
+
+#[cfg(target_os = "linux")]
+fn frame_payload_from_mapping(
+    mapping: &[u8],
+    bytes_used: usize,
+    data_offset: usize,
+) -> Result<Vec<u8>, V4l2Error> {
+    let payload_len = bytes_used
+        .checked_sub(data_offset)
+        .ok_or(V4l2Error::TransportFault)?;
+    let payload = mapping
+        .get(..payload_len)
+        .ok_or(V4l2Error::TransportFault)?;
+    if payload.is_empty() {
+        return Err(V4l2Error::TransportFault);
+    }
+    Ok(payload.to_vec())
 }
 
 #[cfg(target_os = "linux")]
@@ -1715,14 +1737,19 @@ fn read_next_frame(
                 match stream.queue.try_dequeue() {
                     Ok(dqbuf) => {
                         let mut dqbuf = dqbuf;
+                        let plane = dqbuf.data.get_first_plane();
+                        let data_offset =
+                            plane.data_offset.map_or(0usize, |offset| *offset as usize);
+                        let bytes_used = *plane.bytesused as usize;
                         let index = dqbuf.data.index() as usize;
                         let sequence = u64::from(dqbuf.data.sequence());
-                        let frame_bytes = dqbuf
+                        let mapping = dqbuf
                             .get_plane_mapping(0)
                             .ok_or(V4l2Error::TransportFault)?
-                            .as_ref()
                             .to_vec();
-                        if dqbuf.data.has_error() || frame_bytes.is_empty() {
+                        let frame_bytes =
+                            frame_payload_from_mapping(&mapping, bytes_used, data_offset)?;
+                        if dqbuf.data.has_error() {
                             drop(dqbuf);
                             requeue_capture_buffer(&stream.queue, index)?;
                             return Err(V4l2Error::TransportFault);
@@ -2588,12 +2615,37 @@ mod tests {
     #[test]
     fn cmyk32_to_rgba_converts_cmyk_to_rgba() {
         assert_eq!(
-            cmyk32_to_rgba(&[0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff])
-                .expect("CMYK conversion should succeed"),
-            vec![255, 255, 255, 0xff, 0x00, 0x00, 0x00, 0xff]
+            cmyk32_to_rgba(&[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff,
+            ])
+            .expect("CMYK conversion should succeed"),
+            vec![
+                255, 255, 255, 0xff, 127, 127, 127, 0xff, 0x00, 0x00, 0x00, 0xff,
+            ]
         );
         let err =
             cmyk32_to_rgba(&[0x00, 0x00, 0x00]).expect_err("incomplete CMYK pixels should fail");
+        assert!(matches!(err, V4l2Error::TransportFault));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frame_payload_from_mapping_trims_trailing_padding() {
+        assert_eq!(
+            frame_payload_from_mapping(&[1, 2, 3, 4, 5, 6], 5, 1)
+                .expect("payload extraction should succeed"),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frame_payload_from_mapping_rejects_invalid_lengths() {
+        let err = frame_payload_from_mapping(&[1, 2], 1, 2)
+            .expect_err("bytes_used smaller than data_offset should fail");
+        assert!(matches!(err, V4l2Error::TransportFault));
+
+        let err = frame_payload_from_mapping(&[1, 2], 4, 1).expect_err("short mapping should fail");
         assert!(matches!(err, V4l2Error::TransportFault));
     }
 
