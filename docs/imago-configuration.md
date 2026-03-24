@@ -647,16 +647,18 @@ This section defines plugin dependencies and their resolution sources.
 
 ### Published Wasm camera plugin example
 
-The published `imago:camera@0.1.0` plugin can be consumed directly from GHCR without an explicit `[dependencies.component]` block. The `imago:v4l2@0.1.0` dependency remains native:
+The published `imago:camera@0.3.0` plugin can be consumed directly from GHCR without an explicit `[dependencies.component]` block. The `imago:v4l2@0.2.0` dependency remains native:
+
+`imago:camera` is a thin Wasm wrapper over `imago:v4l2`. It exposes an OpenCV-style `VideoCapture` surface with `open/index/get/set/read/grab/retrieve/release`, returns `RGBA8`, and does not ship a USB/UVC fallback path inside the Wasm guest.
 
 ```toml
 [[dependencies]]
-version = "0.1.0"
+version = "0.2.0"
 kind = "native"
 oci = "ghcr.io/yieldspace/imago/v4l2"
 
 [[dependencies]]
-version = "0.1.0"
+version = "0.3.0"
 kind = "wasm"
 oci = "ghcr.io/yieldspace/imago/camera"
 requires = ["imago:v4l2"]
@@ -667,16 +669,16 @@ requires = ["imago:v4l2"]
 
 ### Local Wasm camera plugin example
 
-The `imago:camera@0.1.0` plugin is a Wasm dependency that imports `imago:v4l2@0.1.0` as a native dependency. The app manifest needs both entries, plus a component source path for the camera plugin artifact:
+The `imago:camera@0.3.0` plugin is a Wasm dependency that imports `imago:v4l2@0.2.0` as a native dependency. The app manifest needs both entries, plus a component source path for the camera plugin artifact:
 
 ```toml
 [[dependencies]]
-version = "0.1.0"
+version = "0.2.0"
 kind = "native"
 path = "../../plugins/imago-v4l2/wit"
 
 [[dependencies]]
-version = "0.1.0"
+version = "0.3.0"
 kind = "wasm"
 path = "../../plugins/imago-camera/wit"
 requires = ["imago:v4l2"]
@@ -688,7 +690,7 @@ path = "../../target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
 "imago:v4l2" = ["*"]
 ```
 
-The service itself still needs `[capabilities.deps] "imago:camera" = ["*"]` to call the camera API. A typical local flow is:
+The service itself still needs `[capabilities.deps] "imago:camera" = ["*"]` to call the camera API. The app then opens a camera by index and uses `read` or `grab`/`retrieve` to obtain `RGBA8` frames. A typical local flow is:
 
 ```bash
 cd examples/local-imagod-plugin-camera

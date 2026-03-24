@@ -2,7 +2,8 @@
 
 ## 目的
 
-同一マシンで Wasm plugin（`imago:camera@0.1.0`）を使い、`imago:v4l2` 上の USB-backed V4L2 camera から 1 枚 capture と連続 pull を同じ session API で確認するサンプルです。
+同一マシンで Wasm plugin（`imago:camera@0.3.0`）を使い、`imago:v4l2@0.2.0` 上の USB-backed V4L2 camera を OpenCV 風 `VideoCapture` API で操作するサンプルです。
+この plugin は V4L2 wrapper のみを提供し、Wasm guest 内に USB/UVC fallback は持ちません。取得フレームは `RGBA8` です。
 
 ## 前提
 
@@ -33,14 +34,14 @@ cargo run -p imago-cli -- service logs local-imagod-plugin-camera-app --tail 200
 
 ログに次の文字列が含まれれば成功です。
 
-- `camera example: selected camera`
-- `camera example: session opened`
-- `camera still frame`
-- `camera stream frame[1]`
-- `jpeg=true`
+- `camera example: selected camera index=`
+- `camera example: is_opened=true`
+- `camera example: set(FrameWidth) ->`
+- `camera read frame`
+- `camera retrieve frame`
 
 ## Troubleshooting
 
 - `[resources.v4l2]` を削ると、`imago:v4l2` 由来の構造化起動エラーになります。
 - `camera example: no cameras discovered` が出る場合は `[resources.v4l2].paths` を実在の `/dev/video*` node に合わせてください。
-- `open-session failed` が出る場合は、plugin artifact を再 build してから `imago deps sync` をやり直してください。
+- `open failed` が出る場合は、plugin artifact を再 build してから `imago deps sync` をやり直してください。

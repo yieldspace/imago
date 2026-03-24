@@ -1,12 +1,20 @@
 version = 1
 
 [requested]
-fingerprint = "ac080a3bdcd71e923f0e593321f221cdea1f258e5d75d368d0db315149bc5c26"
+fingerprint = "eb0e2071686deb9b08330d2ca34ae5d65f23da751cac5a9d3cdeb82b0a6232ab"
 
 [[requested.dependencies]]
-id = "dep:3f9f0d47fcb353717a35b5d090be68ce5be56f94885db05da8e89b7a569909ae"
+id = "dep:c2ab3bf186bb39cb252b7aa6090c22be5148835af1eabd382de52cfe37241db3"
+kind = "native"
+version = "0.2.0"
+source_kind = "path"
+source = "../../plugins/imago-v4l2/wit"
+declared_requires = []
+
+[[requested.dependencies]]
+id = "dep:eecd7a472c7cb862226a8e243c2a46437118614ea434ad79da8a6720cffc5828"
 kind = "wasm"
-version = "0.1.0"
+version = "0.3.0"
 source_kind = "path"
 source = "../../plugins/imago-camera/wit"
 declared_requires = ["imago:v4l2"]
@@ -22,42 +30,34 @@ privileged = false
 [requested.dependencies.capabilities.wasi]
 "*" = ["*"]
 
-[[requested.dependencies]]
-id = "dep:b8a48a656ba5fbc045ad44f1b1c69ce3e63a16a70ee618a2fda67cbf2c2c1907"
-kind = "native"
-version = "0.1.0"
-source_kind = "path"
-source = "../../plugins/imago-v4l2/wit"
-declared_requires = []
-
 [[resolved.dependencies]]
-request_id = "dep:3f9f0d47fcb353717a35b5d090be68ce5be56f94885db05da8e89b7a569909ae"
-resolved_name = "imago:camera"
-resolved_version = "0.1.0"
-wit_path = "wit/deps/imago-camera-0.1.0"
-wit_tree_digest = "38e01b64e217731a67ceabd79143c677d11e5e1b46a249f29431700ef3e522bb"
-component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
-component_sha256 = "c602ef9ae93060b247ca44a6bfaa634e855ccc7f7cc7cd45c76d523cf6940645"
-requires_request_ids = ["dep:b8a48a656ba5fbc045ad44f1b1c69ce3e63a16a70ee618a2fda67cbf2c2c1907"]
-
-[[resolved.dependencies]]
-request_id = "dep:b8a48a656ba5fbc045ad44f1b1c69ce3e63a16a70ee618a2fda67cbf2c2c1907"
+request_id = "dep:c2ab3bf186bb39cb252b7aa6090c22be5148835af1eabd382de52cfe37241db3"
 resolved_name = "imago:v4l2"
-resolved_version = "0.1.0"
-wit_path = "wit/deps/imago-v4l2-0.1.0"
-wit_tree_digest = "d66697ec731e658a3dd3fdec30c34d0b1ca1a935d57c2b9cd429669ab1e5d682"
+resolved_version = "0.2.0"
+wit_path = "wit/deps/imago-v4l2-0.2.0"
+wit_tree_digest = "3087cbe3ff102d6c39b1488b8d751d6e6d46fdfe602e47f166fcf276b1ea85f8"
 requires_request_ids = []
 
+[[resolved.dependencies]]
+request_id = "dep:eecd7a472c7cb862226a8e243c2a46437118614ea434ad79da8a6720cffc5828"
+resolved_name = "imago:camera"
+resolved_version = "0.3.0"
+wit_path = "wit/deps/imago-camera-0.3.0"
+wit_tree_digest = "53278e7d07285461ec9aa0b9e3220853abe2652e1853109bbf84160a738abcaa"
+component_source = "target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
+component_sha256 = "c602ef9ae93060b247ca44a6bfaa634e855ccc7f7cc7cd45c76d523cf6940645"
+requires_request_ids = ["dep:c2ab3bf186bb39cb252b7aa6090c22be5148835af1eabd382de52cfe37241db3"]
+
 [[resolved.packages]]
-package_ref = "imago:v4l2@0.1.0#"
+package_ref = "imago:v4l2@0.2.0#"
 name = "imago:v4l2"
-version = "0.1.0"
-requirement = "=0.1.0"
-path = "wit/deps/imago-v4l2-0.1.0"
-digest = "sha256:6a169aed73f0a70bbad541f0bf3d732cebd00fb17418ccdbb19484c5be9ec4e7"
+version = "0.2.0"
+requirement = "=0.2.0"
+path = "wit/deps/imago-v4l2-0.2.0"
+digest = "sha256:87f0ded5c0c1c1ccf3c6d5a5780491a98dec42429b580983012f5bbbe33d72e6"
 
 [[resolved.package_edges]]
 from_kind = "dependency"
-from_ref = "dep:3f9f0d47fcb353717a35b5d090be68ce5be56f94885db05da8e89b7a569909ae"
-to_package_ref = "imago:v4l2@0.1.0#"
+from_ref = "dep:eecd7a472c7cb862226a8e243c2a46437118614ea434ad79da8a6720cffc5828"
+to_package_ref = "imago:v4l2@0.2.0#"
 reason = "wit-import"

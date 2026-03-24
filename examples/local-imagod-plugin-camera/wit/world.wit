@@ -1,6 +1,6 @@
 package example:local-imagod-plugin-camera;
 
 world plugin-imports {
-    import imago:camera/types@0.1.0;
-    import imago:camera/provider@0.1.0;
+    import imago:camera/types@0.3.0;
+    import imago:camera/provider@0.3.0;
 }

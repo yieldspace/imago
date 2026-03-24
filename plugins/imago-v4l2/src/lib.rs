@@ -3,6 +3,8 @@ use std::cmp::Ordering as CmpOrdering;
 #[cfg(any(test, target_os = "linux"))]
 use std::fs;
 #[cfg(target_os = "linux")]
+use std::io::Cursor;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 #[cfg(any(test, target_os = "linux"))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +25,8 @@ use imagod_runtime_wasmtime::native_plugins::{
     map_native_plugin_resource_validation_error,
 };
 #[cfg(target_os = "linux")]
+use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
+#[cfg(target_os = "linux")]
 use nix::errno::Errno;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 #[cfg(target_os = "linux")]
@@ -30,7 +34,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 #[cfg(target_os = "linux")]
 use v4l2r::{
-    Format, PixelFormat, QueueType, bindings as v4l2_bindings,
+    Format, PixelFormat as V4l2PixelFormat, QueueType, bindings as v4l2_bindings,
     device::{
         AllocatedQueue, Device, DeviceConfig, Stream, TryDequeue,
         poller::{DeviceEvent as PollDeviceEvent, PollError, PollEvent, Poller},
@@ -105,12 +109,17 @@ impl NativePlugin for ImagoV4l2Plugin {
 
 type V4l2Error = imago_v4l2_plugin_bindings::imago::v4l2::types::V4l2Error;
 type EncodedFormat = imago_v4l2_plugin_bindings::imago::v4l2::types::EncodedFormat;
+#[cfg(target_os = "linux")]
+type FramePixelFormat = imago_v4l2_plugin_bindings::imago::v4l2::types::PixelFormat;
 type Limits = imago_v4l2_plugin_bindings::imago::v4l2::types::Limits;
 type OpenableDevice = imago_v4l2_plugin_bindings::imago::v4l2::types::OpenableDevice;
 type CaptureMode = imago_v4l2_plugin_bindings::imago::v4l2::types::CaptureMode;
+type CaptureProperty = imago_v4l2_plugin_bindings::imago::v4l2::types::CaptureProperty;
 type EncodedFrame = imago_v4l2_plugin_bindings::imago::v4l2::types::EncodedFrame;
+type Frame = imago_v4l2_plugin_bindings::imago::v4l2::types::Frame;
 type DeviceResource = imago_v4l2_plugin_bindings::imago::v4l2::device::Device;
 type StreamResource = imago_v4l2_plugin_bindings::imago::v4l2::capture_stream::CaptureStream;
+type VideoCaptureResource = imago_v4l2_plugin_bindings::imago::v4l2::video_capture::VideoCapture;
 
 const V4L2_RESOURCE_KEY: &str = "v4l2";
 const V4L2_RESOURCE_PATHS_KEY: &str = "paths";
@@ -134,7 +143,9 @@ const DEFAULT_THREAD_STACK_BYTES: usize = 256 * 1024;
 #[cfg(any(test, target_os = "linux"))]
 const MAX_EXPANDED_CAPTURE_MODES: usize = 4_096;
 #[cfg(target_os = "linux")]
-const MJPEG_FOURCC: PixelFormat = PixelFormat::from_fourcc(b"MJPG");
+const MJPEG_FOURCC: V4l2PixelFormat = V4l2PixelFormat::from_fourcc(b"MJPG");
+#[cfg(target_os = "linux")]
+const MJPG_FOURCC_VALUE: u32 = u32::from_le_bytes(*b"MJPG");
 
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +198,11 @@ struct StreamHandle {
     sender: mpsc::Sender<DeviceCommand>,
 }
 
+#[derive(Clone)]
+struct VideoCaptureHandle {
+    sender: mpsc::Sender<DeviceCommand>,
+}
+
 #[cfg(target_os = "linux")]
 type CaptureQueue = Queue<Capture, BuffersAllocated<Vec<MmapHandle>>>;
 
@@ -197,6 +213,23 @@ struct StreamState {
     poller: Poller,
 }
 
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, Clone)]
+struct VideoCaptureSelection {
+    width_px: Option<u32>,
+    height_px: Option<u32>,
+    fps: Option<u32>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct VideoCaptureState {
+    selected_mode: CaptureMode,
+    selection: VideoCaptureSelection,
+    stream: Option<StreamState>,
+    last_frame: Option<Frame>,
+}
+
 #[cfg(target_os = "linux")]
 struct DeviceThreadState {
     device: Arc<Device>,
@@ -204,6 +237,7 @@ struct DeviceThreadState {
     modes: Vec<CaptureMode>,
     limits: V4l2LimitsConfig,
     active_stream: Option<StreamState>,
+    active_video_capture: Option<VideoCaptureState>,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -225,7 +259,34 @@ enum DeviceCommand {
         timeout_ms: u32,
         reply: oneshot::Sender<Result<EncodedFrame, V4l2Error>>,
     },
+    OpenVideoCapture {
+        reply: oneshot::Sender<Result<(), V4l2Error>>,
+    },
+    VideoCaptureIsOpened {
+        reply: oneshot::Sender<bool>,
+    },
+    VideoCaptureGet {
+        property: CaptureProperty,
+        reply: oneshot::Sender<Result<f64, V4l2Error>>,
+    },
+    VideoCaptureSet {
+        property: CaptureProperty,
+        value: f64,
+        reply: oneshot::Sender<Result<bool, V4l2Error>>,
+    },
+    VideoCaptureRead {
+        timeout_ms: u32,
+        reply: oneshot::Sender<Result<Frame, V4l2Error>>,
+    },
+    VideoCaptureGrab {
+        timeout_ms: u32,
+        reply: oneshot::Sender<Result<bool, V4l2Error>>,
+    },
+    VideoCaptureRetrieve {
+        reply: oneshot::Sender<Result<Frame, V4l2Error>>,
+    },
     CloseStreamNoReply,
+    CloseVideoCaptureNoReply,
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -237,6 +298,9 @@ static DEVICE_REGISTRY: OnceLock<Mutex<BTreeMap<u32, DeviceRuntimeHandle>>> = On
 static NEXT_STREAM_REP: AtomicU32 = AtomicU32::new(1);
 static STREAM_REGISTRY: OnceLock<Mutex<BTreeMap<u32, StreamHandle>>> = OnceLock::new();
 
+static NEXT_VIDEO_CAPTURE_REP: AtomicU32 = AtomicU32::new(1);
+static VIDEO_CAPTURE_REGISTRY: OnceLock<Mutex<BTreeMap<u32, VideoCaptureHandle>>> = OnceLock::new();
+
 static V4L2_RESOURCES_CACHE: OnceLock<Mutex<BTreeMap<String, V4l2ResourcesConfig>>> =
     OnceLock::new();
 
@@ -246,6 +310,10 @@ fn device_registry() -> &'static Mutex<BTreeMap<u32, DeviceRuntimeHandle>> {
 
 fn stream_registry() -> &'static Mutex<BTreeMap<u32, StreamHandle>> {
     STREAM_REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn video_capture_registry() -> &'static Mutex<BTreeMap<u32, VideoCaptureHandle>> {
+    VIDEO_CAPTURE_REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 fn v4l2_resources_cache() -> &'static Mutex<BTreeMap<String, V4l2ResourcesConfig>> {
@@ -315,21 +383,60 @@ fn remove_stream_handle(rep: u32) {
     remove_rep(stream_registry(), rep);
 }
 
-fn retain_streams_for_other_senders(
-    registry: &mut BTreeMap<u32, StreamHandle>,
+fn register_video_capture_handle(handle: VideoCaptureHandle) -> Result<u32, String> {
+    register_rep(&NEXT_VIDEO_CAPTURE_REP, video_capture_registry(), handle)
+}
+
+fn lookup_video_capture_handle(rep: u32) -> Result<VideoCaptureHandle, String> {
+    lookup_rep(video_capture_registry(), rep, "video capture handle")
+}
+
+fn remove_video_capture_handle(rep: u32) {
+    remove_rep(video_capture_registry(), rep);
+}
+
+fn retain_handles_for_other_senders<T>(
+    registry: &mut BTreeMap<u32, T>,
     sender: &mpsc::Sender<DeviceCommand>,
-) -> usize {
+) -> usize
+where
+    T: SenderBackedHandle,
+{
     let before = registry.len();
-    registry.retain(|_, handle| !handle.sender.same_channel(sender));
+    registry.retain(|_, handle| !handle.sender().same_channel(sender));
     before.saturating_sub(registry.len())
 }
 
 fn remove_stream_handles_for_sender(sender: &mpsc::Sender<DeviceCommand>) -> usize {
     let mut removed = 0;
     if let Ok(mut guard) = stream_registry().lock() {
-        removed = retain_streams_for_other_senders(&mut guard, sender);
+        removed = retain_handles_for_other_senders(&mut guard, sender);
     }
     removed
+}
+
+fn remove_video_capture_handles_for_sender(sender: &mpsc::Sender<DeviceCommand>) -> usize {
+    let mut removed = 0;
+    if let Ok(mut guard) = video_capture_registry().lock() {
+        removed = retain_handles_for_other_senders(&mut guard, sender);
+    }
+    removed
+}
+
+trait SenderBackedHandle {
+    fn sender(&self) -> &mpsc::Sender<DeviceCommand>;
+}
+
+impl SenderBackedHandle for StreamHandle {
+    fn sender(&self) -> &mpsc::Sender<DeviceCommand> {
+        &self.sender
+    }
+}
+
+impl SenderBackedHandle for VideoCaptureHandle {
+    fn sender(&self) -> &mpsc::Sender<DeviceCommand> {
+        &self.sender
+    }
 }
 
 fn map_lookup_error(err: String) -> V4l2Error {
@@ -355,6 +462,312 @@ fn default_capture_mode() -> CaptureMode {
         fps_num: 0,
         fps_den: 1,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn default_video_capture_selection() -> VideoCaptureSelection {
+    VideoCaptureSelection {
+        width_px: None,
+        height_px: None,
+        fps: None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn video_capture_state_from_modes(modes: &[CaptureMode]) -> Result<VideoCaptureState, V4l2Error> {
+    let Some(selected_mode) = modes.first().cloned() else {
+        return Err(V4l2Error::OperationNotSupported);
+    };
+
+    Ok(VideoCaptureState {
+        selected_mode,
+        selection: default_video_capture_selection(),
+        stream: None,
+        last_frame: None,
+    })
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn mode_matches_selection(mode: &CaptureMode, selection: &VideoCaptureSelection) -> bool {
+    if selection
+        .width_px
+        .is_some_and(|width_px| mode.width_px != width_px)
+    {
+        return false;
+    }
+    if selection
+        .height_px
+        .is_some_and(|height_px| mode.height_px != height_px)
+    {
+        return false;
+    }
+    if selection
+        .fps
+        .is_some_and(|fps| mode.fps_den != 1 || mode.fps_num != fps)
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn select_best_mode(
+    modes: &[CaptureMode],
+    selection: &VideoCaptureSelection,
+    baseline: &CaptureMode,
+) -> Option<CaptureMode> {
+    let mut candidates: Vec<&CaptureMode> = modes
+        .iter()
+        .filter(|mode| mode_matches_selection(mode, selection))
+        .collect();
+    candidates.sort_by(|left, right| {
+        let left_width_diff = left.width_px.abs_diff(baseline.width_px);
+        let right_width_diff = right.width_px.abs_diff(baseline.width_px);
+        left_width_diff
+            .cmp(&right_width_diff)
+            .then_with(|| {
+                left.height_px
+                    .abs_diff(baseline.height_px)
+                    .cmp(&right.height_px.abs_diff(baseline.height_px))
+            })
+            .then_with(|| right.fps_num.cmp(&left.fps_num))
+            .then_with(|| left.fps_den.cmp(&right.fps_den))
+            .then_with(|| right.width_px.cmp(&left.width_px))
+            .then_with(|| right.height_px.cmp(&left.height_px))
+    });
+    candidates.into_iter().next().cloned()
+}
+
+#[cfg(target_os = "linux")]
+fn rounded_integer_fps(value: f64) -> Result<u32, V4l2Error> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    let rounded = value.round();
+    if !(1.0..=f64::from(u32::MAX)).contains(&rounded) {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    Ok(rounded as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn rounded_u32(value: f64) -> Result<u32, V4l2Error> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    let rounded = value.round();
+    if !(0.0..=f64::from(u32::MAX)).contains(&rounded) {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    Ok(rounded as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn rounded_i32(value: f64) -> Result<i32, V4l2Error> {
+    if !value.is_finite() {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    let rounded = value.round();
+    if !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&rounded) {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    Ok(rounded as i32)
+}
+
+#[cfg(target_os = "linux")]
+fn ctrl_id_from_property(property: CaptureProperty) -> Option<u32> {
+    match property {
+        CaptureProperty::Brightness => Some(v4l2_bindings::V4L2_CID_BRIGHTNESS),
+        CaptureProperty::Contrast => Some(v4l2_bindings::V4L2_CID_CONTRAST),
+        CaptureProperty::Saturation => Some(v4l2_bindings::V4L2_CID_SATURATION),
+        CaptureProperty::Gain => Some(v4l2_bindings::V4L2_CID_GAIN),
+        CaptureProperty::AutoExposure => Some(v4l2_bindings::V4L2_CID_EXPOSURE_AUTO),
+        CaptureProperty::Exposure => Some(v4l2_bindings::V4L2_CID_EXPOSURE_ABSOLUTE),
+        CaptureProperty::AutoFocus => Some(v4l2_bindings::V4L2_CID_FOCUS_AUTO),
+        CaptureProperty::Focus => Some(v4l2_bindings::V4L2_CID_FOCUS_ABSOLUTE),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_control_error(err: ioctl::GCtrlError) -> V4l2Error {
+    match err {
+        ioctl::GCtrlError::Invalid => V4l2Error::OperationNotSupported,
+        ioctl::GCtrlError::IoctlError(errno) => map_errno(errno),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_boolish_to_ctrl(value: f64) -> Result<i32, V4l2Error> {
+    let rounded = rounded_i32(value)?;
+    match rounded {
+        0 | 1 => Ok(rounded),
+        _ => Err(V4l2Error::InvalidArgument),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn get_control_value(device: &Device, property: CaptureProperty) -> Result<f64, V4l2Error> {
+    let id = ctrl_id_from_property(property).ok_or(V4l2Error::OperationNotSupported)?;
+    let value = ioctl::g_ctrl(device, id).map_err(map_control_error)?;
+    match property {
+        CaptureProperty::AutoExposure => {
+            Ok(if value == v4l2_bindings::V4L2_EXPOSURE_MANUAL as i32 {
+                0.0
+            } else if value == v4l2_bindings::V4L2_EXPOSURE_AUTO as i32 {
+                1.0
+            } else {
+                return Err(V4l2Error::OperationNotSupported);
+            })
+        }
+        CaptureProperty::AutoFocus => Ok(f64::from((value != 0) as u8)),
+        _ => Ok(f64::from(value)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_control_value(
+    device: &Device,
+    property: CaptureProperty,
+    value: f64,
+) -> Result<bool, V4l2Error> {
+    let id = ctrl_id_from_property(property).ok_or(V4l2Error::OperationNotSupported)?;
+    let ctrl_value = match property {
+        CaptureProperty::AutoExposure => match map_boolish_to_ctrl(value)? {
+            0 => v4l2_bindings::V4L2_EXPOSURE_MANUAL as i32,
+            1 => v4l2_bindings::V4L2_EXPOSURE_AUTO as i32,
+            _ => unreachable!(),
+        },
+        CaptureProperty::AutoFocus => map_boolish_to_ctrl(value)?,
+        _ => rounded_i32(value)?,
+    };
+    let applied = ioctl::s_ctrl(device, id, ctrl_value).map_err(map_control_error)?;
+    Ok(applied == ctrl_value)
+}
+
+#[cfg(target_os = "linux")]
+fn frame_from_decoded_bytes(
+    bytes: Vec<u8>,
+    width_px: u32,
+    height_px: u32,
+    sequence: u64,
+    timestamp_ns: u64,
+) -> Result<Frame, V4l2Error> {
+    let stride_bytes = width_px.checked_mul(4).ok_or(V4l2Error::TransportFault)?;
+    let expected_len = usize::try_from(
+        u64::from(stride_bytes)
+            .checked_mul(u64::from(height_px))
+            .ok_or(V4l2Error::TransportFault)?,
+    )
+    .map_err(|_| V4l2Error::TransportFault)?;
+    if bytes.len() != expected_len {
+        return Err(V4l2Error::TransportFault);
+    }
+    Ok(Frame {
+        bytes,
+        width_px,
+        height_px,
+        stride_bytes,
+        timestamp_ns,
+        sequence,
+        format: FramePixelFormat::Rgba8,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn rgb_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
+    if !bytes.len().is_multiple_of(3) {
+        return Err(V4l2Error::TransportFault);
+    }
+    let pixel_count = bytes.len() / 3;
+    let output_len = pixel_count
+        .checked_mul(4)
+        .ok_or(V4l2Error::TransportFault)?;
+    let mut rgba = Vec::with_capacity(output_len);
+    for chunk in bytes.chunks_exact(3) {
+        rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+    }
+    Ok(rgba)
+}
+
+#[cfg(target_os = "linux")]
+fn l8_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
+    let output_len = bytes
+        .len()
+        .checked_mul(4)
+        .ok_or(V4l2Error::TransportFault)?;
+    let mut rgba = Vec::with_capacity(output_len);
+    for value in bytes {
+        rgba.extend_from_slice(&[*value, *value, *value, 0xff]);
+    }
+    Ok(rgba)
+}
+
+#[cfg(target_os = "linux")]
+fn l16_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err(V4l2Error::TransportFault);
+    }
+    let pixel_count = bytes.len() / 2;
+    let output_len = pixel_count
+        .checked_mul(4)
+        .ok_or(V4l2Error::TransportFault)?;
+    let mut rgba = Vec::with_capacity(output_len);
+    for chunk in bytes.chunks_exact(2) {
+        let value = u16::from_be_bytes([chunk[0], chunk[1]]);
+        let v8 = (value >> 8) as u8;
+        rgba.extend_from_slice(&[v8, v8, v8, 0xff]);
+    }
+    Ok(rgba)
+}
+
+#[cfg(target_os = "linux")]
+fn cmyk32_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(V4l2Error::TransportFault);
+    }
+    let pixel_count = bytes.len() / 4;
+    let output_len = pixel_count
+        .checked_mul(4)
+        .ok_or(V4l2Error::TransportFault)?;
+    let mut rgba = Vec::with_capacity(output_len);
+    for chunk in bytes.chunks_exact(4) {
+        rgba.extend_from_slice(&[255 - chunk[0], 255 - chunk[1], 255 - chunk[2], 0xff]);
+    }
+    Ok(rgba)
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mjpeg_frame(
+    jpeg_bytes: &[u8],
+    limits: &V4l2LimitsConfig,
+    sequence: u64,
+    timestamp_ns: u64,
+) -> Result<Frame, V4l2Error> {
+    let mut decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
+    let max_decoded_bytes = limits
+        .max_frame_bytes
+        .checked_mul(4)
+        .ok_or(V4l2Error::OperationNotSupported)?;
+    decoder.set_max_decoding_buffer_size(max_decoded_bytes);
+    let decoded = decoder
+        .decode()
+        .map_err(|err| V4l2Error::Other(format!("jpeg decode failed: {err}")))?;
+    let info = decoder.info().ok_or(V4l2Error::TransportFault)?;
+    let rgba = match info.pixel_format {
+        JpegPixelFormat::RGB24 => rgb_to_rgba(&decoded)?,
+        JpegPixelFormat::L8 => l8_to_rgba(&decoded)?,
+        JpegPixelFormat::L16 => l16_to_rgba(&decoded)?,
+        JpegPixelFormat::CMYK32 => cmyk32_to_rgba(&decoded)?,
+        _ => return Err(V4l2Error::OperationNotSupported),
+    };
+    frame_from_decoded_bytes(
+        rgba,
+        u32::from(info.width),
+        u32::from(info.height),
+        sequence,
+        timestamp_ns,
+    )
 }
 
 fn normalize_video_path(raw: &str) -> Result<String, String> {
@@ -1352,6 +1765,175 @@ fn read_next_frame(
 }
 
 #[cfg(target_os = "linux")]
+fn close_video_capture_state(mut state: VideoCaptureState) -> Result<(), V4l2Error> {
+    if let Some(stream) = state.stream.take() {
+        close_stream_state(stream)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_video_capture_stream<'a>(
+    state: &'a mut VideoCaptureState,
+    device: &Arc<Device>,
+    limits: &V4l2LimitsConfig,
+) -> Result<&'a mut StreamState, V4l2Error> {
+    if state.stream.is_none() {
+        let stream = open_stream_state(device, &state.selected_mode, limits)?;
+        state.stream = Some(stream);
+    }
+    state
+        .stream
+        .as_mut()
+        .ok_or_else(|| V4l2Error::Other("video capture stream is not open".to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn video_capture_property_value(
+    state: &VideoCaptureState,
+    device: &Device,
+    property: CaptureProperty,
+) -> Result<f64, V4l2Error> {
+    match property {
+        CaptureProperty::FrameWidth => Ok(f64::from(
+            state
+                .selection
+                .width_px
+                .unwrap_or(state.selected_mode.width_px),
+        )),
+        CaptureProperty::FrameHeight => Ok(f64::from(
+            state
+                .selection
+                .height_px
+                .unwrap_or(state.selected_mode.height_px),
+        )),
+        CaptureProperty::Fps => Ok(f64::from(
+            state.selection.fps.unwrap_or(state.selected_mode.fps_num),
+        )),
+        CaptureProperty::Fourcc => Ok(f64::from(MJPG_FOURCC_VALUE)),
+        _ => get_control_value(device, property),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_updated_selection(
+    state: &VideoCaptureState,
+    modes: &[CaptureMode],
+    update: impl FnOnce(&mut VideoCaptureSelection) -> Result<(), V4l2Error>,
+) -> Result<Option<CaptureMode>, V4l2Error> {
+    let mut selection = state.selection.clone();
+    update(&mut selection)?;
+    Ok(select_best_mode(modes, &selection, &state.selected_mode))
+}
+
+#[cfg(target_os = "linux")]
+fn set_video_capture_property(
+    state: &mut VideoCaptureState,
+    device: &Device,
+    modes: &[CaptureMode],
+    property: CaptureProperty,
+    value: f64,
+) -> Result<bool, V4l2Error> {
+    match property {
+        CaptureProperty::FrameWidth => {
+            let rounded = rounded_u32(value)?;
+            if rounded == 0 {
+                return Err(V4l2Error::InvalidArgument);
+            }
+            let Some(selected_mode) = validate_updated_selection(state, modes, |selection| {
+                selection.width_px = Some(rounded);
+                Ok(())
+            })?
+            else {
+                return Ok(false);
+            };
+            state.selection.width_px = Some(rounded);
+            state.selected_mode = selected_mode;
+        }
+        CaptureProperty::FrameHeight => {
+            let rounded = rounded_u32(value)?;
+            if rounded == 0 {
+                return Err(V4l2Error::InvalidArgument);
+            }
+            let Some(selected_mode) = validate_updated_selection(state, modes, |selection| {
+                selection.height_px = Some(rounded);
+                Ok(())
+            })?
+            else {
+                return Ok(false);
+            };
+            state.selection.height_px = Some(rounded);
+            state.selected_mode = selected_mode;
+        }
+        CaptureProperty::Fps => {
+            let rounded = rounded_integer_fps(value)?;
+            let Some(selected_mode) = validate_updated_selection(state, modes, |selection| {
+                selection.fps = Some(rounded);
+                Ok(())
+            })?
+            else {
+                return Ok(false);
+            };
+            state.selection.fps = Some(rounded);
+            state.selected_mode = selected_mode;
+        }
+        CaptureProperty::Fourcc => {
+            let rounded = rounded_u32(value)?;
+            if rounded != MJPG_FOURCC_VALUE {
+                return Ok(false);
+            }
+        }
+        _ => {
+            return set_control_value(device, property, value);
+        }
+    }
+
+    if let Some(stream) = state.stream.take() {
+        close_stream_state(stream)?;
+    }
+    state.last_frame = None;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn grab_video_capture_frame(
+    state: &mut VideoCaptureState,
+    device: &Arc<Device>,
+    limits: &V4l2LimitsConfig,
+    timeout_ms: u32,
+) -> Result<bool, V4l2Error> {
+    let stream = ensure_video_capture_stream(state, device, limits)?;
+    let encoded = read_next_frame(stream, limits, timeout_ms)?;
+    let frame = decode_mjpeg_frame(
+        &encoded.bytes,
+        limits,
+        encoded.sequence,
+        encoded.timestamp_ns,
+    )?;
+    state.last_frame = Some(frame);
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn retrieve_video_capture_frame(state: &VideoCaptureState) -> Result<Frame, V4l2Error> {
+    state
+        .last_frame
+        .clone()
+        .ok_or_else(|| V4l2Error::Other("no grabbed frame available".to_string()))
+}
+
+#[cfg(target_os = "linux")]
+fn read_video_capture_frame(
+    state: &mut VideoCaptureState,
+    device: &Arc<Device>,
+    limits: &V4l2LimitsConfig,
+    timeout_ms: u32,
+) -> Result<Frame, V4l2Error> {
+    grab_video_capture_frame(state, device, limits, timeout_ms)?;
+    retrieve_video_capture_frame(state)
+}
+
+#[cfg(target_os = "linux")]
 fn run_device_thread(
     path: String,
     limits: V4l2LimitsConfig,
@@ -1372,6 +1954,7 @@ fn run_device_thread(
         modes,
         limits,
         active_stream: None,
+        active_video_capture: None,
     };
     let _ = ready.send(Ok(()));
 
@@ -1384,15 +1967,16 @@ fn run_device_thread(
                 let _ = reply.send(state.modes.clone());
             }
             DeviceCommand::OpenStream { mode, reply } => {
-                let result = if state.active_stream.is_some() {
-                    Err(V4l2Error::Busy)
-                } else if !state.modes.iter().any(|candidate| candidate == &mode) {
-                    Err(V4l2Error::InvalidArgument)
-                } else {
-                    open_stream_state(&state.device, &mode, &state.limits).map(|stream| {
-                        state.active_stream = Some(stream);
-                    })
-                };
+                let result =
+                    if state.active_stream.is_some() || state.active_video_capture.is_some() {
+                        Err(V4l2Error::Busy)
+                    } else if !state.modes.iter().any(|candidate| candidate == &mode) {
+                        Err(V4l2Error::InvalidArgument)
+                    } else {
+                        open_stream_state(&state.device, &mode, &state.limits).map(|stream| {
+                            state.active_stream = Some(stream);
+                        })
+                    };
                 let _ = reply.send(result);
             }
             DeviceCommand::CurrentMode { reply } => {
@@ -1411,14 +1995,96 @@ fn run_device_thread(
                 };
                 let _ = reply.send(result);
             }
+            DeviceCommand::OpenVideoCapture { reply } => {
+                let result =
+                    if state.active_stream.is_some() || state.active_video_capture.is_some() {
+                        Err(V4l2Error::Busy)
+                    } else {
+                        video_capture_state_from_modes(&state.modes).map(|video_capture| {
+                            state.active_video_capture = Some(video_capture);
+                        })
+                    };
+                let _ = reply.send(result);
+            }
+            DeviceCommand::VideoCaptureIsOpened { reply } => {
+                let _ = reply.send(state.active_video_capture.is_some());
+            }
+            DeviceCommand::VideoCaptureGet { property, reply } => {
+                let result = if let Some(video_capture) = state.active_video_capture.as_ref() {
+                    video_capture_property_value(video_capture, state.device.as_ref(), property)
+                } else {
+                    Err(V4l2Error::Other("video capture is released".to_string()))
+                };
+                let _ = reply.send(result);
+            }
+            DeviceCommand::VideoCaptureSet {
+                property,
+                value,
+                reply,
+            } => {
+                let result = if let Some(video_capture) = state.active_video_capture.as_mut() {
+                    set_video_capture_property(
+                        video_capture,
+                        state.device.as_ref(),
+                        &state.modes,
+                        property,
+                        value,
+                    )
+                } else {
+                    Err(V4l2Error::Other("video capture is released".to_string()))
+                };
+                let _ = reply.send(result);
+            }
+            DeviceCommand::VideoCaptureRead { timeout_ms, reply } => {
+                let result = if let Some(video_capture) = state.active_video_capture.as_mut() {
+                    read_video_capture_frame(
+                        video_capture,
+                        &state.device,
+                        &state.limits,
+                        timeout_ms,
+                    )
+                } else {
+                    Err(V4l2Error::Other("video capture is released".to_string()))
+                };
+                let _ = reply.send(result);
+            }
+            DeviceCommand::VideoCaptureGrab { timeout_ms, reply } => {
+                let result = if let Some(video_capture) = state.active_video_capture.as_mut() {
+                    grab_video_capture_frame(
+                        video_capture,
+                        &state.device,
+                        &state.limits,
+                        timeout_ms,
+                    )
+                } else {
+                    Err(V4l2Error::Other("video capture is released".to_string()))
+                };
+                let _ = reply.send(result);
+            }
+            DeviceCommand::VideoCaptureRetrieve { reply } => {
+                let result = if let Some(video_capture) = state.active_video_capture.as_ref() {
+                    retrieve_video_capture_frame(video_capture)
+                } else {
+                    Err(V4l2Error::Other("video capture is released".to_string()))
+                };
+                let _ = reply.send(result);
+            }
             DeviceCommand::CloseStreamNoReply => {
                 if let Some(stream) = state.active_stream.take() {
                     let _ = close_stream_state(stream);
                 }
             }
+            DeviceCommand::CloseVideoCaptureNoReply => {
+                if let Some(video_capture) = state.active_video_capture.take() {
+                    let _ = close_video_capture_state(video_capture);
+                }
+            }
             DeviceCommand::Shutdown { reply } => {
                 if let Some(stream) = state.active_stream.take() {
                     let _ = close_stream_state(stream);
+                }
+                if let Some(video_capture) = state.active_video_capture.take() {
+                    let _ = close_video_capture_state(video_capture);
                 }
                 let _ = reply.send(());
                 break;
@@ -1428,6 +2094,9 @@ fn run_device_thread(
 
     if let Some(stream) = state.active_stream.take() {
         let _ = close_stream_state(stream);
+    }
+    if let Some(video_capture) = state.active_video_capture.take() {
+        let _ = close_video_capture_state(video_capture);
     }
 }
 
@@ -1527,6 +2196,16 @@ async fn send_shutdown_command(
 
 async fn send_close_stream_no_reply_command(sender: &mpsc::Sender<DeviceCommand>) {
     match sender.try_send(DeviceCommand::CloseStreamNoReply) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(command)) => {
+            let _ = sender.send(command).await;
+        }
+    }
+}
+
+async fn send_close_video_capture_no_reply_command(sender: &mpsc::Sender<DeviceCommand>) {
+    match sender.try_send(DeviceCommand::CloseVideoCaptureNoReply) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Closed(_)) => {}
         Err(mpsc::error::TrySendError::Full(command)) => {
@@ -1636,9 +2315,26 @@ impl imago_v4l2_plugin_bindings::imago::v4l2::device::HostDevice for WasiState {
         Ok(Resource::new_own(rep))
     }
 
+    async fn open_video_capture(
+        &mut self,
+        self_: Resource<DeviceResource>,
+    ) -> Result<Resource<VideoCaptureResource>, V4l2Error> {
+        let handle = lookup_device_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| DeviceCommand::OpenVideoCapture {
+            reply,
+        })
+        .await?;
+        let rep = register_video_capture_handle(VideoCaptureHandle {
+            sender: handle.sender,
+        })
+        .map_err(map_lookup_error)?;
+        Ok(Resource::new_own(rep))
+    }
+
     async fn drop(&mut self, resource: Resource<DeviceResource>) -> wasmtime::Result<()> {
         if let Ok(handle) = lookup_device_handle(resource.rep()) {
             let _ = remove_stream_handles_for_sender(&handle.sender);
+            let _ = remove_video_capture_handles_for_sender(&handle.sender);
             shutdown_device_runtime(&handle).await;
         }
         remove_device_handle(resource.rep());
@@ -1676,6 +2372,101 @@ impl imago_v4l2_plugin_bindings::imago::v4l2::capture_stream::HostCaptureStream 
             send_close_stream_no_reply_command(&handle.sender).await;
         }
         remove_stream_handle(resource.rep());
+        Ok(())
+    }
+}
+
+impl imago_v4l2_plugin_bindings::imago::v4l2::video_capture::Host for WasiState {}
+
+impl imago_v4l2_plugin_bindings::imago::v4l2::video_capture::HostVideoCapture for WasiState {
+    async fn is_opened(&mut self, self_: Resource<VideoCaptureResource>) -> bool {
+        let Ok(handle) = lookup_video_capture_handle(self_.rep()) else {
+            return false;
+        };
+        request_device_value(
+            &handle.sender,
+            |reply| DeviceCommand::VideoCaptureIsOpened { reply },
+            false,
+        )
+        .await
+    }
+
+    async fn get(
+        &mut self,
+        self_: Resource<VideoCaptureResource>,
+        property: CaptureProperty,
+    ) -> Result<f64, V4l2Error> {
+        let handle = lookup_video_capture_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| DeviceCommand::VideoCaptureGet {
+            property,
+            reply,
+        })
+        .await
+    }
+
+    async fn set(
+        &mut self,
+        self_: Resource<VideoCaptureResource>,
+        property: CaptureProperty,
+        value: f64,
+    ) -> Result<bool, V4l2Error> {
+        let handle = lookup_video_capture_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| DeviceCommand::VideoCaptureSet {
+            property,
+            value,
+            reply,
+        })
+        .await
+    }
+
+    async fn read(
+        &mut self,
+        self_: Resource<VideoCaptureResource>,
+        timeout_ms: u32,
+    ) -> Result<Frame, V4l2Error> {
+        let handle = lookup_video_capture_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| DeviceCommand::VideoCaptureRead {
+            timeout_ms,
+            reply,
+        })
+        .await
+    }
+
+    async fn grab(
+        &mut self,
+        self_: Resource<VideoCaptureResource>,
+        timeout_ms: u32,
+    ) -> Result<bool, V4l2Error> {
+        let handle = lookup_video_capture_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| DeviceCommand::VideoCaptureGrab {
+            timeout_ms,
+            reply,
+        })
+        .await
+    }
+
+    async fn retrieve(
+        &mut self,
+        self_: Resource<VideoCaptureResource>,
+    ) -> Result<Frame, V4l2Error> {
+        let handle = lookup_video_capture_handle(self_.rep()).map_err(map_lookup_error)?;
+        request_device(&handle.sender, |reply| {
+            DeviceCommand::VideoCaptureRetrieve { reply }
+        })
+        .await
+    }
+
+    async fn release(&mut self, self_: Resource<VideoCaptureResource>) {
+        if let Ok(handle) = lookup_video_capture_handle(self_.rep()) {
+            send_close_video_capture_no_reply_command(&handle.sender).await;
+        }
+    }
+
+    async fn drop(&mut self, resource: Resource<VideoCaptureResource>) -> wasmtime::Result<()> {
+        if let Ok(handle) = lookup_video_capture_handle(resource.rep()) {
+            send_close_video_capture_no_reply_command(&handle.sender).await;
+        }
+        remove_video_capture_handle(resource.rep());
         Ok(())
     }
 }
@@ -1758,6 +2549,52 @@ mod tests {
         })))
         .expect_err("zero buffer_count must fail");
         assert!(err.contains("buffer_count"), "unexpected error: {err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rgb_to_rgba_requires_complete_pixels() {
+        let err = rgb_to_rgba(&[0x01, 0x02]).expect_err("incomplete RGB pixels should fail");
+        assert!(matches!(err, V4l2Error::TransportFault));
+        assert_eq!(
+            rgb_to_rgba(&[1, 2, 3, 4, 5, 6]).expect("RGB conversion should succeed"),
+            vec![1, 2, 3, 0xff, 4, 5, 6, 0xff]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn l8_to_rgba_converts_grayscale_with_alpha() {
+        assert_eq!(
+            l8_to_rgba(&[0x00, 0x7f, 0xff]).expect("L8 conversion should succeed"),
+            vec![
+                0x00, 0x00, 0x00, 0xff, 0x7f, 0x7f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn l16_to_rgba_converts_u16_grayscale_to_rgba() {
+        assert_eq!(
+            l16_to_rgba(&[0x12, 0x12, 0x34, 0x34]).expect("L16 conversion should succeed"),
+            vec![0x12, 0x12, 0x12, 0xff, 0x34, 0x34, 0x34, 0xff]
+        );
+        let err = l16_to_rgba(&[0x12]).expect_err("incomplete L16 pixels should fail");
+        assert!(matches!(err, V4l2Error::TransportFault));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cmyk32_to_rgba_converts_cmyk_to_rgba() {
+        assert_eq!(
+            cmyk32_to_rgba(&[0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff])
+                .expect("CMYK conversion should succeed"),
+            vec![255, 255, 255, 0xff, 0x00, 0x00, 0x00, 0xff]
+        );
+        let err =
+            cmyk32_to_rgba(&[0x00, 0x00, 0x00]).expect_err("incomplete CMYK pixels should fail");
+        assert!(matches!(err, V4l2Error::TransportFault));
     }
 
     #[test]
@@ -1866,6 +2703,71 @@ mod tests {
             .expect_err("overflowing reduced fraction must fail"),
             V4l2Error::OperationNotSupported
         ));
+    }
+
+    #[test]
+    fn select_best_mode_prefers_matching_candidates_with_smallest_delta() {
+        let modes = vec![
+            CaptureMode {
+                format: EncodedFormat::Mjpeg,
+                width_px: 640,
+                height_px: 480,
+                fps_num: 30,
+                fps_den: 1,
+            },
+            CaptureMode {
+                format: EncodedFormat::Mjpeg,
+                width_px: 1280,
+                height_px: 720,
+                fps_num: 30,
+                fps_den: 1,
+            },
+            CaptureMode {
+                format: EncodedFormat::Mjpeg,
+                width_px: 1280,
+                height_px: 720,
+                fps_num: 60,
+                fps_den: 1,
+            },
+        ];
+        let selection = VideoCaptureSelection {
+            width_px: Some(1280),
+            height_px: Some(720),
+            fps: None,
+        };
+        let baseline = modes[1];
+        let selected =
+            select_best_mode(&modes, &selection, &baseline).expect("matching mode should exist");
+        assert_eq!(selected.width_px, 1280);
+        assert_eq!(selected.height_px, 720);
+        assert_eq!(selected.fps_num, 60);
+        assert_eq!(selected.fps_den, 1);
+    }
+
+    #[test]
+    fn select_best_mode_returns_none_when_integer_fps_has_no_exact_match() {
+        let modes = vec![
+            CaptureMode {
+                format: EncodedFormat::Mjpeg,
+                width_px: 640,
+                height_px: 480,
+                fps_num: 30,
+                fps_den: 1,
+            },
+            CaptureMode {
+                format: EncodedFormat::Mjpeg,
+                width_px: 640,
+                height_px: 480,
+                fps_num: 15,
+                fps_den: 1,
+            },
+        ];
+        let selection = VideoCaptureSelection {
+            width_px: Some(640),
+            height_px: Some(480),
+            fps: Some(24),
+        };
+        assert!(select_best_mode(&modes, &selection, &modes[0]).is_none());
     }
 
     #[cfg(target_family = "unix")]

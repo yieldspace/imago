@@ -7,12 +7,12 @@ fn camera_id_from_path(path: &str) -> String {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn camera_path_from_id(camera_id: &str) -> Option<&str> {
-    let path = camera_id.strip_prefix(CAMERA_ID_PREFIX)?;
-    if path.is_empty() || !path.starts_with("/dev/video") {
-        return None;
-    }
-    Some(path)
+fn path_sort_key(path: &str) -> (u32, &str) {
+    let index = path
+        .rsplit_once("video")
+        .and_then(|(_, suffix)| suffix.parse::<u32>().ok())
+        .unwrap_or(u32::MAX);
+    (index, path)
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -25,8 +25,8 @@ mod component {
     use std::cell::{Cell, RefCell};
 
     use super::camera_id_from_path;
-    use super::camera_path_from_id;
     use super::is_camera_device_path;
+    use super::path_sort_key;
 
     wit_bindgen::generate!({
         path: "wit",
@@ -34,29 +34,42 @@ mod component {
         generate_all
     });
 
-    type CameraInfo = exports::imago::camera::types::CameraInfo;
-    type CameraError = exports::imago::camera::types::CameraError;
-    type CaptureMode = exports::imago::camera::types::CaptureMode;
-    type EncodedFrame = exports::imago::camera::types::EncodedFrame;
-    type EncodedFormat = exports::imago::camera::types::EncodedFormat;
-    type Session = exports::imago::camera::provider::Session;
-    type V4l2Device = imago::v4l2::device::Device;
-    type V4l2Stream = imago::v4l2::capture_stream::CaptureStream;
-    type V4l2CaptureMode = imago::v4l2::types::CaptureMode;
-    type V4l2EncodedFrame = imago::v4l2::types::EncodedFrame;
-    type V4l2OpenableDevice = imago::v4l2::types::OpenableDevice;
+    use self::exports::imago::camera as camera_exports;
+    use self::imago::v4l20_2_0 as v4l2;
+
+    type CameraInfo = camera_exports::types::CameraInfo;
+    type CameraError = camera_exports::types::CameraError;
+    type CaptureProperty = camera_exports::types::CaptureProperty;
+    type Frame = camera_exports::types::Frame;
+    type PixelFormat = camera_exports::types::PixelFormat;
+    type VideoCaptureResource = camera_exports::provider::VideoCapture;
+    type V4l2CaptureProperty = v4l2::types::CaptureProperty;
+    type V4l2Device = v4l2::device::Device;
+    type V4l2Error = v4l2::types::V4l2Error;
+    type V4l2Frame = v4l2::types::Frame;
+    type V4l2OpenableDevice = v4l2::types::OpenableDevice;
+    type V4l2VideoCapture = v4l2::video_capture::VideoCapture;
 
     struct CameraPlugin;
 
-    struct CameraSession {
-        mode: CaptureMode,
-        device: RefCell<Option<V4l2Device>>,
-        stream: RefCell<Option<V4l2Stream>>,
-        closed: Cell<bool>,
+    struct CameraEntry {
+        info: CameraInfo,
+        path: String,
     }
 
-    fn camera_info_from_openable_device(device: &V4l2OpenableDevice) -> CameraInfo {
+    struct CameraVideoCaptureState {
+        device: Option<V4l2Device>,
+        capture: Option<V4l2VideoCapture>,
+    }
+
+    struct CameraVideoCapture {
+        state: RefCell<CameraVideoCaptureState>,
+        released: Cell<bool>,
+    }
+
+    fn camera_info_from_openable_device(index: u32, device: &V4l2OpenableDevice) -> CameraInfo {
         CameraInfo {
+            index,
             id: camera_id_from_path(&device.path),
             label: if device.label.is_empty() {
                 device.path.clone()
@@ -70,47 +83,45 @@ mod component {
         }
     }
 
-    fn camera_capture_mode_from_v4l2(mode: &V4l2CaptureMode) -> CaptureMode {
-        CaptureMode {
-            format: EncodedFormat::Mjpeg,
-            width_px: mode.width_px,
-            height_px: mode.height_px,
-            fps_num: mode.fps_num,
-            fps_den: mode.fps_den,
+    fn camera_property_from_v4l2(property: CaptureProperty) -> V4l2CaptureProperty {
+        match property {
+            CaptureProperty::FrameWidth => V4l2CaptureProperty::FrameWidth,
+            CaptureProperty::FrameHeight => V4l2CaptureProperty::FrameHeight,
+            CaptureProperty::Fps => V4l2CaptureProperty::Fps,
+            CaptureProperty::Fourcc => V4l2CaptureProperty::Fourcc,
+            CaptureProperty::Brightness => V4l2CaptureProperty::Brightness,
+            CaptureProperty::Contrast => V4l2CaptureProperty::Contrast,
+            CaptureProperty::Saturation => V4l2CaptureProperty::Saturation,
+            CaptureProperty::Gain => V4l2CaptureProperty::Gain,
+            CaptureProperty::AutoExposure => V4l2CaptureProperty::AutoExposure,
+            CaptureProperty::Exposure => V4l2CaptureProperty::Exposure,
+            CaptureProperty::AutoFocus => V4l2CaptureProperty::AutoFocus,
+            CaptureProperty::Focus => V4l2CaptureProperty::Focus,
         }
     }
 
-    fn v4l2_capture_mode_from_camera(mode: &CaptureMode) -> V4l2CaptureMode {
-        V4l2CaptureMode {
-            format: imago::v4l2::types::EncodedFormat::Mjpeg,
-            width_px: mode.width_px,
-            height_px: mode.height_px,
-            fps_num: mode.fps_num,
-            fps_den: mode.fps_den,
-        }
-    }
-
-    fn camera_encoded_frame_from_v4l2(frame: V4l2EncodedFrame) -> EncodedFrame {
-        EncodedFrame {
+    fn camera_frame_from_v4l2(frame: V4l2Frame) -> Frame {
+        Frame {
             bytes: frame.bytes,
             width_px: frame.width_px,
             height_px: frame.height_px,
+            stride_bytes: frame.stride_bytes,
             timestamp_ns: frame.timestamp_ns,
             sequence: frame.sequence,
-            format: EncodedFormat::Mjpeg,
+            format: PixelFormat::Rgba8,
         }
     }
 
-    fn map_v4l2_error(error: imago::v4l2::types::V4l2Error) -> CameraError {
+    fn map_v4l2_error(error: V4l2Error) -> CameraError {
         match error {
-            imago::v4l2::types::V4l2Error::NotAllowed => CameraError::NotAllowed,
-            imago::v4l2::types::V4l2Error::Timeout => CameraError::Timeout,
-            imago::v4l2::types::V4l2Error::Disconnected => CameraError::Disconnected,
-            imago::v4l2::types::V4l2Error::Busy => CameraError::Busy,
-            imago::v4l2::types::V4l2Error::InvalidArgument => CameraError::InvalidArgument,
-            imago::v4l2::types::V4l2Error::TransportFault => CameraError::TransportFault,
-            imago::v4l2::types::V4l2Error::OperationNotSupported => CameraError::NotSupported,
-            imago::v4l2::types::V4l2Error::Other(message) => CameraError::Other(message),
+            V4l2Error::NotAllowed => CameraError::NotAllowed,
+            V4l2Error::Timeout => CameraError::Timeout,
+            V4l2Error::Disconnected => CameraError::Disconnected,
+            V4l2Error::Busy => CameraError::Busy,
+            V4l2Error::InvalidArgument => CameraError::InvalidArgument,
+            V4l2Error::TransportFault => CameraError::TransportFault,
+            V4l2Error::OperationNotSupported => CameraError::NotSupported,
+            V4l2Error::Other(message) => CameraError::Other(message),
         }
     }
 
@@ -118,105 +129,153 @@ mod component {
         CameraError::Other(message.into())
     }
 
-    fn enumerate_cameras() -> Result<Vec<CameraInfo>, CameraError> {
-        let openable_devices =
-            imago::v4l2::provider::list_openable_devices().map_err(map_v4l2_error)?;
+    fn enumerate_camera_entries() -> Result<Vec<CameraEntry>, CameraError> {
+        let mut openable_devices =
+            v4l2::provider::list_openable_devices().map_err(map_v4l2_error)?;
+        openable_devices.retain(|device| is_camera_device_path(&device.path));
+        openable_devices
+            .sort_by(|left, right| path_sort_key(&left.path).cmp(&path_sort_key(&right.path)));
+
         Ok(openable_devices
             .into_iter()
-            .filter(|device| is_camera_device_path(&device.path))
-            .map(|device| camera_info_from_openable_device(&device))
+            .enumerate()
+            .map(|(index, device)| CameraEntry {
+                info: camera_info_from_openable_device(
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    &device,
+                ),
+                path: device.path,
+            })
             .collect())
     }
 
-    impl CameraSession {
-        fn close_resources(&self) {
-            if self.closed.replace(true) {
+    fn lookup_camera_by_index(index: u32) -> Result<CameraEntry, CameraError> {
+        enumerate_camera_entries()?
+            .into_iter()
+            .find(|entry| entry.info.index == index)
+            .ok_or(CameraError::NotFound)
+    }
+
+    impl CameraVideoCapture {
+        fn with_capture<T>(
+            &self,
+            f: impl FnOnce(&V4l2VideoCapture) -> Result<T, CameraError>,
+        ) -> Result<T, CameraError> {
+            if self.released.get() {
+                return Err(camera_error_other("video capture is released"));
+            }
+
+            let state = self.state.borrow();
+            let capture = state
+                .capture
+                .as_ref()
+                .ok_or_else(|| camera_error_other("video capture is released"))?;
+            f(capture)
+        }
+
+        fn release_resources(&self) {
+            if self.released.replace(true) {
                 return;
             }
-            self.stream.borrow_mut().take();
-            self.device.borrow_mut().take();
+            let mut state = self.state.borrow_mut();
+            state.capture.take();
+            state.device.take();
         }
     }
 
-    impl Drop for CameraSession {
+    impl Drop for CameraVideoCapture {
         fn drop(&mut self) {
-            self.close_resources();
+            self.release_resources();
         }
     }
 
-    impl exports::imago::camera::provider::Guest for CameraPlugin {
-        type Session = CameraSession;
+    impl camera_exports::provider::Guest for CameraPlugin {
+        type VideoCapture = CameraVideoCapture;
 
         fn list_cameras() -> Result<Vec<CameraInfo>, CameraError> {
-            enumerate_cameras()
-        }
-
-        fn list_modes(camera_id: String) -> Result<Vec<CaptureMode>, CameraError> {
-            let path = resolve_camera_path(&camera_id)?;
-            let device = imago::v4l2::provider::open_device(path).map_err(map_v4l2_error)?;
-            let modes = device.list_modes();
-            Ok(modes
+            Ok(enumerate_camera_entries()?
                 .into_iter()
-                .map(|mode| camera_capture_mode_from_v4l2(&mode))
+                .map(|entry| entry.info)
                 .collect())
         }
 
-        fn open_session(camera_id: String, mode: CaptureMode) -> Result<Session, CameraError> {
-            let path = resolve_camera_path(&camera_id)?;
-            let device = imago::v4l2::provider::open_device(path).map_err(map_v4l2_error)?;
-            let v4l2_mode = v4l2_capture_mode_from_camera(&mode);
-            let stream = device.open_stream(v4l2_mode).map_err(map_v4l2_error)?;
-
-            Ok(Session::new(CameraSession {
-                mode,
-                device: RefCell::new(Some(device)),
-                stream: RefCell::new(Some(stream)),
-                closed: Cell::new(false),
+        fn open(index: u32) -> Result<VideoCaptureResource, CameraError> {
+            let entry = lookup_camera_by_index(index)?;
+            let device = v4l2::provider::open_device(&entry.path).map_err(map_v4l2_error)?;
+            let capture = device.open_video_capture().map_err(map_v4l2_error)?;
+            Ok(VideoCaptureResource::new(CameraVideoCapture {
+                state: RefCell::new(CameraVideoCaptureState {
+                    device: Some(device),
+                    capture: Some(capture),
+                }),
+                released: Cell::new(false),
             }))
         }
     }
 
-    impl exports::imago::camera::provider::GuestSession for CameraSession {
-        fn current_mode(&self) -> CaptureMode {
-            if self.closed.get() {
-                return self.mode.clone();
+    impl camera_exports::provider::GuestVideoCapture for CameraVideoCapture {
+        fn is_opened(&self) -> bool {
+            if self.released.get() {
+                return false;
             }
-
-            let stream = self.stream.borrow();
-            stream
-                .as_ref()
-                .map(|stream| {
-                    let mode = stream.current_mode();
-                    camera_capture_mode_from_v4l2(&mode)
-                })
-                .unwrap_or_else(|| self.mode.clone())
+            let state = self.state.borrow();
+            let Some(capture) = state.capture.as_ref() else {
+                return false;
+            };
+            capture.is_opened()
         }
 
-        fn next_frame(&self, timeout_ms: u32) -> Result<EncodedFrame, CameraError> {
-            if self.closed.get() {
-                return Err(camera_error_other("camera session is closed"));
+        fn get(&self, property: CaptureProperty) -> Result<f64, CameraError> {
+            self.with_capture(|capture: &V4l2VideoCapture| {
+                capture
+                    .get(camera_property_from_v4l2(property))
+                    .map_err(map_v4l2_error)
+            })
+        }
+
+        fn set(&self, property: CaptureProperty, value: f64) -> Result<bool, CameraError> {
+            self.with_capture(|capture: &V4l2VideoCapture| {
+                capture
+                    .set(camera_property_from_v4l2(property), value)
+                    .map_err(map_v4l2_error)
+            })
+        }
+
+        fn read(&self, timeout_ms: u32) -> Result<Frame, CameraError> {
+            self.with_capture(|capture: &V4l2VideoCapture| {
+                capture
+                    .read(timeout_ms)
+                    .map(camera_frame_from_v4l2)
+                    .map_err(map_v4l2_error)
+            })
+        }
+
+        fn grab(&self, timeout_ms: u32) -> Result<bool, CameraError> {
+            self.with_capture(|capture: &V4l2VideoCapture| {
+                capture.grab(timeout_ms).map_err(map_v4l2_error)
+            })
+        }
+
+        fn retrieve(&self) -> Result<Frame, CameraError> {
+            self.with_capture(|capture: &V4l2VideoCapture| {
+                capture
+                    .retrieve()
+                    .map(camera_frame_from_v4l2)
+                    .map_err(map_v4l2_error)
+            })
+        }
+
+        fn release(&self) {
+            if self.released.get() {
+                return;
             }
-
-            let stream = self.stream.borrow();
-            let stream = stream
-                .as_ref()
-                .ok_or_else(|| camera_error_other("camera session is closed"))?;
-            let frame: V4l2EncodedFrame = stream.next_frame(timeout_ms).map_err(map_v4l2_error)?;
-            Ok(camera_encoded_frame_from_v4l2(frame))
-        }
-
-        fn close(&self) {
-            self.close_resources();
-        }
-    }
-
-    fn resolve_camera_path(camera_id: &str) -> Result<&str, CameraError> {
-        let path = camera_path_from_id(camera_id).ok_or(CameraError::InvalidArgument)?;
-        let cameras = enumerate_cameras()?;
-        if cameras.iter().any(|camera| camera.id == camera_id) {
-            Ok(path)
-        } else {
-            Err(CameraError::NotFound)
+            {
+                let state = self.state.borrow();
+                if let Some(capture) = state.capture.as_ref() {
+                    capture.release();
+                }
+            }
+            self.release_resources();
         }
     }
 
@@ -226,8 +285,8 @@ mod component {
 #[cfg(test)]
 mod tests {
     use super::camera_id_from_path;
-    use super::camera_path_from_id;
     use super::is_camera_device_path;
+    use super::path_sort_key;
 
     #[test]
     fn camera_id_from_path_prefixes_v4l2_scheme() {
@@ -235,16 +294,14 @@ mod tests {
     }
 
     #[test]
-    fn camera_path_from_id_requires_v4l2_prefix() {
-        assert_eq!(camera_path_from_id("v4l2:/dev/video0"), Some("/dev/video0"));
-        assert_eq!(camera_path_from_id("usb:/dev/video0"), None);
-        assert_eq!(camera_path_from_id("v4l2:"), None);
-    }
-
-    #[test]
     fn is_camera_device_path_accepts_video_nodes_without_usb_metadata() {
         assert!(is_camera_device_path("/dev/video0"));
         assert!(is_camera_device_path("/dev/video1"));
         assert!(!is_camera_device_path("/dev/null"));
+    }
+
+    #[test]
+    fn path_sort_key_uses_numeric_video_index() {
+        assert!(path_sort_key("/dev/video2") < path_sort_key("/dev/video10"));
     }
 }

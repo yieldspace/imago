@@ -26,69 +26,58 @@ fn main() {
     };
 
     println!(
-        "camera example: selected camera id={} label={} vendor={:04x} product={:04x} bus={} address={}",
-        camera.id, camera.label, camera.vendor_id, camera.product_id, camera.bus, camera.address
+        "camera example: selected camera index={} id={} label={} vendor={:04x} product={:04x} bus={} address={}",
+        camera.index,
+        camera.id,
+        camera.label,
+        camera.vendor_id,
+        camera.product_id,
+        camera.bus,
+        camera.address
     );
 
-    let modes = match imago::camera::provider::list_modes(&camera.id) {
-        Ok(modes) => modes,
+    let capture = match imago::camera::provider::open(camera.index) {
+        Ok(capture) => capture,
         Err(err) => {
-            eprintln!(
-                "camera example: list-modes failed for {}: {err:?}",
-                camera.id
-            );
+            eprintln!("camera example: open failed for {}: {err:?}", camera.index);
             return;
         }
     };
 
-    let mode = match modes.into_iter().next() {
-        Some(mode) => mode,
-        None => {
-            println!(
-                "camera example: no capture mode was discovered for {}",
-                camera.id
-            );
-            return;
-        }
-    };
-
-    println!(
-        "camera example: selected mode format={} {}x{} fps={}/{}",
-        encoded_format_name(mode.format),
-        mode.width_px,
-        mode.height_px,
-        mode.fps_num,
-        mode.fps_den
+    println!("camera example: is_opened={}", capture.is_opened());
+    echo_property(
+        "frame-width",
+        &capture,
+        imago::camera::types::CaptureProperty::FrameWidth,
+    );
+    echo_property(
+        "frame-height",
+        &capture,
+        imago::camera::types::CaptureProperty::FrameHeight,
+    );
+    echo_property("fps", &capture, imago::camera::types::CaptureProperty::Fps);
+    echo_property(
+        "fourcc",
+        &capture,
+        imago::camera::types::CaptureProperty::Fourcc,
     );
 
-    let session = match imago::camera::provider::open_session(&camera.id, mode.clone()) {
-        Ok(session) => session,
-        Err(err) => {
-            eprintln!(
-                "camera example: open-session failed for {}: {err:?}",
-                camera.id
-            );
-            return;
-        }
-    };
+    refresh_property(&capture, imago::camera::types::CaptureProperty::FrameWidth);
+    refresh_property(&capture, imago::camera::types::CaptureProperty::FrameHeight);
+    refresh_property(&capture, imago::camera::types::CaptureProperty::Fps);
 
-    let negotiated = session.current_mode();
-    println!(
-        "camera example: session opened with format={} {}x{} fps={}/{}",
-        encoded_format_name(negotiated.format),
-        negotiated.width_px,
-        negotiated.height_px,
-        negotiated.fps_num,
-        negotiated.fps_den
-    );
-
-    print_frame("camera still frame", &session, 5_000);
-    for index in 0..3 {
-        let label = format!("camera stream frame[{index}]");
-        print_frame(&label, &session, 5_000);
+    print_frame("camera read frame", capture.read(5_000));
+    match capture.grab(5_000) {
+        Ok(true) => print_frame("camera retrieve frame", capture.retrieve()),
+        Ok(false) => println!("camera example: grab returned false"),
+        Err(err) => eprintln!("camera example: grab failed: {err:?}"),
     }
 
-    session.close();
+    capture.release();
+    println!(
+        "camera example: is_opened after release={}",
+        capture.is_opened()
+    );
     println!("camera example finished");
 }
 
@@ -96,34 +85,58 @@ fn main() {
 fn main() {}
 
 #[cfg(target_arch = "wasm32")]
-fn print_frame(label: &str, session: &imago::camera::provider::Session, timeout_ms: u32) {
-    match session.next_frame(timeout_ms) {
+fn echo_property(
+    label: &str,
+    capture: &imago::camera::provider::VideoCapture,
+    property: imago::camera::types::CaptureProperty,
+) {
+    match capture.get(property) {
+        Ok(value) => println!("camera example: {label}={value}"),
+        Err(err) => eprintln!("camera example: get({label}) failed: {err:?}"),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn refresh_property(
+    capture: &imago::camera::provider::VideoCapture,
+    property: imago::camera::types::CaptureProperty,
+) {
+    let Ok(value) = capture.get(property) else {
+        return;
+    };
+    match capture.set(property, value) {
+        Ok(applied) => println!("camera example: set({property:?}) -> {applied}"),
+        Err(err) => eprintln!("camera example: set({property:?}) failed: {err:?}"),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn print_frame(
+    label: &str,
+    result: Result<imago::camera::types::Frame, imago::camera::types::CameraError>,
+) {
+    match result {
         Ok(frame) => {
             println!(
-                "{label}: seq={} bytes={} jpeg={} format={} {}x{} timestamp_ns={}",
+                "{label}: seq={} bytes={} format={} {}x{} stride={} timestamp_ns={}",
                 frame.sequence,
                 frame.bytes.len(),
-                is_jpeg(&frame.bytes),
-                encoded_format_name(frame.format),
+                pixel_format_name(frame.format),
                 frame.width_px,
                 frame.height_px,
+                frame.stride_bytes,
                 frame.timestamp_ns
             );
         }
         Err(err) => {
-            eprintln!("{label}: next_frame failed: {err:?}");
+            eprintln!("{label}: failed: {err:?}");
         }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-fn encoded_format_name(format: imago::camera::types::EncodedFormat) -> &'static str {
+fn pixel_format_name(format: imago::camera::types::PixelFormat) -> &'static str {
     match format {
-        imago::camera::types::EncodedFormat::Mjpeg => "mjpeg",
+        imago::camera::types::PixelFormat::Rgba8 => "rgba8",
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn is_jpeg(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9])
 }

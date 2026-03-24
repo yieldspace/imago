@@ -1,4 +1,4 @@
-package imago:v4l2@0.1.0;
+package imago:v4l2@0.2.0;
 
 /// Shared V4L2 capture types used by provider, device, and stream APIs.
 @since(version = 0.1.0)
@@ -29,6 +29,42 @@ interface types {
   enum encoded-format {
     /// Motion JPEG payload bytes.
     mjpeg,
+  }
+
+  /// Decoded pixel layout returned by the OpenCV-style capture API.
+  @since(version = 0.2.0)
+  enum pixel-format {
+    /// Tightly packed 8-bit RGBA pixels.
+    rgba8,
+  }
+
+  /// Camera property identifier for OpenCV-style get/set access.
+  @since(version = 0.2.0)
+  enum capture-property {
+    /// Requested frame width in pixels.
+    frame-width,
+    /// Requested frame height in pixels.
+    frame-height,
+    /// Requested frames per second as an integer.
+    fps,
+    /// Requested transport FOURCC packed into an integer domain.
+    fourcc,
+    /// V4L2 brightness control.
+    brightness,
+    /// V4L2 contrast control.
+    contrast,
+    /// V4L2 saturation control.
+    saturation,
+    /// V4L2 gain control.
+    gain,
+    /// V4L2 auto-exposure toggle where `0.0` is manual and `1.0` is auto.
+    auto-exposure,
+    /// V4L2 absolute exposure value.
+    exposure,
+    /// V4L2 auto-focus toggle where `0.0` is manual and `1.0` is auto.
+    auto-focus,
+    /// V4L2 absolute focus value.
+    focus,
   }
 
   /// Runtime-enforced V4L2 limits.
@@ -92,6 +128,25 @@ interface types {
     /// Encoded payload format.
     format: encoded-format,
   }
+
+  /// One captured decoded frame.
+  @since(version = 0.2.0)
+  record frame {
+    /// Tightly packed decoded frame bytes.
+    bytes: list<u8>,
+    /// Frame width in pixels.
+    width-px: u32,
+    /// Frame height in pixels.
+    height-px: u32,
+    /// Bytes between consecutive rows.
+    stride-bytes: u32,
+    /// Capture timestamp in Unix nanoseconds.
+    timestamp-ns: u64,
+    /// Monotonic per-capture frame sequence number.
+    sequence: u64,
+    /// Decoded pixel format.
+    format: pixel-format,
+  }
 }
 
 /// Stream resource for one opened V4L2 capture session.
@@ -112,6 +167,39 @@ interface capture-stream {
   }
 }
 
+/// OpenCV-style capture resource backed by one V4L2 device.
+@since(version = 0.2.0)
+interface video-capture {
+  @since(version = 0.2.0)
+  use types.{capture-property, frame, v4l2-error};
+
+  /// Opened V4L2 capture resource with lazy stream configuration.
+  @since(version = 0.2.0)
+  resource video-capture {
+    /// Return whether the underlying device is still opened.
+    @since(version = 0.2.0)
+    is-opened: func() -> bool;
+    /// Return the current property value.
+    @since(version = 0.2.0)
+    get: func(property: capture-property) -> result<f64, v4l2-error>;
+    /// Update one property and return whether the value was accepted.
+    @since(version = 0.2.0)
+    set: func(property: capture-property, value: f64) -> result<bool, v4l2-error>;
+    /// Grab, decode, and return the next frame.
+    @since(version = 0.2.0)
+    read: func(timeout-ms: u32) -> result<frame, v4l2-error>;
+    /// Grab and decode the next frame into the internal cache.
+    @since(version = 0.2.0)
+    grab: func(timeout-ms: u32) -> result<bool, v4l2-error>;
+    /// Return the last successfully grabbed frame from the internal cache.
+    @since(version = 0.2.0)
+    retrieve: func() -> result<frame, v4l2-error>;
+    /// Release the active stream and close the underlying device.
+    @since(version = 0.2.0)
+    release: func();
+  }
+}
+
 /// Device resource for one opened V4L2 node.
 @since(version = 0.1.0)
 interface device {
@@ -119,6 +207,8 @@ interface device {
   use capture-stream.{capture-stream};
   @since(version = 0.1.0)
   use types.{capture-mode, openable-device, v4l2-error};
+  @since(version = 0.2.0)
+  use video-capture.{video-capture};
 
   /// Opened V4L2 device resource.
   @since(version = 0.1.0)
@@ -127,11 +217,15 @@ interface device {
     @since(version = 0.1.0)
     info: func() -> openable-device;
     /// Return all supported MJPEG capture modes.
+    /// Stepwise and continuous descriptors are expanded into exact modes.
     @since(version = 0.1.0)
     list-modes: func() -> list<capture-mode>;
     /// Open one active capture stream for the requested exact mode.
     @since(version = 0.1.0)
     open-stream: func(mode: capture-mode) -> result<capture-stream, v4l2-error>;
+    /// Open one OpenCV-style capture resource for this device.
+    @since(version = 0.2.0)
+    open-video-capture: func() -> result<video-capture, v4l2-error>;
   }
 }
 
@@ -148,6 +242,7 @@ interface provider {
   list-openable-paths: func() -> list<string>;
 
   /// Return currently openable V4L2 devices that expose MJPEG capture modes.
+  /// USB metadata fields may be `0` when sysfs metadata is unavailable.
   @since(version = 0.1.0)
   list-openable-devices: func() -> result<list<openable-device>, v4l2-error>;
 
@@ -165,6 +260,7 @@ interface provider {
 world host {
   import types;
   import capture-stream;
+  import video-capture;
   import device;
   import provider;
 }

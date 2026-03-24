@@ -13,5 +13,6 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 wasmtime = { workspace = true, features = ["component-model"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+jpeg-decoder = "0.3"
 nix = { version = "0.28", features = ["ioctl", "mman", "poll", "fs", "event"] }
 v4l2r = "0.0.7"
