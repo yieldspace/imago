@@ -74,6 +74,7 @@ Environment:
 
 Notes:
   - Supported OS: Linux and macOS.
+  - Default install dir: macOS uses /usr/local/bin; Linux uses /usr/local/bin for root and ~/.local/bin for non-root unless --install-dir is set.
   - Release resolution: --tag > latest stable imagod-v* release from GitHub Releases API.
   - imagod feature variants are published as imagod-<target>+<feature1>+<feature2>.
   - Use --prerelease when the latest imagod build is still prerelease-only.
@@ -544,13 +545,23 @@ resolve_target_triple() {
 }
 
 default_install_dir() {
-  if [ "$(id -u)" -eq 0 ]; then
-    printf '/usr/local/bin\n'
-    return 0
-  fi
+  case "$1" in
+    darwin)
+      printf '/usr/local/bin\n'
+      ;;
+    linux)
+      if [ "$(id -u)" -eq 0 ]; then
+        printf '/usr/local/bin\n'
+        return 0
+      fi
 
-  home_dir="$(resolve_home_dir)"
-  printf '%s/.local/bin\n' "${home_dir}"
+      home_dir="$(resolve_home_dir)"
+      printf '%s/.local/bin\n' "${home_dir}"
+      ;;
+    *)
+      die "unsupported OS for default install dir: $1"
+      ;;
+  esac
 }
 
 run_as_root() {
@@ -1540,7 +1551,7 @@ main() {
   if [ -n "${INSTALL_DIR}" ]; then
     install_dir="${INSTALL_DIR}"
   else
-    install_dir="$(default_install_dir)"
+    install_dir="$(default_install_dir "${os}")"
   fi
   validate_install_dir_path "${install_dir}"
 
