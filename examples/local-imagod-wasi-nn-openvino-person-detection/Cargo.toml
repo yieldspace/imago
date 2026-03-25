@@ -10,4 +10,4 @@ name = "local-imagod-wasi-nn-openvino-person-detection-app"
 path = "src/main.rs"
 
 [dependencies]
-wit-bindgen = "0.53.1"
+wit-bindgen = "0.54.0"
