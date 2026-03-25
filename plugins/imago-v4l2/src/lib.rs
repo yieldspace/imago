@@ -3,7 +3,7 @@ use std::cmp::Ordering as CmpOrdering;
 #[cfg(any(test, target_os = "linux"))]
 use std::fs;
 #[cfg(target_os = "linux")]
-use std::io::{self, Cursor};
+use std::io;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
@@ -22,8 +22,6 @@ use imagod_runtime_wasmtime::native_plugins::{
     HasSelf, NativePlugin, NativePluginLinker, NativePluginResult, map_native_plugin_linker_error,
     map_native_plugin_resource_validation_error,
 };
-#[cfg(target_os = "linux")]
-use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
 #[cfg(target_os = "linux")]
 use nix::errno::Errno;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -46,6 +44,10 @@ use v4l::{
     video::{Capture as V4lCaptureDevice, capture::Parameters as V4lCaptureParameters},
 };
 use wasmtime::component::Resource;
+#[cfg(target_os = "linux")]
+use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+#[cfg(target_os = "linux")]
+use zune_jpeg::JpegDecoder;
 
 pub mod imago_v4l2_plugin_bindings {
     wasmtime::component::bindgen!({
@@ -723,13 +725,7 @@ fn set_control_value(
 }
 
 #[cfg(target_os = "linux")]
-fn frame_from_decoded_bytes(
-    bytes: Vec<u8>,
-    width_px: u32,
-    height_px: u32,
-    sequence: u64,
-    timestamp_ns: u64,
-) -> Result<Frame, V4l2Error> {
+fn decoded_rgba_layout(width_px: u32, height_px: u32) -> Result<(u32, usize), V4l2Error> {
     let stride_bytes = width_px.checked_mul(4).ok_or(V4l2Error::TransportFault)?;
     let expected_len = usize::try_from(
         u64::from(stride_bytes)
@@ -737,6 +733,18 @@ fn frame_from_decoded_bytes(
             .ok_or(V4l2Error::TransportFault)?,
     )
     .map_err(|_| V4l2Error::TransportFault)?;
+    Ok((stride_bytes, expected_len))
+}
+
+#[cfg(target_os = "linux")]
+fn frame_from_decoded_bytes(
+    bytes: Vec<u8>,
+    width_px: u32,
+    height_px: u32,
+    sequence: u64,
+    timestamp_ns: u64,
+) -> Result<Frame, V4l2Error> {
+    let (stride_bytes, expected_len) = decoded_rgba_layout(width_px, height_px)?;
     if bytes.len() != expected_len {
         return Err(V4l2Error::TransportFault);
     }
@@ -749,73 +757,6 @@ fn frame_from_decoded_bytes(
         sequence,
         format: FramePixelFormat::Rgba8,
     })
-}
-
-#[cfg(target_os = "linux")]
-fn rgb_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
-    if !bytes.len().is_multiple_of(3) {
-        return Err(V4l2Error::TransportFault);
-    }
-    let pixel_count = bytes.len() / 3;
-    let output_len = pixel_count
-        .checked_mul(4)
-        .ok_or(V4l2Error::TransportFault)?;
-    let mut rgba = Vec::with_capacity(output_len);
-    for chunk in bytes.chunks_exact(3) {
-        rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
-    }
-    Ok(rgba)
-}
-
-#[cfg(target_os = "linux")]
-fn l8_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
-    let output_len = bytes
-        .len()
-        .checked_mul(4)
-        .ok_or(V4l2Error::TransportFault)?;
-    let mut rgba = Vec::with_capacity(output_len);
-    for value in bytes {
-        rgba.extend_from_slice(&[*value, *value, *value, 0xff]);
-    }
-    Ok(rgba)
-}
-
-#[cfg(target_os = "linux")]
-fn l16_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
-    if !bytes.len().is_multiple_of(2) {
-        return Err(V4l2Error::TransportFault);
-    }
-    let pixel_count = bytes.len() / 2;
-    let output_len = pixel_count
-        .checked_mul(4)
-        .ok_or(V4l2Error::TransportFault)?;
-    let mut rgba = Vec::with_capacity(output_len);
-    for chunk in bytes.chunks_exact(2) {
-        let value = u16::from_be_bytes([chunk[0], chunk[1]]);
-        let v8 = (value >> 8) as u8;
-        rgba.extend_from_slice(&[v8, v8, v8, 0xff]);
-    }
-    Ok(rgba)
-}
-
-#[cfg(target_os = "linux")]
-fn cmyk32_to_rgba(bytes: &[u8]) -> Result<Vec<u8>, V4l2Error> {
-    if !bytes.len().is_multiple_of(4) {
-        return Err(V4l2Error::TransportFault);
-    }
-    let pixel_count = bytes.len() / 4;
-    let output_len = pixel_count
-        .checked_mul(4)
-        .ok_or(V4l2Error::TransportFault)?;
-    let mut rgba = Vec::with_capacity(output_len);
-    for chunk in bytes.chunks_exact(4) {
-        let k = u16::from(255 - chunk[3]);
-        let r = ((u16::from(255 - chunk[0]) * k) / 255) as u8;
-        let g = ((u16::from(255 - chunk[1]) * k) / 255) as u8;
-        let b = ((u16::from(255 - chunk[2]) * k) / 255) as u8;
-        rgba.extend_from_slice(&[r, g, b, 0xff]);
-    }
-    Ok(rgba)
 }
 
 #[cfg(target_os = "linux")]
@@ -843,29 +784,39 @@ fn decode_mjpeg_frame(
     sequence: u64,
     timestamp_ns: u64,
 ) -> Result<Frame, V4l2Error> {
-    let mut decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(jpeg_bytes), options);
     let max_decoded_bytes = limits
         .max_frame_bytes
         .checked_mul(4)
         .ok_or(V4l2Error::OperationNotSupported)?;
-    decoder.set_max_decoding_buffer_size(max_decoded_bytes);
-    let decoded = decoder
-        .decode()
+    decoder
+        .decode_headers()
         .map_err(|err| V4l2Error::Other(format!("jpeg decode failed: {err}")))?;
-    let info = decoder.info().ok_or(V4l2Error::TransportFault)?;
-    let rgba = match info.pixel_format {
-        JpegPixelFormat::RGB24 => rgb_to_rgba(&decoded)?,
-        JpegPixelFormat::L8 => l8_to_rgba(&decoded)?,
-        JpegPixelFormat::L16 => l16_to_rgba(&decoded)?,
-        JpegPixelFormat::CMYK32 => cmyk32_to_rgba(&decoded)?,
-    };
-    frame_from_decoded_bytes(
-        rgba,
-        u32::from(info.width),
-        u32::from(info.height),
-        sequence,
-        timestamp_ns,
-    )
+    let (decoded_width, decoded_height) = decoder.dimensions().ok_or(V4l2Error::TransportFault)?;
+    let width_px = u32::try_from(decoded_width).map_err(|_| V4l2Error::TransportFault)?;
+    let height_px = u32::try_from(decoded_height).map_err(|_| V4l2Error::TransportFault)?;
+    let expected_output_colorspace = decoder
+        .output_colorspace()
+        .ok_or(V4l2Error::TransportFault)?;
+    if expected_output_colorspace != ColorSpace::RGBA {
+        return Err(V4l2Error::OperationNotSupported);
+    }
+    let (_, expected_len) = decoded_rgba_layout(width_px, height_px)?;
+    if expected_len > max_decoded_bytes {
+        return Err(V4l2Error::TransportFault);
+    }
+    let output_len = decoder
+        .output_buffer_size()
+        .ok_or(V4l2Error::TransportFault)?;
+    if output_len != expected_len {
+        return Err(V4l2Error::TransportFault);
+    }
+    let mut rgba = vec![0; output_len];
+    decoder
+        .decode_into(&mut rgba)
+        .map_err(|err| V4l2Error::Other(format!("jpeg decode failed: {err}")))?;
+    frame_from_decoded_bytes(rgba, width_px, height_px, sequence, timestamp_ns)
 }
 
 fn normalize_video_path(raw: &str) -> Result<String, String> {
@@ -1842,14 +1793,27 @@ fn retrieve_video_capture_frame(state: &VideoCaptureState) -> Result<Frame, V4l2
 }
 
 #[cfg(target_os = "linux")]
+fn cache_and_return_video_capture_frame(state: &mut VideoCaptureState, frame: Frame) -> Frame {
+    state.last_frame = Some(frame.clone());
+    frame
+}
+
+#[cfg(target_os = "linux")]
 fn read_video_capture_frame(
     state: &mut VideoCaptureState,
     device: &Arc<V4lDevice>,
     limits: &V4l2LimitsConfig,
     timeout_ms: u32,
 ) -> Result<Frame, V4l2Error> {
-    grab_video_capture_frame(state, device, limits, timeout_ms)?;
-    retrieve_video_capture_frame(state)
+    let stream = ensure_video_capture_stream(state, device, limits)?;
+    let encoded = read_next_frame(stream, limits, timeout_ms)?;
+    let frame = decode_mjpeg_frame(
+        &encoded.bytes,
+        limits,
+        encoded.sequence,
+        encoded.timestamp_ns,
+    )?;
+    Ok(cache_and_return_video_capture_frame(state, frame))
 }
 
 #[cfg(target_os = "linux")]
@@ -2397,10 +2361,53 @@ impl imago_v4l2_plugin_bindings::imago::v4l2::video_capture::HostVideoCapture fo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    const RGB_JPEG_FIXTURE_BASE64: &str = "/9j/4AAQSkZJRgABAgAAAQABAAD/wAARCAABAAIDABEAAREBAhEB/9sAQwABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/9sAQwEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMAAAERAhEAPwD2b4Mf8ke+FH/ZNfAv/qL6VX/MRxz/AMltxh/2VPEH/q2xZ/zI/tRf+VmX7RP/ALTq+lx/6/8A8QT/2Q==";
+    #[cfg(target_os = "linux")]
+    const GRAY_JPEG_FIXTURE_BASE64: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAIBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACv/EABoQAAEFAQAAAAAAAAAAAAAAAAkABwg5eLj/2gAIAQEAAD8AXyJ2rIaeAIb86tyv/9k=";
+    #[cfg(target_os = "linux")]
+    const CMYK_JPEG_FIXTURE_BASE64: &str = "/9j/7gAOQWRvYmUAZAAAAAAC/9sAQwABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/9sAQwEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/8AAFAgAAQACBAERAAIRAQMRAQQRAP/EABUAAQEAAAAAAAAAAAAAAAAAAAcL/8QAGhAAAgIDAAAAAAAAAAAAAAAAAAgGBzh4t//EABQBAQAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADgQBAAIRAxEEAAA/AJ/4Dw2WU7L7AXL0WRn/2Q==";
 
     fn resources_with_v4l2(value: JsonValue) -> BTreeMap<String, JsonValue> {
         BTreeMap::from([(V4L2_RESOURCE_KEY.to_string(), value)])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn decode_fixture_frame(base64: &str) -> Frame {
+        let jpeg = BASE64_STANDARD
+            .decode(base64)
+            .expect("fixture base64 should decode");
+        decode_mjpeg_frame(&jpeg, &V4l2LimitsConfig::default(), 7, 11)
+            .expect("fixture jpeg should decode")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sample_mode() -> CaptureMode {
+        CaptureMode {
+            format: EncodedFormat::Mjpeg,
+            width_px: 2,
+            height_px: 1,
+            fps_num: 30,
+            fps_den: 1,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sample_video_capture_state(last_frame: Option<Frame>) -> VideoCaptureState {
+        VideoCaptureState {
+            selected_mode: sample_mode(),
+            selection: VideoCaptureSelection {
+                width_px: None,
+                height_px: None,
+                fps: None,
+            },
+            stream: None,
+            last_frame,
+        }
     }
 
     #[test]
@@ -2476,52 +2483,149 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn rgb_to_rgba_requires_complete_pixels() {
-        let err = rgb_to_rgba(&[0x01, 0x02]).expect_err("incomplete RGB pixels should fail");
-        assert!(matches!(err, V4l2Error::TransportFault));
-        assert_eq!(
-            rgb_to_rgba(&[1, 2, 3, 4, 5, 6]).expect("RGB conversion should succeed"),
-            vec![1, 2, 3, 0xff, 4, 5, 6, 0xff]
+    fn decode_mjpeg_frame_decodes_rgb_fixture_to_rgba8() {
+        let frame = decode_fixture_frame(RGB_JPEG_FIXTURE_BASE64);
+        assert_eq!(frame.width_px, 2);
+        assert_eq!(frame.height_px, 1);
+        assert_eq!(frame.stride_bytes, 8);
+        assert_eq!(frame.timestamp_ns, 11);
+        assert_eq!(frame.sequence, 7);
+        assert_eq!(frame.format, FramePixelFormat::Rgba8);
+        assert_eq!(frame.bytes.len(), 8);
+
+        let first = &frame.bytes[..4];
+        let second = &frame.bytes[4..8];
+        assert_eq!(first[3], 0xff);
+        assert_eq!(second[3], 0xff);
+        assert!(
+            first[0] > first[1],
+            "first pixel should be red-dominant: {first:?}"
+        );
+        assert!(
+            first[0] > first[2],
+            "first pixel should be red-dominant: {first:?}"
+        );
+        assert!(
+            second[1] > second[0],
+            "second pixel should be green-dominant: {second:?}"
+        );
+        assert!(
+            second[1] > second[2],
+            "second pixel should be green-dominant: {second:?}"
         );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn l8_to_rgba_converts_grayscale_with_alpha() {
-        assert_eq!(
-            l8_to_rgba(&[0x00, 0x7f, 0xff]).expect("L8 conversion should succeed"),
-            vec![
-                0x00, 0x00, 0x00, 0xff, 0x7f, 0x7f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff
-            ]
+    fn decode_mjpeg_frame_decodes_grayscale_fixture_to_rgba8() {
+        let frame = decode_fixture_frame(GRAY_JPEG_FIXTURE_BASE64);
+        assert_eq!(frame.width_px, 2);
+        assert_eq!(frame.height_px, 1);
+        assert_eq!(frame.stride_bytes, 8);
+        assert_eq!(frame.format, FramePixelFormat::Rgba8);
+        assert_eq!(frame.bytes.len(), 8);
+        assert_eq!(frame.bytes[0], frame.bytes[1]);
+        assert_eq!(frame.bytes[1], frame.bytes[2]);
+        assert_eq!(frame.bytes[3], 0xff);
+        assert_eq!(frame.bytes[4], frame.bytes[5]);
+        assert_eq!(frame.bytes[5], frame.bytes[6]);
+        assert_eq!(frame.bytes[7], 0xff);
+        assert!(
+            frame.bytes[0] < frame.bytes[4],
+            "gray fixture should brighten across pixels"
         );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn l16_to_rgba_converts_u16_grayscale_to_rgba() {
-        assert_eq!(
-            l16_to_rgba(&[0x12, 0x12, 0x34, 0x34]).expect("L16 conversion should succeed"),
-            vec![0x12, 0x12, 0x12, 0xff, 0x34, 0x34, 0x34, 0xff]
-        );
-        let err = l16_to_rgba(&[0x12]).expect_err("incomplete L16 pixels should fail");
+    fn decode_mjpeg_frame_decodes_cmyk_fixture_to_rgba8() {
+        let frame = decode_fixture_frame(CMYK_JPEG_FIXTURE_BASE64);
+        assert_eq!(frame.width_px, 2);
+        assert_eq!(frame.height_px, 1);
+        assert_eq!(frame.stride_bytes, 8);
+        assert_eq!(frame.format, FramePixelFormat::Rgba8);
+        assert_eq!(frame.bytes.len(), 8);
+        assert_eq!(&frame.bytes[..4], &[0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(frame.bytes[7], 0xff);
+        assert!(frame.bytes[4] < 0xff, "second pixel should not stay white");
+        assert_eq!(frame.bytes[4], frame.bytes[5]);
+        assert_eq!(frame.bytes[5], frame.bytes[6]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn decode_mjpeg_frame_rejects_rgba_output_larger_than_limit() {
+        let jpeg = BASE64_STANDARD
+            .decode(RGB_JPEG_FIXTURE_BASE64)
+            .expect("fixture base64 should decode");
+        let limits = V4l2LimitsConfig {
+            max_frame_bytes: 1,
+            ..V4l2LimitsConfig::default()
+        };
+        let err = decode_mjpeg_frame(&jpeg, &limits, 0, 0)
+            .expect_err("oversized decoded frame must fail");
         assert!(matches!(err, V4l2Error::TransportFault));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cmyk32_to_rgba_converts_cmyk_to_rgba() {
-        assert_eq!(
-            cmyk32_to_rgba(&[
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0xff,
-            ])
-            .expect("CMYK conversion should succeed"),
-            vec![
-                255, 255, 255, 0xff, 127, 127, 127, 0xff, 0x00, 0x00, 0x00, 0xff,
-            ]
+    fn decode_mjpeg_frame_maps_truncated_jpeg_to_decode_error() {
+        let mut jpeg = BASE64_STANDARD
+            .decode(RGB_JPEG_FIXTURE_BASE64)
+            .expect("fixture base64 should decode");
+        jpeg.truncate(jpeg.len().saturating_sub(64));
+        let err = decode_mjpeg_frame(&jpeg, &V4l2LimitsConfig::default(), 0, 0)
+            .expect_err("truncated jpeg must fail");
+        assert!(matches!(err, V4l2Error::Other(message) if message.contains("jpeg decode failed")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retrieve_video_capture_frame_requires_prior_grab() {
+        let state = sample_video_capture_state(None);
+        let err = retrieve_video_capture_frame(&state).expect_err("empty cache must fail");
+        assert!(
+            matches!(err, V4l2Error::Other(message) if message.contains("no grabbed frame available"))
         );
-        let err =
-            cmyk32_to_rgba(&[0x00, 0x00, 0x00]).expect_err("incomplete CMYK pixels should fail");
-        assert!(matches!(err, V4l2Error::TransportFault));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retrieve_video_capture_frame_returns_last_grabbed_frame() {
+        let cached = decode_fixture_frame(RGB_JPEG_FIXTURE_BASE64);
+        let state = sample_video_capture_state(Some(cached.clone()));
+        let frame = retrieve_video_capture_frame(&state).expect("cached frame should return");
+        assert_eq!(frame.bytes, cached.bytes);
+        assert_eq!(frame.width_px, cached.width_px);
+        assert_eq!(frame.height_px, cached.height_px);
+        assert_eq!(frame.stride_bytes, cached.stride_bytes);
+        assert_eq!(frame.timestamp_ns, cached.timestamp_ns);
+        assert_eq!(frame.sequence, cached.sequence);
+        assert_eq!(frame.format, cached.format);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_and_return_video_capture_frame_updates_retrieve_cache() {
+        let mut state = sample_video_capture_state(None);
+        let cached = decode_fixture_frame(RGB_JPEG_FIXTURE_BASE64);
+        let returned = cache_and_return_video_capture_frame(&mut state, cached.clone());
+        assert_eq!(returned.bytes, cached.bytes);
+        assert_eq!(returned.width_px, cached.width_px);
+        assert_eq!(returned.height_px, cached.height_px);
+        assert_eq!(returned.stride_bytes, cached.stride_bytes);
+        assert_eq!(returned.timestamp_ns, cached.timestamp_ns);
+        assert_eq!(returned.sequence, cached.sequence);
+        assert_eq!(returned.format, cached.format);
+
+        let retrieved = retrieve_video_capture_frame(&state).expect("cached frame should return");
+        assert_eq!(retrieved.bytes, cached.bytes);
+        assert_eq!(retrieved.width_px, cached.width_px);
+        assert_eq!(retrieved.height_px, cached.height_px);
+        assert_eq!(retrieved.stride_bytes, cached.stride_bytes);
+        assert_eq!(retrieved.timestamp_ns, cached.timestamp_ns);
+        assert_eq!(retrieved.sequence, cached.sequence);
+        assert_eq!(retrieved.format, cached.format);
     }
 
     #[cfg(target_os = "linux")]

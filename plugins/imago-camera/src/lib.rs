@@ -2,6 +2,9 @@
 const CAMERA_ID_PREFIX: &str = "v4l2:";
 
 #[cfg(any(target_arch = "wasm32", test))]
+const CAMERA_GRAB_FALSE_ERROR: &str = "camera grab returned false without cached frame";
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn camera_id_from_path(path: &str) -> String {
     format!("{CAMERA_ID_PREFIX}{path}")
 }
@@ -20,13 +23,28 @@ fn is_camera_device_path(path: &str) -> bool {
     !path.is_empty() && path.starts_with("/dev/video")
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn read_frame_via_cache<T, E>(
+    timeout_ms: u32,
+    grab: impl FnOnce(u32) -> Result<bool, E>,
+    retrieve: impl FnOnce() -> Result<T, E>,
+    grab_false_error: impl FnOnce() -> E,
+) -> Result<T, E> {
+    match grab(timeout_ms)? {
+        true => retrieve(),
+        false => Err(grab_false_error()),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod component {
     use std::cell::{Cell, RefCell};
 
+    use super::CAMERA_GRAB_FALSE_ERROR;
     use super::camera_id_from_path;
     use super::is_camera_device_path;
     use super::path_sort_key;
+    use super::read_frame_via_cache;
 
     wit_bindgen::generate!({
         path: "wit",
@@ -243,10 +261,17 @@ mod component {
 
         fn read(&self, timeout_ms: u32) -> Result<Frame, CameraError> {
             self.with_capture(|capture: &V4l2VideoCapture| {
-                capture
-                    .read(timeout_ms)
-                    .map(camera_frame_from_v4l2)
-                    .map_err(map_v4l2_error)
+                read_frame_via_cache(
+                    timeout_ms,
+                    |timeout_ms| capture.grab(timeout_ms).map_err(map_v4l2_error),
+                    || {
+                        capture
+                            .retrieve()
+                            .map(camera_frame_from_v4l2)
+                            .map_err(map_v4l2_error)
+                    },
+                    || camera_error_other(CAMERA_GRAB_FALSE_ERROR),
+                )
             })
         }
 
@@ -284,9 +309,13 @@ mod component {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
+    use super::CAMERA_GRAB_FALSE_ERROR;
     use super::camera_id_from_path;
     use super::is_camera_device_path;
     use super::path_sort_key;
+    use super::read_frame_via_cache;
 
     #[test]
     fn camera_id_from_path_prefixes_v4l2_scheme() {
@@ -303,5 +332,86 @@ mod tests {
     #[test]
     fn path_sort_key_uses_numeric_video_index() {
         assert!(path_sort_key("/dev/video2") < path_sort_key("/dev/video10"));
+    }
+
+    #[test]
+    fn read_frame_via_cache_retrieves_after_successful_grab() {
+        let calls = RefCell::new(Vec::new());
+        let frame = read_frame_via_cache(
+            5_000,
+            |timeout_ms| {
+                assert_eq!(timeout_ms, 5_000);
+                calls.borrow_mut().push("grab");
+                Ok::<_, String>(true)
+            },
+            || {
+                calls.borrow_mut().push("retrieve");
+                Ok::<_, String>(7_u64)
+            },
+            || CAMERA_GRAB_FALSE_ERROR.to_string(),
+        )
+        .expect("helper should return retrieved frame");
+        assert_eq!(frame, 7);
+        assert_eq!(&*calls.borrow(), &["grab", "retrieve"]);
+    }
+
+    #[test]
+    fn read_frame_via_cache_propagates_grab_error_without_retrieve() {
+        let calls = RefCell::new(Vec::new());
+        let err = read_frame_via_cache(
+            100,
+            |_| {
+                calls.borrow_mut().push("grab");
+                Err::<bool, _>("grab failed".to_string())
+            },
+            || {
+                calls.borrow_mut().push("retrieve");
+                Ok::<_, String>(1)
+            },
+            || CAMERA_GRAB_FALSE_ERROR.to_string(),
+        )
+        .expect_err("grab failure must propagate");
+        assert_eq!(err, "grab failed");
+        assert_eq!(&*calls.borrow(), &["grab"]);
+    }
+
+    #[test]
+    fn read_frame_via_cache_maps_false_grab_to_fixed_error() {
+        let calls = RefCell::new(Vec::new());
+        let err = read_frame_via_cache(
+            250,
+            |_| {
+                calls.borrow_mut().push("grab");
+                Ok::<_, String>(false)
+            },
+            || {
+                calls.borrow_mut().push("retrieve");
+                Ok::<_, String>(1)
+            },
+            || CAMERA_GRAB_FALSE_ERROR.to_string(),
+        )
+        .expect_err("false grab must become error");
+        assert_eq!(err, CAMERA_GRAB_FALSE_ERROR);
+        assert_eq!(&*calls.borrow(), &["grab"]);
+    }
+
+    #[test]
+    fn read_frame_via_cache_propagates_retrieve_error_after_grab() {
+        let calls = RefCell::new(Vec::new());
+        let err = read_frame_via_cache(
+            1_000,
+            |_| {
+                calls.borrow_mut().push("grab");
+                Ok::<_, String>(true)
+            },
+            || {
+                calls.borrow_mut().push("retrieve");
+                Err::<u64, _>("retrieve failed".to_string())
+            },
+            || CAMERA_GRAB_FALSE_ERROR.to_string(),
+        )
+        .expect_err("retrieve failure must propagate");
+        assert_eq!(err, "retrieve failed");
+        assert_eq!(&*calls.borrow(), &["grab", "retrieve"]);
     }
 }

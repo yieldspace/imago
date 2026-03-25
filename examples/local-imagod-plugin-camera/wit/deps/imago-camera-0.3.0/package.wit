@@ -119,13 +119,13 @@ interface provider {
     /// Update one property and return whether the value was accepted.
     @since(version = 0.3.0)
     set: func(property: capture-property, value: f64) -> result<bool, camera-error>;
-    /// Grab, decode, and return the next frame.
+    /// Grab, decode, cache, and return the next frame.
     @since(version = 0.3.0)
     read: func(timeout-ms: u32) -> result<frame, camera-error>;
     /// Grab and decode the next frame into the internal cache.
     @since(version = 0.3.0)
     grab: func(timeout-ms: u32) -> result<bool, camera-error>;
-    /// Return the last successfully grabbed frame from the internal cache.
+    /// Return the last frame cached by `read` or `grab`.
     @since(version = 0.3.0)
     retrieve: func() -> result<frame, camera-error>;
     /// Release the active stream and close the underlying device.
