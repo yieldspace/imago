@@ -191,7 +191,6 @@ fn looks_like_transport_connect_error(combined_lower: &str) -> bool {
     combined_lower.contains("failed to spawn ssh transport")
         || combined_lower.contains("ssh transport")
         || combined_lower.contains("local socket transport")
-        || combined_lower.contains("connect failed")
         || looks_like_missing_control_socket(combined_lower)
 }
 
@@ -354,6 +353,15 @@ mod tests {
         assert_eq!(
             summarize_command_failure("service.logs", &err),
             "connect stage failed"
+        );
+    }
+
+    #[test]
+    fn summarize_command_failure_does_not_treat_server_side_connect_failed_as_transport_connect() {
+        let err = anyhow!("quic connect failed: connection refused");
+        assert_eq!(
+            summarize_command_failure("service.start", &err),
+            "operation failed"
         );
     }
 
