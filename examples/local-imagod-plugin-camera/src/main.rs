@@ -66,9 +66,20 @@ fn main() {
     refresh_property(&capture, imago::camera::types::CaptureProperty::FrameHeight);
     refresh_property(&capture, imago::camera::types::CaptureProperty::Fps);
 
-    print_frame("camera read frame", capture.read(5_000));
+    let read_sequence = print_frame("camera read frame", capture.read(5_000));
+    if let Some(read_sequence) = read_sequence {
+        let retrieved_sequence = print_frame("camera retrieve after read", capture.retrieve());
+        if let Some(retrieved_sequence) = retrieved_sequence {
+            println!(
+                "camera example: read/retrieve sequence match={}",
+                retrieved_sequence == read_sequence
+            );
+        }
+    }
     match capture.grab(5_000) {
-        Ok(true) => print_frame("camera retrieve frame", capture.retrieve()),
+        Ok(true) => {
+            let _ = print_frame("camera retrieve frame", capture.retrieve());
+        }
         Ok(false) => println!("camera example: grab returned false"),
         Err(err) => eprintln!("camera example: grab failed: {err:?}"),
     }
@@ -114,7 +125,7 @@ fn refresh_property(
 fn print_frame(
     label: &str,
     result: Result<imago::camera::types::Frame, imago::camera::types::CameraError>,
-) {
+) -> Option<u64> {
     match result {
         Ok(frame) => {
             println!(
@@ -127,9 +138,11 @@ fn print_frame(
                 frame.stride_bytes,
                 frame.timestamp_ns
             );
+            Some(frame.sequence)
         }
         Err(err) => {
             eprintln!("{label}: failed: {err:?}");
+            None
         }
     }
 }

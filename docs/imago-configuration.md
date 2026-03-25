@@ -726,7 +726,7 @@ path = "../../target/wasm32-wasip2/release/imago_plugin_imago_camera.wasm"
 "imago:v4l2" = ["*"]
 ```
 
-The service itself still needs `[capabilities.deps] "imago:camera" = ["*"]` to call the camera API. The app then opens a camera by index and uses `read` or `grab`/`retrieve` to obtain `RGBA8` frames. A typical local flow is:
+The service itself still needs `[capabilities.deps] "imago:camera" = ["*"]` to call the camera API. The app then opens a camera by index and uses `read` or `grab`/`retrieve` to obtain `RGBA8` frames. `read()` also refreshes the internal last-frame cache, so an immediate `retrieve()` returns that same fresh frame instead of an older grab. A typical local flow is:
 
 ```bash
 cd examples/local-imagod-plugin-camera

@@ -112,6 +112,8 @@ wit-parser = "0.245.1"
 web-transport-quinn = "0.11.8"
 syn = "2.0.117"
 toml_edit = "0.25.4"
+zune-core = "0.5.1"
+zune-jpeg = "0.5.14"
 
 imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.9.1" }
 imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.9.1" }

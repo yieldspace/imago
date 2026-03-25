@@ -3,7 +3,7 @@
 ## 目的
 
 同一マシンで Wasm plugin（`imago:camera@0.3.0`）を使い、`imago:v4l2@0.2.0` 上の USB-backed V4L2 camera を OpenCV 風 `VideoCapture` API で操作するサンプルです。
-この plugin は V4L2 wrapper のみを提供し、Wasm guest 内に USB/UVC fallback は持ちません。取得フレームは `RGBA8` です。
+この plugin は V4L2 wrapper のみを提供し、Wasm guest 内に USB/UVC fallback は持ちません。取得フレームは `RGBA8` で、`read()` 直後の `retrieve()` も同じ最新 frame を返します。
 
 ## 前提
 
@@ -38,6 +38,8 @@ cargo run -p imago-cli -- service logs local-imagod-plugin-camera-app --tail 200
 - `camera example: is_opened=true`
 - `camera example: set(FrameWidth) ->`
 - `camera read frame`
+- `camera retrieve after read`
+- `camera example: read/retrieve sequence match=true`
 - `camera retrieve frame`
 
 ## Troubleshooting
