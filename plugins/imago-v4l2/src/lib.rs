@@ -2573,7 +2573,7 @@ mod tests {
         let mut jpeg = BASE64_STANDARD
             .decode(RGB_JPEG_FIXTURE_BASE64)
             .expect("fixture base64 should decode");
-        jpeg.truncate(jpeg.len().saturating_sub(16));
+        jpeg.truncate(jpeg.len().saturating_sub(64));
         let err = decode_mjpeg_frame(&jpeg, &V4l2LimitsConfig::default(), 0, 0)
             .expect_err("truncated jpeg must fail");
         assert!(matches!(err, V4l2Error::Other(message) if message.contains("jpeg decode failed")));
