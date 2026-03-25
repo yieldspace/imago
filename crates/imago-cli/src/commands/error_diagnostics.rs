@@ -7,6 +7,7 @@ const HINT_BUILD_FAILED: &str =
 const HINT_TARGET_CONFIG: &str = "Check `imago.toml` target settings or the `--target` value. Config targets must use remote=ssh://[user@]host[:port][?socket=/abs/path]. Direct selectors accept ssh://[user@]host[:port][?socket=/abs/path] or user@host.";
 const HINT_REMOTE_PARSE: &str = "Fix the target remote format. Use ssh://[user@]host[:port][?socket=/abs/path], or use user@host only for the shorthand form without port/socket.";
 const HINT_TRANSPORT_CONNECT: &str = "For loopback targets without user/port, check the local control socket path and permissions. For other targets, check SSH reachability, ssh configuration, and remote imagod proxy-stdio availability, then retry.";
+const HINT_MISSING_CONTROL_SOCKET: &str = "The target control socket was not found. Check that imagod is running and that the configured ?socket path is correct.";
 const HINT_BUSY: &str = "The target is busy. Wait for in-flight operations to finish and retry.";
 const HINT_COMMAND_START_STREAM_INTERRUPTED: &str = "The command.start stream was interrupted. The command may still be running on target; inspect target state/logs before retrying service deploy/service start/service stop.";
 const HINT_STORAGE_QUOTA: &str =
@@ -86,11 +87,7 @@ pub fn summarize_command_failure(_command: &str, err: &Error) -> String {
         return "load-config stage failed".to_string();
     }
 
-    if combined_lower.contains("failed to spawn ssh transport")
-        || combined_lower.contains("ssh transport")
-        || combined_lower.contains("local socket transport")
-        || combined_lower.contains("connect failed")
-    {
+    if looks_like_transport_connect_error(&combined_lower) {
         return "connect stage failed".to_string();
     }
 
@@ -150,10 +147,12 @@ fn append_hints(err: &Error, hints: &mut Vec<String>) {
         push_unique(hints, HINT_REMOTE_PARSE);
     }
 
-    if combined_lower.contains("failed to spawn ssh transport")
-        || combined_lower.contains("ssh transport")
-        || combined_lower.contains("local socket transport")
-    {
+    let looks_like_missing_socket = looks_like_missing_control_socket(&combined_lower);
+    if looks_like_missing_socket {
+        push_unique(hints, HINT_MISSING_CONTROL_SOCKET);
+    }
+
+    if looks_like_transport_connect_error(&combined_lower) && !looks_like_missing_socket {
         push_unique(hints, HINT_TRANSPORT_CONNECT);
     }
 
@@ -181,6 +180,19 @@ fn append_hints(err: &Error, hints: &mut Vec<String>) {
     if combined.contains("E_PRECONDITION_FAILED") || combined.contains("PreconditionFailed") {
         push_unique(hints, HINT_PRECONDITION_FAILED);
     }
+}
+
+fn looks_like_missing_control_socket(combined_lower: &str) -> bool {
+    combined_lower.contains("cannot connect to the imagod daemon at unix://")
+        && combined_lower.contains("is the imagod daemon running?")
+}
+
+fn looks_like_transport_connect_error(combined_lower: &str) -> bool {
+    combined_lower.contains("failed to spawn ssh transport")
+        || combined_lower.contains("ssh transport")
+        || combined_lower.contains("local socket transport")
+        || combined_lower.contains("connect failed")
+        || looks_like_missing_control_socket(combined_lower)
 }
 
 fn normalize_error_summary(command: &str, summary: &str) -> String {
@@ -260,6 +272,17 @@ mod tests {
     }
 
     #[test]
+    fn includes_missing_socket_hint_for_docker_style_daemon_message() {
+        let err = anyhow!(
+            "Cannot connect to the imagod daemon at unix:///tmp/imagod.sock. Is the imagod daemon running?"
+        );
+
+        let formatted = format_command_error("service.logs", &err);
+        assert!(formatted.contains("control socket was not found"));
+        assert!(formatted.contains("configured ?socket path"));
+    }
+
+    #[test]
     fn includes_fallback_hint_when_no_rule_matches() {
         let err = anyhow!("unexpected checksum mismatch in local cache");
 
@@ -317,6 +340,17 @@ mod tests {
     #[test]
     fn summarize_command_failure_reports_connect_stage_for_local_socket_transport() {
         let err = anyhow!("local socket transport connect failed for /tmp/imagod.sock");
+        assert_eq!(
+            summarize_command_failure("service.logs", &err),
+            "connect stage failed"
+        );
+    }
+
+    #[test]
+    fn summarize_command_failure_reports_connect_stage_for_docker_style_daemon_message() {
+        let err = anyhow!(
+            "Cannot connect to the imagod daemon at unix:///tmp/imagod.sock. Is the imagod daemon running?"
+        );
         assert_eq!(
             summarize_command_failure("service.logs", &err),
             "connect stage failed"

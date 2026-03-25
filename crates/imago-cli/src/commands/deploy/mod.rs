@@ -417,6 +417,21 @@ fn format_local_proxy_stderr(stderr: &str) -> Option<String> {
     Some(lines.join(" | "))
 }
 
+#[cfg(unix)]
+fn format_unix_socket_endpoint(socket_path: &str) -> String {
+    format!("unix://{socket_path}")
+}
+
+#[cfg(unix)]
+fn missing_imagod_socket_error(err: std::io::Error, socket_path: &str) -> anyhow::Error {
+    Err::<(), std::io::Error>(err)
+        .context(format!(
+            "Cannot connect to the imagod daemon at {}. Is the imagod daemon running?",
+            format_unix_socket_endpoint(socket_path)
+        ))
+        .expect_err("missing socket errors should remain failures")
+}
+
 async fn capture_local_proxy_stderr(inner: &mut ProcessIo) -> Option<String> {
     let mut child = inner.child.take()?;
     terminate_ssh_process(&mut child);
@@ -1864,11 +1879,15 @@ async fn connect_direct_socket_with_timeout(
             open_write_timeout.as_millis()
         )
     })?
-    .with_context(|| {
-        format!(
-            "local socket transport connect failed for {}",
-            session.socket_path
-        )
+    .map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            missing_imagod_socket_error(err, &session.socket_path)
+        } else {
+            anyhow::Error::from(err).context(format!(
+                "local socket transport connect failed for {}",
+                session.socket_path
+            ))
+        }
     })
 }
 
@@ -3624,6 +3643,35 @@ mod tests {
             err.to_string()
                 .contains("closed in the middle of a response")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_socket_request_response_reports_daemon_not_running_when_socket_missing() {
+        let socket_path = new_temp_socket_path("direct-missing-socket");
+        let session = DirectSocketTargetSession {
+            socket_path: socket_path.display().to_string(),
+        };
+        let request = encode_frame(b"request-frame");
+
+        let err = session
+            .request_response_bytes(
+                &request,
+                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect_err("missing socket must fail");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot connect to the imagod daemon at")
+        );
+        assert!(
+            err.to_string()
+                .contains(&format!("unix://{}", socket_path.display()))
+        );
+        assert!(err.to_string().contains("Is the imagod daemon running?"));
     }
 
     #[test]
