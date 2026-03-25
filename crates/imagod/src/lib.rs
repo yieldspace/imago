@@ -1,7 +1,11 @@
 //! Public library entrypoints for embedding `imagod` manager/runner dispatch.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use anyhow::Context;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
 use imago_plugin_imago_admin::ImagoAdminPlugin;
 use imago_plugin_imago_experimental_gpio::ImagoExperimentalGpioPlugin;
@@ -383,6 +387,21 @@ async fn run_proxy_stdio(_socket_path: Option<PathBuf>) -> Result<(), anyhow::Er
 }
 
 #[cfg(unix)]
+fn format_unix_socket_endpoint(socket_path: &Path) -> String {
+    format!("unix://{}", socket_path.display())
+}
+
+#[cfg(unix)]
+fn missing_imagod_socket_error(err: std::io::Error, socket_path: &Path) -> anyhow::Error {
+    Err::<(), std::io::Error>(err)
+        .context(format!(
+            "Cannot connect to the imagod daemon at {}. Is the imagod daemon running?",
+            format_unix_socket_endpoint(socket_path)
+        ))
+        .expect_err("missing socket errors should remain failures")
+}
+
+#[cfg(unix)]
 async fn proxy_stdio_streams<R, W>(
     socket_path: PathBuf,
     mut input: R,
@@ -393,7 +412,15 @@ where
     W: AsyncWrite + Unpin + Send,
 {
     while let Some(message) = read_stdio_message(&mut input).await? {
-        let mut stream = tokio::net::UnixStream::connect(&socket_path).await?;
+        let mut stream = tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    missing_imagod_socket_error(err, &socket_path)
+                } else {
+                    anyhow::Error::from(err)
+                }
+            })?;
         stream.write_all(&message).await?;
         stream.write_all(&STDIO_MESSAGE_TERMINATOR).await?;
         tokio::io::copy(&mut stream, &mut output).await?;
@@ -799,6 +826,40 @@ mod tests {
             expected.extend_from_slice(&STDIO_MESSAGE_TERMINATOR);
             assert_eq!(output.bytes(), expected);
             std::fs::remove_file(&socket_path).expect("socket file should be removed");
+        }
+
+        #[tokio::test]
+        async fn proxy_stdio_streams_reports_daemon_not_running_when_socket_missing() {
+            let socket_path = temp_socket_path("missing-socket");
+            let (mut input_writer, input_reader) = tokio::io::duplex(64);
+            input_writer
+                .write_all(&frame(b"hello imagod"))
+                .await
+                .expect("input write should succeed");
+            input_writer
+                .write_all(&STDIO_MESSAGE_TERMINATOR)
+                .await
+                .expect("terminator write should succeed");
+            input_writer
+                .shutdown()
+                .await
+                .expect("input shutdown should succeed");
+            drop(input_writer);
+
+            let output = CapturedOutput::default();
+            let err = proxy_stdio_streams(socket_path.clone(), input_reader, output)
+                .await
+                .expect_err("missing socket must fail");
+
+            assert!(
+                err.to_string()
+                    .contains("Cannot connect to the imagod daemon at")
+            );
+            assert!(
+                err.to_string()
+                    .contains(&format!("unix://{}", socket_path.display()))
+            );
+            assert!(err.to_string().contains("Is the imagod daemon running?"));
         }
 
         #[tokio::test]
