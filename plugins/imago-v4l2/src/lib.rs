@@ -1793,6 +1793,12 @@ fn retrieve_video_capture_frame(state: &VideoCaptureState) -> Result<Frame, V4l2
 }
 
 #[cfg(target_os = "linux")]
+fn cache_and_return_video_capture_frame(state: &mut VideoCaptureState, frame: Frame) -> Frame {
+    state.last_frame = Some(frame.clone());
+    frame
+}
+
+#[cfg(target_os = "linux")]
 fn read_video_capture_frame(
     state: &mut VideoCaptureState,
     device: &Arc<V4lDevice>,
@@ -1801,12 +1807,13 @@ fn read_video_capture_frame(
 ) -> Result<Frame, V4l2Error> {
     let stream = ensure_video_capture_stream(state, device, limits)?;
     let encoded = read_next_frame(stream, limits, timeout_ms)?;
-    decode_mjpeg_frame(
+    let frame = decode_mjpeg_frame(
         &encoded.bytes,
         limits,
         encoded.sequence,
         encoded.timestamp_ns,
-    )
+    )?;
+    Ok(cache_and_return_video_capture_frame(state, frame))
 }
 
 #[cfg(target_os = "linux")]
@@ -2595,6 +2602,30 @@ mod tests {
         assert_eq!(frame.timestamp_ns, cached.timestamp_ns);
         assert_eq!(frame.sequence, cached.sequence);
         assert_eq!(frame.format, cached.format);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_and_return_video_capture_frame_updates_retrieve_cache() {
+        let mut state = sample_video_capture_state(None);
+        let cached = decode_fixture_frame(RGB_JPEG_FIXTURE_BASE64);
+        let returned = cache_and_return_video_capture_frame(&mut state, cached.clone());
+        assert_eq!(returned.bytes, cached.bytes);
+        assert_eq!(returned.width_px, cached.width_px);
+        assert_eq!(returned.height_px, cached.height_px);
+        assert_eq!(returned.stride_bytes, cached.stride_bytes);
+        assert_eq!(returned.timestamp_ns, cached.timestamp_ns);
+        assert_eq!(returned.sequence, cached.sequence);
+        assert_eq!(returned.format, cached.format);
+
+        let retrieved = retrieve_video_capture_frame(&state).expect("cached frame should return");
+        assert_eq!(retrieved.bytes, cached.bytes);
+        assert_eq!(retrieved.width_px, cached.width_px);
+        assert_eq!(retrieved.height_px, cached.height_px);
+        assert_eq!(retrieved.stride_bytes, cached.stride_bytes);
+        assert_eq!(retrieved.timestamp_ns, cached.timestamp_ns);
+        assert_eq!(retrieved.sequence, cached.sequence);
+        assert_eq!(retrieved.format, cached.format);
     }
 
     #[cfg(target_os = "linux")]

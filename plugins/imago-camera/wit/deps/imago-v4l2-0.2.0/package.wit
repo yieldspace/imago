@@ -189,7 +189,7 @@ interface video-capture {
         @since(version = 0.2.0)
         set: func(property: capture-property, value: f64) -> result<bool, v4l2-error>;
 
-        /// Grab, decode, and return the next frame.
+        /// Grab, decode, cache, and return the next frame.
         @since(version = 0.2.0)
         read: func(timeout-ms: u32) -> result<frame, v4l2-error>;
 
@@ -197,7 +197,7 @@ interface video-capture {
         @since(version = 0.2.0)
         grab: func(timeout-ms: u32) -> result<bool, v4l2-error>;
 
-        /// Return the last successfully grabbed frame from the internal cache.
+        /// Return the last frame cached by `read` or `grab`.
         @since(version = 0.2.0)
         retrieve: func() -> result<frame, v4l2-error>;
 
