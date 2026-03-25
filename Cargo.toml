@@ -48,7 +48,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -115,30 +115,30 @@ toml_edit = "0.25.4"
 zune-core = "0.5.1"
 zune-jpeg = "0.5.14"
 
-imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.9.1" }
-imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.9.1" }
-imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.9.1" }
-imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.9.1" }
-imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.9.1" }
-imago-plugin-imago-v4l2 = { path = "plugins/imago-v4l2", version = "0.9.1" }
+imago-plugin-imago-admin = { path = "plugins/imago-admin", version = "0.9.2" }
+imago-plugin-imago-experimental-gpio = { path = "plugins/imago-experimental-gpio", version = "0.9.2" }
+imago-plugin-imago-experimental-i2c = { path = "plugins/imago-experimental-i2c", version = "0.9.2" }
+imago-plugin-imago-node = { path = "plugins/imago-node", version = "0.9.2" }
+imago-plugin-imago-usb = { path = "plugins/imago-usb", version = "0.9.2" }
+imago-plugin-imago-v4l2 = { path = "plugins/imago-v4l2", version = "0.9.2" }
 imago-cli = { path = "crates/imago-cli", version = "0.6.0" }
-imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.9.1" }
-imago-project-config = { path = "crates/imago-project-config", version = "0.9.1" }
-imago-protocol = { path = "crates/imago-protocol", version = "0.9.1" }
-imago-schema-gen = { path = "crates/imago-schema-gen", version = "0.9.1" }
-imagod = { path = "crates/imagod", version = "0.9.1" }
-imagod-common = { path = "crates/imagod-common", version = "0.9.1" }
-imagod-config = { path = "crates/imagod-config", version = "0.9.1" }
-imagod-control = { path = "crates/imagod-control", version = "0.9.1" }
-imagod-ipc = { path = "crates/imagod-ipc", version = "0.9.1" }
-imagod-runtime = { path = "crates/imagod-runtime", version = "0.9.1", default-features = false }
-imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap", version = "0.9.1" }
-imagod-runtime-control = { path = "crates/imagod-runtime-control", version = "0.9.1" }
-imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress", version = "0.9.1" }
-imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "0.9.1" }
-imagod-runtime-wasi-nn-cvitek = { path = "crates/imagod-runtime-wasi-nn-cvitek", version = "0.9.1" }
-imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.9.1" }
-imagod-server = { path = "crates/imagod-server", version = "0.9.1" }
+imago-plugin-macros = { path = "crates/imago-plugin-macros", version = "0.9.2" }
+imago-project-config = { path = "crates/imago-project-config", version = "0.9.2" }
+imago-protocol = { path = "crates/imago-protocol", version = "0.9.2" }
+imago-schema-gen = { path = "crates/imago-schema-gen", version = "0.9.2" }
+imagod = { path = "crates/imagod", version = "0.9.2" }
+imagod-common = { path = "crates/imagod-common", version = "0.9.2" }
+imagod-config = { path = "crates/imagod-config", version = "0.9.2" }
+imagod-control = { path = "crates/imagod-control", version = "0.9.2" }
+imagod-ipc = { path = "crates/imagod-ipc", version = "0.9.2" }
+imagod-runtime = { path = "crates/imagod-runtime", version = "0.9.2", default-features = false }
+imagod-runtime-bootstrap = { path = "crates/imagod-runtime-bootstrap", version = "0.9.2" }
+imagod-runtime-control = { path = "crates/imagod-runtime-control", version = "0.9.2" }
+imagod-runtime-ingress = { path = "crates/imagod-runtime-ingress", version = "0.9.2" }
+imagod-runtime-internal = { path = "crates/imagod-runtime-internal", version = "0.9.2" }
+imagod-runtime-wasi-nn-cvitek = { path = "crates/imagod-runtime-wasi-nn-cvitek", version = "0.9.2" }
+imagod-runtime-wasmtime = { path = "crates/imagod-runtime-wasmtime", version = "0.9.2" }
+imagod-server = { path = "crates/imagod-server", version = "0.9.2" }
 
 [workspace.metadata.prup]
 base_ref = "origin/main"
