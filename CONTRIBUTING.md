@@ -37,6 +37,14 @@ cargo test --workspace
 
 For documentation-only changes, run the checks needed to validate links, examples, and consistency in the modified docs.
 
+For `mdBook` changes, run:
+
+```bash
+mdbook build book
+```
+
+Use `mdbook serve book` for local preview while editing.
+
 ## Pull Request Requirements
 
 Pull requests must follow `.github/pull_request_template.md` and fill all required sections:

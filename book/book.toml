@@ -1,0 +1,15 @@
+[book]
+title = "imago"
+description = "mdBook entry point for the imago quickstart and documentation overview."
+src = "src"
+
+[build]
+build-dir = "../target/mdbook"
+create-missing = false
+extra-watch-dirs = ["..", "../docs"]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+additional-js = ["theme/mermaid.min.js", "theme/mermaid-init.js"]

@@ -123,6 +123,17 @@ For more sample projects, browse [examples/README.md](examples/README.md).
 | RPC control path | [docs/network-rpc.md](docs/network-rpc.md) |
 | Runnable examples | [examples/README.md](examples/README.md) |
 
+## Documentation Authoring
+
+`mdBook` sources live under [book/](book/).
+
+```bash
+cargo install mdbook mdbook-mermaid
+mdbook serve book
+```
+
+Use `mdbook build book` when you want the same documentation build step that CI runs.
+
 ## Repository Layout
 
 This repository is a Rust workspace with a few clear boundaries:
@@ -156,6 +167,7 @@ cargo doc --workspace --no-deps
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+mdbook build book
 ```
 
 ## Community
