@@ -6126,8 +6126,11 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots",
 ]
 
 [[package]]
