@@ -111,7 +111,7 @@ wit-component = "0.245.1"
 wit-parser = "0.245.1"
 web-transport-quinn = "0.11.8"
 syn = "2.0.117"
-toml_edit = "0.25.4"
+toml_edit = "0.25.8"
 zune-core = "0.5.1"
 zune-jpeg = "0.5.15"
 
