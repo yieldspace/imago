@@ -60,7 +60,7 @@ jobs:
 
       - name: Publish coverage report and PR comment
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
-        uses: getsentry/codecov-action@3d682781e1a76d1b374d035718b8937b143043d8
+        uses: getsentry/codecov-action@03112cc3b486a3397dc8d17a58680008721fc86f
         with:
           token: ${{ github.token }}
           files: lcov.info
