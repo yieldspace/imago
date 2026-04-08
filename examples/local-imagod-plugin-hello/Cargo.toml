@@ -10,4 +10,4 @@ path = "src/main.rs"
 
 [dependencies]
 wasi = "0.14.7"
-wit-bindgen = "0.54.0"
+wit-bindgen = "0.55.0"
