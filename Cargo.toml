@@ -105,7 +105,7 @@ wasmtime-wasi = "43.0.0"
 wasmtime-wasi-http = { version = "43.0.0", default-features = false, features = ["p2"] }
 wasmtime-wasi-nn = { version = "43.0.0", default-features = false }
 wasmparser = { version = "0.245.1", features = ["component-model"] }
-wat = "1.245.1"
+wat = "1.246.2"
 webpki-roots = "1.0.6"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"
