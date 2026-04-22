@@ -100,7 +100,7 @@ url = "2.5.4"
 uuid = "1.22.0"
 wasm-pkg-client = "0.15.0"
 wasm-pkg-common = "0.15.0"
-wasmtime = "43.0.0"
+wasmtime = "44.0.0"
 wasmtime-wasi = "43.0.0"
 wasmtime-wasi-http = { version = "43.0.0", default-features = false, features = ["p2"] }
 wasmtime-wasi-nn = { version = "43.0.0", default-features = false }
