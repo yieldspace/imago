@@ -85,7 +85,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup Linux cross build prerequisites
         if: runner.os == 'Linux'
@@ -237,7 +237,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Setup Linux cross build prerequisites
         if: runner.os == 'Linux'
